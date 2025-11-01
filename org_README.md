@@ -3,7 +3,7 @@
 
 |Pathtracer | Raster|
 |:------------: | :------------: |
-|![](doc/pathtrace.png) |![](doc/raster.png)|
+|![](org_doc/pathtrace.png) |![](org_doc/raster.png)|
 
 ## Overview
 
@@ -143,7 +143,7 @@ This will automatically download and integrate the required DLSS SDK. The denois
 Implements a path tracer with global illumination. 
 
 
-![](doc/pathtracer_settings.png)
+![](org_doc/pathtracer_settings.png)
 
 The options are:
 * Max Depth : number of bounces the path can do
@@ -168,32 +168,32 @@ The options are:
 * Super-Sampling: render the image 2x and blit it with linear filter.
 * Debug Method: shows information like base color, metallic, roughness, and some attributes
 
-![](doc/raster_settings.png)
+![](org_doc/raster_settings.png)
 
 Example with wireframe option turned on
 
-![](doc/wireframe.png)
+![](org_doc/wireframe.png)
 
 
 ## Features
 
 | | | 
 |--|--|
-| Showcase | ![](doc/ABeautifulGame.jpg) ![](doc/ToyCar.jpg) ![](doc/DamagedHelmet.jpg) ![](doc/DiffuseTransmissionPlant.jpg) <br> ![](doc/DiffuseTransmissionTeacup.jpg) ![](doc/AntiqueCamera.jpg)  ![](doc/BistroExterior.jpg) ![](doc/IridescentDishWithOlives.jpg) <br> ![](doc/SpecularSilkPouf.jpg) ![](doc/Sponza.jpg) ![](doc/SciFiHelmet.jpg) ![](doc/ChairDamaskPurplegold.jpg) <br> ![](doc/CarConcept.jpg) ![](doc/SunglassesKhronos.jpg)|
-| Anisotropy | ![](doc/AnisotropyBarnLamp.jpg) ![](doc/AnisotropyDiscTest.jpg) ![](doc/AnisotropyRotationTest.jpg) ![](doc/AnisotropyStrengthTest.jpg) <br> ![](doc/CompareAnisotropy.jpg)|
-| Attenuation | ![](doc/DragonAttenuation.jpg) ![](doc/AttenuationTest.jpg)|
-| Alpha Blend | ![](doc/AlphaBlendModeTest.jpg) ![](doc/CompareAlphaCoverage.jpg) |
-| Animation | ![](doc/BrainStem.jpg) ![](doc/CesiumMan.jpg) ![](doc/Fox.jpg) |
-| Clear Coat | ![](doc/ClearCoatCarPaint.jpg) ![](doc/ClearCoatTest.jpg) ![](doc/ClearcoatWicker.jpg) ![](doc/CompareClearcoat.jpg)
-| Dispersion | ![](doc/DispersionTest.jpg) ![](doc/DragonDispersion.jpg) ![](doc/CompareDispersion.jpg) |
-| IOR | ![](doc/IORTestGrid.jpg) ![](doc/CompareIor.jpg) |
-| Emissive |![](doc/EmissiveStrengthTest.jpg) ![](doc/CompareEmissiveStrength.jpg) |
-| Iridescence | ![](doc/IridescenceAbalone.jpg) ![](doc/IridescenceDielectricSpheres.jpg) ![](doc/IridescenceLamp.jpg) ![](doc/IridescenceSuzanne.jpg) |
-| Punctual | ![](doc/LightsPunctualLamp.jpg) ![](doc/light.jpg) |
-| Sheen | ![](doc/SheenChair.jpg) ![](doc/SheenCloth.jpg) ![](doc/SheenTestGrid.jpg) ![](doc/CompareSheen.jpg) |
-| Transmission | ![](doc/TransmissionRoughnessTest.jpg) ![](doc/TransmissionTest.jpg) ![](doc/TransmissionThinwallTestGrid.jpg) ![](doc/CompareTransmission.jpg) <br> ![](doc/CompareVolume.jpg) ![](doc/GlassBrokenWindow.jpg) ![](doc/MosquitoInAmber.jpg) |
-| Variant | ![](doc/MaterialsVariantsShoe_1.jpg) ![](doc/MaterialsVariantsShoe_2.jpg) ![](doc/MaterialsVariantsShoe_3.jpg) |
-| Others | ![](doc/BoxVertexColors.jpg) ![](doc/Duck.jpg) ![](doc/MandarinOrange.jpg) ![](doc/SpecularTest.jpg) ![](doc/OrientationTest.jpg) ![](doc/NegativeScaleTest.jpg) ![](doc/NormalTangentTest.jpg) ![](doc/TextureCoordinateTest.jpg) ![](doc/NormalTangentMirrorTest.jpg)  ![](doc/BarramundiFish.jpg) ![](doc/CarbonFibre.jpg) ![](doc/cornellBox.jpg) ![](doc/GlamVelvetSofa_1.jpg)  ![](doc/LightsPunctualLamp.jpg) ![](doc/MultiUVTest.jpg) ![](doc/SimpleInstancing.jpg) ![](doc/SpecGlossVsMetalRough.jpg) ![](doc/CompareBaseColor.jpg) ![](doc/CompareMetallic.jpg) ![](doc/CompareSpecular.jpg) |
+| Showcase | ![](org_doc/ABeautifulGame.jpg) ![](org_doc/ToyCar.jpg) ![](org_doc/DamagedHelmet.jpg) ![](org_doc/DiffuseTransmissionPlant.jpg) <br> ![](org_doc/DiffuseTransmissionTeacup.jpg) ![](org_doc/AntiqueCamera.jpg)  ![](org_doc/BistroExterior.jpg) ![](org_doc/IridescentDishWithOlives.jpg) <br> ![](org_doc/SpecularSilkPouf.jpg) ![](org_doc/Sponza.jpg) ![](org_doc/SciFiHelmet.jpg) ![](org_doc/ChairDamaskPurplegold.jpg) <br> ![](org_doc/CarConcept.jpg) ![](org_doc/SunglassesKhronos.jpg)|
+| Anisotropy | ![](org_doc/AnisotropyBarnLamp.jpg) ![](org_doc/AnisotropyDiscTest.jpg) ![](org_doc/AnisotropyRotationTest.jpg) ![](org_doc/AnisotropyStrengthTest.jpg) <br> ![](org_doc/CompareAnisotropy.jpg)|
+| Attenuation | ![](org_doc/DragonAttenuation.jpg) ![](org_doc/AttenuationTest.jpg)|
+| Alpha Blend | ![](org_doc/AlphaBlendModeTest.jpg) ![](org_doc/CompareAlphaCoverage.jpg) |
+| Animation | ![](org_doc/BrainStem.jpg) ![](org_doc/CesiumMan.jpg) ![](org_doc/Fox.jpg) |
+| Clear Coat | ![](org_doc/ClearCoatCarPaint.jpg) ![](org_doc/ClearCoatTest.jpg) ![](org_doc/ClearcoatWicker.jpg) ![](org_doc/CompareClearcoat.jpg)
+| Dispersion | ![](org_doc/DispersionTest.jpg) ![](org_doc/DragonDispersion.jpg) ![](org_doc/CompareDispersion.jpg) |
+| IOR | ![](org_doc/IORTestGrid.jpg) ![](org_doc/CompareIor.jpg) |
+| Emissive |![](org_doc/EmissiveStrengthTest.jpg) ![](org_doc/CompareEmissiveStrength.jpg) |
+| Iridescence | ![](org_doc/IridescenceAbalone.jpg) ![](org_doc/IridescenceDielectricSpheres.jpg) ![](org_doc/IridescenceLamp.jpg) ![](org_doc/IridescenceSuzanne.jpg) |
+| Punctual | ![](org_doc/LightsPunctualLamp.jpg) ![](org_doc/light.jpg) |
+| Sheen | ![](org_doc/SheenChair.jpg) ![](org_doc/SheenCloth.jpg) ![](org_doc/SheenTestGrid.jpg) ![](org_doc/CompareSheen.jpg) |
+| Transmission | ![](org_doc/TransmissionRoughnessTest.jpg) ![](org_doc/TransmissionTest.jpg) ![](org_doc/TransmissionThinwallTestGrid.jpg) ![](org_doc/CompareTransmission.jpg) <br> ![](org_doc/CompareVolume.jpg) ![](org_doc/GlassBrokenWindow.jpg) ![](org_doc/MosquitoInAmber.jpg) |
+| Variant | ![](org_doc/MaterialsVariantsShoe_1.jpg) ![](org_doc/MaterialsVariantsShoe_2.jpg) ![](org_doc/MaterialsVariantsShoe_3.jpg) |
+| Others | ![](org_doc/BoxVertexColors.jpg) ![](org_doc/Duck.jpg) ![](org_doc/MandarinOrange.jpg) ![](org_doc/SpecularTest.jpg) ![](org_doc/OrientationTest.jpg) ![](org_doc/NegativeScaleTest.jpg) ![](org_doc/NormalTangentTest.jpg) ![](org_doc/TextureCoordinateTest.jpg) ![](org_doc/NormalTangentMirrorTest.jpg)  ![](org_doc/BarramundiFish.jpg) ![](org_doc/CarbonFibre.jpg) ![](org_doc/cornellBox.jpg) ![](org_doc/GlamVelvetSofa_1.jpg)  ![](org_doc/LightsPunctualLamp.jpg) ![](org_doc/MultiUVTest.jpg) ![](org_doc/SimpleInstancing.jpg) ![](org_doc/SpecGlossVsMetalRough.jpg) ![](org_doc/CompareBaseColor.jpg) ![](org_doc/CompareMetallic.jpg) ![](org_doc/CompareSpecular.jpg) |
 
 
 ## Debug
@@ -202,7 +202,7 @@ There is also the ability to debug various out channels, such as:
 
 |metallic|roughness|normal|base|emissive|opacity|tangent|tex coord|
 |---|---|---|---|---|---|---|---|
-|![](doc/dbg_metallic.jpg)|![](doc/dbg_roughness.jpg)|![](doc/dbg_normal.jpg)|![](doc/dbg_base_color.jpg)|![](doc/dbg_emissive.jpg) |![](doc/dbg_opacity.jpg) |![](doc/dbg_tangent.jpg) | ![](doc/dbg_tex_coord.jpg) |
+|![](org_doc/dbg_metallic.jpg)|![](org_doc/dbg_roughness.jpg)|![](org_doc/dbg_normal.jpg)|![](org_doc/dbg_base_color.jpg)|![](org_doc/dbg_emissive.jpg) |![](org_doc/dbg_opacity.jpg) |![](org_doc/dbg_tangent.jpg) | ![](org_doc/dbg_tex_coord.jpg) |
 
 
 ## Environment
@@ -211,27 +211,27 @@ There is also the ability to debug various out channels, such as:
 
 There is a built-in Sun & Sky physical shader module.
 
-![](doc/sky_1.jpg) ![](doc/sky_2.jpg) ![](doc/sky_3.jpg)
+![](org_doc/sky_1.jpg) ![](org_doc/sky_2.jpg) ![](org_doc/sky_3.jpg)
 
 ### HDR 
 
 Lighting of the scene can come from HDRi.
 
-![](doc/hdr_1.jpg) ![](doc/hdr_2.jpg) ![](doc/hdr_3.jpg) ![](doc/hdr_4.jpg) <br> ![](doc/hdr_5.jpg) ![](doc/hdr_6.jpg) ![](doc/hdr_7.jpg) ![](doc/hdr_8.jpg)
+![](org_doc/hdr_1.jpg) ![](org_doc/hdr_2.jpg) ![](org_doc/hdr_3.jpg) ![](org_doc/hdr_4.jpg) <br> ![](org_doc/hdr_5.jpg) ![](org_doc/hdr_6.jpg) ![](org_doc/hdr_7.jpg) ![](org_doc/hdr_8.jpg)
 
 It is possible to blur HDR to various level.
 
-![](doc/hdr_1.jpg) ![](doc/hdr_blur_1.jpg) ![](doc/hdr_blur_2.jpg) ![](doc/hdr_blur_3.jpg)
+![](org_doc/hdr_1.jpg) ![](org_doc/hdr_blur_1.jpg) ![](org_doc/hdr_blur_2.jpg) ![](org_doc/hdr_blur_3.jpg)
 
 The HDR can also be rotated to get the right illumination.
 
-![](doc/hdr_1.jpg) ![](doc/hdr_rot_1.jpg)
+![](org_doc/hdr_1.jpg) ![](org_doc/hdr_rot_1.jpg)
 
 ### Background
 
 Background can be also solid color and if saved as PNG, the alpha channel is taking into account. 
 
-![](doc/background_1.jpg) ![](doc/background_2.jpg) ![](doc/background_3.png)
+![](org_doc/background_1.jpg) ![](org_doc/background_2.jpg) ![](org_doc/background_3.png)
 
 
 
@@ -239,7 +239,7 @@ Background can be also solid color and if saved as PNG, the alpha channel is tak
 
 We could not get good results without a tone mapper. This is done with a compute shader and different settings can be made.
 
-![](doc/tonemapper.png)
+![](org_doc/tonemapper.png)
 
 Multiple tonemapper are supported:
 * [Filmic](http://filmicworlds.com/blog/filmic-tonemapping-operators/)
@@ -256,11 +256,11 @@ The camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Soft
 
 Here are the default navigations:
 
-![](doc/cam_info.png)
+![](org_doc/cam_info.png)
 
 The camera information can be fine tune by editing its values.
 
-![](doc/cam_1.png)
+![](org_doc/cam_1.png)
 
 Note: **copy** will copy in text the camera in the clipboard, and pressing the **paste** button will parse the clipboard to set the camera. 
 
@@ -272,19 +272,19 @@ It is also possible to save and restore multiple cameras in the second tab. Pres
 
 **Note**: If the glTF scene contains multiple cameras, they will be showing here. 
 
-![](doc/cam_2.png)
+![](org_doc/cam_2.png)
 
 ### Other modes 
 
 Other navigation modes also exist, like fly, where the `w`, `a`, `s`, `d` keys also moves the camera. 
 
-![](doc/cam_3.png)
+![](org_doc/cam_3.png)
 
 ## Depth-of-Field
 
 Depth of field works only for ray tracing and settings can be found under the `RendererPathtracer>Depth-of-Field`
 
-![](doc/dof_1.jpg) ![](doc/dof_2.jpg)
+![](org_doc/dof_1.jpg) ![](org_doc/dof_2.jpg)
 
 
 ----
@@ -344,7 +344,7 @@ The GLTF scene is loaded using tinygltf and then converted to a Vulkan version. 
 
 The scene is composed of nodes, where each node can have children and each node can have a mesh. The mesh is composed of primitives, where each primitive has a material. The material is composed of textures and parameters. However, none of this is directly used in the rendering, as we are using a simplified version of the scene.
 
-![](doc/scene_graph.png)
+![](org_doc/scene_graph.png)
 
 Once the scene has been loaded, we proceed to parse it in order to collect the RenderNodes and RenderPrimitives. The RenderNode represents the flattened version of the tree of nodes, where the world transformation matrix and the material are stored. The RenderPrimitive, in contrast, represents the unique version of the primitive, where the index and vertex buffers are stored.
 
@@ -355,7 +355,7 @@ RenderNodes represent the elements to be rendered, while RenderPrimitives serve 
 If there is animation in the scene, a new section will appear under the Scene section.
 It allows to play/pause, step and reset the animation, as well as changing its speed.
 
-![](doc/animation_controls.png)
+![](org_doc/animation_controls.png)
 
 
 ### Multiple Scene 
@@ -363,7 +363,7 @@ It allows to play/pause, step and reset the animation, as well as changing its s
 If there are multiple scenes,  a new section will appear under the Scene section.
 It will show all the scenes and their name. Clicking on a scene name will switch to the scene.
 
-![](doc/multiple_scenes.png)
+![](org_doc/multiple_scenes.png)
 
 
 ### Material Variant
@@ -371,12 +371,12 @@ It will show all the scenes and their name. Clicking on a scene name will switch
 If there are multiple material variant, a new section will appear under the Scene section.
 It will show all the material variant and their name. Clicking on a variant name will apply it on the models.
 
-![](doc/material_variant.png)
+![](org_doc/material_variant.png)
 
 
 ### Scene Graph UI
 
-![](doc/scene_graph_ui.png)
+![](org_doc/scene_graph_ui.png)
 
 It is possible to visualize the scene hierarchy, to select node, to modify their transformation and their material, to some level.
 
@@ -395,19 +395,19 @@ The application comes with a few tools to help debug and visualize the scene.
 
 The profiler is a tool that allows to measure the time spent on the GPU. It is possible to measure the time spent on the different stages of the rendering, like the path tracing, the rasterization, the tonemapping, etc.
 
-![](doc/profiler.png)
+![](org_doc/profiler.png)
 
 ### Logger
 
 The logger is a tool that allows to see the log information. It is possible to filter the log information by selecting the level of the log.
 
-![](doc/logger.png)
+![](org_doc/logger.png)
 
 ### Nvml
 
 The Nvml is a tool that allows to see the status of the GPU. It is possible to see the temperature, the power, the memory usage, etc.
 
-![](doc/nvml.png)
+![](org_doc/nvml.png)
 
 ### Tangent Space
 

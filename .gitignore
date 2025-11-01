@@ -24,3 +24,7 @@ nvpro_core2/
 # Downloaded Resources
 # =============================================================================
 _downloaded_resources/
+
+.claude/
+CLAUDE.md
+
