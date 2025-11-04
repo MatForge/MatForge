@@ -12,7 +12,8 @@ _autogen/
 _bin/                 
 _install/             
 build/                
-spv/                  
+spv/
+others/                  
 
 # =============================================================================
 # Project-Specific Exclusions

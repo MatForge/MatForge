@@ -1,10 +1,11 @@
 # RMIP Implementation Plan
 ## MatForge Project - CIS 5650 Fall 2025
 
-**Implementation Team**: 2 Developers dedicated to RMIP
-**Timeline**: November 1 - December 8, 2025 (5.5 weeks)
+**Implementation Team**: Person A (Single Developer - RMIP Specialist)
+**Timeline**: November 3 - December 7, 2025 (5 weeks)
 **Target Platform**: NVIDIA RTX 4070 (Vulkan 1.3 with ray tracing)
 **Base Framework**: vk_gltf_renderer (nvpro-samples)
+**Team Context**: Part of 3-person team (Person A: RMIP, Person B: Quad LDS, Person C: Bounded VNDF + Fast-MSX)
 
 ---
 
@@ -24,526 +25,409 @@
 
 ## Team Structure
 
-### Developer Roles
+### Developer Role: Person A - RMIP Specialist
 
-**Developer A: "Data Structures Lead"**
-- **Primary Focus**: CPU-side infrastructure
-- **Core Responsibilities**:
+**Full-Stack Responsibility**: Both CPU and GPU implementation
+- **CPU-Side Infrastructure**:
   - RMIP data structure builder
   - glTF extension handling
   - Resource management (Vulkan buffers, textures)
   - BLAS/TLAS modification for AABB geometry
   - Performance profiling tools
 
-**Developer B: "Shader Lead"**
-- **Primary Focus**: GPU-side implementation
+- **GPU-Side Implementation**:
   - RMIP traversal algorithm
   - Custom intersection shader
   - Inverse displacement mapping
   - Texel marching
   - Shader debugging and optimization
 
-**Shared Responsibilities**:
-- Code reviews (review each other's work daily)
-- Integration testing (joint debugging sessions)
-- Documentation (document as you go)
-- Milestone presentations (split slides 50/50)
+**Team Integration Points**:
+- Coordinate with Person B (Quad LDS) for random number generation integration
+- Coordinate with Person C (Bounded VNDF + Fast-MSX) for material system integration
+- Participate in team milestones and presentations
 
 ### Communication Protocol
 
-**Daily Standups** (15 minutes, every morning):
-- What did I complete yesterday?
-- What will I work on today?
-- Any blockers or dependencies?
+**Team Standups** (15 minutes, 3× per week - Mon/Wed/Fri):
+- Update on RMIP progress
+- Report blockers or dependencies on other team members
+- Coordinate integration points
 
-**Integration Sessions** (2 hours, twice per week):
-- Tuesday: Mid-week integration check
-- Friday: End-of-week integration and testing
+**Team Integration Sessions** (2 hours, Tuesday evenings):
+- Demo RMIP progress to team
+- Test integration with Quad LDS sampling
+- Coordinate material library creation
 
 **Code Reviews**:
-- All PRs require review from partner before merge
-- Review within 24 hours
-- Use GitHub PR comments for async discussion
+- Request reviews from Person B or C for major components
+- Provide reviews for teammates' code
+- Use GitHub PR comments for documentation
 
 ---
 
 ## Work Division Strategy
 
-### Parallel Development Approach
+### Sequential Full-Stack Development Approach
 
-**Weeks 1-2**: Build foundations independently
-- Developer A: RMIP builder and resource setup
-- Developer B: Shader utilities and test harness
-- **Sync Point**: End of Week 1 (basic data structures ready)
+**Week 1 (Nov 3-9)**: CPU Infrastructure Foundation
+- RMIP data structure builder (C++)
+- Resource management and Vulkan buffers
+- Initial testing and validation
+- **Checkpoint**: RMIP builder working, data on GPU
 
-**Weeks 3-4**: Integration and iteration
-- Joint debugging sessions
-- A handles CPU-GPU data flow
-- B handles shader-side traversal
-- **Sync Point**: End of Week 3 (first full path trace)
+**Week 2 (Nov 10-16)**: GPU Shader Foundation
+- Custom intersection shader skeleton
+- Inverse displacement mapping
+- Ray-triangle utilities
+- **Checkpoint**: Basic shader compiling, inverse mapping working
 
-**Week 5**: Optimization and polish
-- A: Performance profiling and memory optimization
-- B: Shader optimization and quality tuning
-- **Sync Point**: Daily integration
+**Week 3 (Nov 17-23)**: Core Algorithm Integration
+- RMIP traversal algorithm
+- BLAS/AABB setup
+- SBT configuration
+- First end-to-end intersection test
+- **Milestone 2** (Nov 24): Full pipeline working
 
-### Dependency Graph
+**Week 4 (Nov 24-30)**: Texel Marching & Optimization
+- Texel marching implementation
+- Performance profiling and optimization
+- Multi-material support
+- **Milestone 3** (Dec 1): 3+ materials, performance targets met
+
+**Week 5 (Dec 1-7)**: Polish & Documentation
+- Code cleanup and documentation
+- Material library creation (coordinate with team)
+- Final presentation preparation
+- **Final** (Dec 7): Submission ready
+
+### Development Flow
 
 ```
-[Developer A]                           [Developer B]
-    |                                        |
-    v                                        v
-RMIP Builder ──────────────────────→  RMIP Shader Interface
-    |                                        |
-    v                                        v
-Resource Management ───────────────→  Inverse Mapping Utils
-    |                                        |
-    v                                        v
-BLAS/AABB Setup ───────────────────→  Custom Intersection
-    |                                        |
-    v                                        v
-    └────────→ INTEGRATION ←─────────────────┘
-                    |
-                    v
-            Texel Marching & Optimization
-                    |
-                    v
-            Testing & Benchmarking
+Week 1: CPU Infrastructure
+    ↓
+RMIP Builder → Vulkan Resources → GPU Upload
+    ↓
+Week 2: GPU Shaders
+    ↓
+Intersection Shader → Inverse Mapping → Ray Utilities
+    ↓
+Week 3: Integration
+    ↓
+RMIP Traversal → BLAS/SBT → First Intersection
+    ↓
+Week 4: Optimization
+    ↓
+Texel Marching → Performance Tuning → Multi-Material
+    ↓
+Week 5: Finalization
+    ↓
+Documentation → Material Library → Submission
 ```
 
 ---
 
 ## Development Phases
 
-### Phase 1: Foundation (Week 1: Nov 1-8)
-**Goal**: Build RMIP data structure and basic shader infrastructure
+### Phase 1: CPU Infrastructure Foundation (Week 1: Nov 3-9)
+**Goal**: Build RMIP data structure and resource management
 
-**Developer A Tasks**:
-- [x] Environment setup and build verification
-- [ ] RMIP data structure design (header file)
-- [ ] Basic RMIP builder (min-max pyramid)
+**Tasks**:
+- [x] Environment setup and build verification (Nov 1)
+- [ ] RMIP data structure design (`src/rmip_builder.hpp`)
+- [ ] Basic RMIP builder implementation (min-max pyramid)
 - [ ] Unit tests for RMIP builder
+- [ ] Vulkan buffer creation for RMIP data
+- [ ] GPU upload and validation
 
-**Developer B Tasks**:
-- [x] Environment setup and build verification
-- [ ] Shader stub creation (intersection shader skeleton)
-- [ ] Ray-triangle intersection utilities
-- [ ] Shader test harness (standalone test)
-
-**Milestone 1 Prep** (Due Nov 12):
-- [ ] RMIP builder working for simple 256×256 test texture
-- [ ] Custom intersection shader compiling and loading
-- [ ] Basic ray-prism intersection test passing
+**Checkpoint** (End of Week 1):
+- [ ] RMIP builder working for 256×256 test texture
+- [ ] RMIP data successfully uploaded to GPU
+- [ ] CPU-side query function working
 
 ---
 
-### Phase 2: Core Algorithm (Week 2-3: Nov 9-22)
-**Goal**: Implement full RMIP traversal algorithm
+### Phase 2: GPU Shader Foundation (Week 2: Nov 10-16)
+**Goal**: Implement shader infrastructure and inverse mapping
 
-**Developer A Tasks**:
-- [ ] glTF extension parser for displacement
-- [ ] Vulkan buffer creation for RMIP data
+**Tasks**:
+- [ ] Create `shaders/rmip_intersection.slang` skeleton
+- [ ] Create `shaders/rmip_common.h.slang` utilities
+- [ ] Implement ray-triangle intersection (object space)
+- [ ] Implement barycentric coordinate computation
+- [ ] Implement triangle interpolation functions
+- [ ] Implement inverse displacement mapping (Newton solver)
+- [ ] Custom intersection shader API integration
+
+**Milestone 1** (Nov 12):
+- [ ] Present RMIP foundation work to team
+- [ ] Demo: RMIP data visualization
+- [ ] Custom intersection shader compiling
+
+**Checkpoint** (End of Week 2):
+- [ ] Inverse displacement mapping working
+- [ ] Shader utilities tested and validated
+- [ ] Ready for full traversal integration
+
+---
+
+### Phase 3: Core Traversal & Integration (Week 3: Nov 17-23)
+**Goal**: Implement full RMIP traversal and first intersection
+
+**Tasks**:
+- [ ] RMIP query function (shader-side rectangular region lookup)
+- [ ] 3D bounding box computation from displacement bounds
+- [ ] Hierarchical traversal loop (stack-based)
 - [ ] BLAS modification (triangles → AABBs)
 - [ ] SBT setup for custom intersection shader
+- [ ] glTF extension parser for displacement
+- [ ] First end-to-end intersection test
 
-**Developer B Tasks**:
-- [ ] Inverse displacement mapping implementation
-- [ ] RMIP query function (rectangular region lookup)
-- [ ] 3D bounding box computation
-- [ ] Hierarchical traversal loop
-
-**Integration Checkpoint** (End of Week 2):
-- [ ] First successful RMIP intersection (even if slow)
-- [ ] Displaced plane renders correctly
-- [ ] Normal and UV correctly computed at hit point
+**Milestone 2** (Nov 24):
+- [ ] Full RMIP pipeline working (builder → traversal → intersection)
+- [ ] At least 2 test scenes with displacement
+- [ ] Performance comparison vs. baseline
 
 ---
 
-### Phase 3: Texel Marching (Week 3: Nov 16-22)
-**Goal**: Implement efficient texel marching for final intersection
+### Phase 4: Texel Marching & Optimization (Week 4: Nov 24-30)
+**Goal**: Implement texel marching and performance tuning
 
-**Developer A Tasks**:
-- [ ] Texture coordinate tiling support
-- [ ] Multi-material scene support
-- [ ] Memory optimization (RMIP compression)
-
-**Developer B Tasks**:
+**Tasks**:
 - [ ] Texel marching algorithm
 - [ ] Implicit ray projection form
 - [ ] Turning point computation
 - [ ] Front-to-back traversal ordering
-
-**Milestone 2 Prep** (Due Nov 24):
-- [ ] Full RMIP pipeline working (builder → traversal → intersection)
-- [ ] At least 2 test scenes with displacement
-- [ ] Performance comparison vs. baseline (tessellation)
-
----
-
-### Phase 4: Optimization (Week 4-5: Nov 23-Dec 6)
-**Goal**: Performance tuning and quality improvements
-
-**Developer A Tasks**:
 - [ ] GPU profiling integration (Nsight)
-- [ ] Memory bandwidth optimization
-- [ ] RMIP resolution tuning
-- [ ] Multi-bounce ray tracing integration
-
-**Developer B Tasks**:
 - [ ] Shader divergence reduction
-- [ ] Cache-friendly traversal order
 - [ ] Adaptive marching threshold
-- [ ] Quality vs. performance modes
+- [ ] Texture coordinate tiling support
+- [ ] Multi-material scene support
+- [ ] Memory optimization (RMIP compression)
 
-**Milestone 3 Prep** (Due Dec 1):
-- [ ] 5+ materials with RMIP displacement
+**Milestone 3** (Dec 1):
+- [ ] 3+ materials with RMIP displacement
 - [ ] Performance targets met (30+ FPS at 1080p)
 - [ ] Comparison modes (RMIP on/off toggle)
 
 ---
 
-### Phase 5: Polish & Documentation (Week 5-6: Nov 30-Dec 8)
+### Phase 5: Polish & Documentation (Week 5: Dec 1-7)
 **Goal**: Finalize for submission
 
-**Developer A Tasks**:
-- [ ] Code cleanup and documentation
-- [ ] Build instructions and README
-- [ ] Performance data collection
-- [ ] Final presentation slides (implementation sections)
-
-**Developer B Tasks**:
-- [ ] Shader code documentation
+**Tasks**:
+- [ ] Code cleanup and comprehensive documentation
+- [ ] Build instructions and README updates
+- [ ] Shader code comments and documentation
 - [ ] Known limitations documentation
+- [ ] Performance data collection and analysis
 - [ ] Visual quality comparison renders
-- [ ] Final presentation slides (algorithm sections)
+- [ ] Material library coordination with team
+- [ ] Final presentation slides (RMIP sections)
+- [ ] Demo video recording (RMIP portions)
 
-**Final Deliverable** (Due Dec 7):
-- [ ] All code merged and tested
-- [ ] Demo video recorded
-- [ ] Presentation materials complete
+**Final Deliverable** (Dec 7):
+- [ ] All RMIP code merged and tested
+- [ ] RMIP documentation complete
+- [ ] Presentation materials ready
 
 ---
 
 ## Week-by-Week Schedule
 
-### Week 1: Nov 1-8 (Foundation)
+### Week 1: Nov 3-9 (CPU Infrastructure)
 
-#### Developer A Daily Schedule
+**Goal**: Build RMIP data structure and resource management
 
-**Friday Nov 1** (Today):
-- [x] Clone repository, verify build
-- [x] Read RMIP paper and analysis
+**Monday Nov 4**:
 - [ ] Create `src/rmip_builder.hpp` with data structure definitions
 - [ ] Stub out `RMIPBuilder` class interface
+- [ ] Design RMIP hierarchy format
 
-**Saturday Nov 2**:
+**Tuesday Nov 5**:
 - [ ] Implement basic min-max mipmap builder (square regions only)
 - [ ] Test with 256×256 test texture (checkerboard pattern)
 - [ ] Verify min/max values are correct (unit test)
 
-**Sunday Nov 3**:
+**Wednesday Nov 6** (Team Integration):
 - [ ] Extend to rectangular regions (power-of-two dimensions)
 - [ ] Implement RMIP query function (CPU-side test)
-- [ ] Test query correctness with known regions
+- [ ] Present progress to team
 
-**Monday Nov 4**:
+**Thursday Nov 7**:
 - [ ] Create Vulkan buffer for RMIP data
 - [ ] Upload RMIP data to GPU
 - [ ] Bind RMIP buffer to shader descriptors
 
-**Tuesday Nov 5** (Integration Session):
-- [ ] Review Developer B's shader code
-- [ ] Test CPU-GPU data transfer
-- [ ] Debug any issues together
-
-**Wednesday Nov 6**:
+**Friday Nov 8**:
 - [ ] Implement glTF displacement texture loading
 - [ ] Hook RMIP builder into scene loading pipeline
-- [ ] Test with DamagedHelmet model + custom displacement
+- [ ] Test with sample model + custom displacement
 
-**Thursday Nov 7**:
-- [ ] Create AABB geometry for displaced primitives
-- [ ] Compute loose bounds (base triangle + max displacement)
-- [ ] Verify AABB bounds in validation layers
-
-**Friday Nov 8** (End of Week 1):
-- [ ] Code review with Developer B
-- [ ] Integration testing
+**Saturday Nov 9**:
 - [ ] Document Week 1 progress
-- **Deliverable**: RMIP builder working, data on GPU
+- [ ] Code cleanup and comments
+- **Checkpoint**: RMIP builder working, data on GPU
 
 ---
 
-#### Developer B Daily Schedule
+### Week 2: Nov 10-16 (GPU Shaders & Inverse Mapping)
 
-**Friday Nov 1** (Today):
-- [x] Clone repository, verify build
-- [x] Read RMIP paper and analysis
+**Goal**: Implement shader infrastructure and inverse displacement
+
+**Sunday Nov 10**:
 - [ ] Create `shaders/rmip_intersection.slang` skeleton
 - [ ] Create `shaders/rmip_common.h.slang` for utilities
-
-**Saturday Nov 2**:
 - [ ] Implement basic ray-triangle intersection (object space)
-- [ ] Implement barycentric coordinate computation
-- [ ] Test with simple triangle (CPU reference test)
-
-**Sunday Nov 3**:
-- [ ] Implement triangle interpolation functions
-  - `interpolate_position(Triangle, uv)`
-  - `interpolate_normal(Triangle, uv)`
-  - `interpolate_uv(Triangle, uv)`
-- [ ] Unit test interpolation (compare with CPU)
-
-**Monday Nov 4**:
-- [ ] Study custom intersection shader API
-  - `ObjectRayOrigin()`, `ObjectRayDirection()`
-  - `ReportHit()`, `HitAttributes`
-- [ ] Create minimal intersection shader (always reports hit at t=1.0)
-- [ ] Test that shader compiles and loads
-
-**Tuesday Nov 5** (Integration Session):
-- [ ] Review Developer A's RMIP builder code
-- [ ] Get RMIP data format specification
-- [ ] Test shader descriptor bindings
-
-**Wednesday Nov 6**:
-- [ ] Implement ray-prism intersection
-- [ ] Compute entry/exit points on base triangle
-- [ ] Visualize intersection intervals (debug render)
-
-**Thursday Nov 7**:
-- [ ] Begin inverse displacement mapping
-- [ ] Implement initial guess (project to base plane)
-- [ ] Implement 1 iteration of Newton solver
-
-**Friday Nov 8** (End of Week 1):
-- [ ] Code review with Developer A
-- [ ] Integration testing
-- [ ] Document Week 1 progress
-- **Deliverable**: Custom intersection shader working (basic)
-
----
-
-### Week 2: Nov 9-15 (Core Traversal)
-
-#### Developer A Daily Schedule
-
-**Saturday Nov 9**:
-- [ ] Implement SBT setup for custom intersection shader
-- [ ] Create hit group with intersection shader
-- [ ] Test ray tracing pipeline invokes shader
-
-**Sunday Nov 10**:
-- [ ] Modify BLAS creation for AABB geometry
-- [ ] Handle mixed geometry (triangular + AABB)
-- [ ] Verify acceleration structure builds correctly
 
 **Monday Nov 11**:
-- [ ] Implement glTF `MATFORGE_displacement` extension parser
-- [ ] Load displacement texture and call RMIP builder
-- [ ] Attach RMIP buffer to material
+- [ ] Implement barycentric coordinate computation
+- [ ] Implement triangle interpolation functions
+- [ ] Unit test interpolation functions
 
-**Tuesday Nov 12** (Integration + Milestone 1):
-- [ ] **MILESTONE 1 PRESENTATION**
-- [ ] Integration testing with Developer B
-- [ ] Debug RMIP query binding issues
+**Tuesday Nov 12** (Milestone 1 + Team Integration):
+- [ ] **MILESTONE 1 PRESENTATION** - Demo RMIP builder and initial shaders
+- [ ] Coordinate with Person B (Quad LDS) on sampling integration
+- [ ] Coordinate with Person C (Materials) on BRDF requirements
 
 **Wednesday Nov 13**:
-- [ ] Implement tiling support (repeat displacement map)
-- [ ] Handle texture coordinate wrapping
-- [ ] Test tiled displacement (brick pattern)
+- [ ] Study custom intersection shader API
+- [ ] Create minimal intersection shader (basic hit reporting)
+- [ ] Test that shader compiles and loads
 
 **Thursday Nov 14**:
-- [ ] Create debug visualization (AABB bounds)
-- [ ] Add UI toggle for RMIP on/off
-- [ ] Test toggling between RMIP and baseline
+- [ ] Begin inverse displacement mapping
+- [ ] Implement initial guess (project to base plane)
+- [ ] Implement Newton iteration (1-2 iterations first)
 
-**Friday Nov 15** (End of Week 2):
-- [ ] Code review
-- [ ] Performance profiling setup
-- **Deliverable**: Full GPU pipeline ready for traversal
+**Friday Nov 15**:
+- [ ] Complete inverse displacement (full Newton solver)
+- [ ] Test convergence on various triangle shapes
+- [ ] Handle edge cases (ray misses, convergence failure)
+
+**Saturday Nov 16**:
+- [ ] Document Week 2 progress
+- [ ] Code cleanup and shader comments
+- **Checkpoint**: Inverse displacement working, shaders ready for traversal
 
 ---
 
-#### Developer B Daily Schedule
+### Week 3: Nov 17-23 (Core Traversal & Integration)
 
-**Saturday Nov 9**:
-- [ ] Complete inverse displacement (full Newton iteration)
-- [ ] Test convergence on curved triangles
-- [ ] Handle edge cases (ray misses triangle)
+**Goal**: Implement full RMIP traversal and first intersection
 
-**Sunday Nov 10**:
+**Sunday Nov 17**:
 - [ ] Implement RMIP query function in shader
 - [ ] Sample RMIP buffer for rectangular region
 - [ ] Return min/max displacement
 
-**Monday Nov 11**:
+**Monday Nov 18**:
 - [ ] Implement 3D bounding box computation
-  - Sample base triangle at UV rectangle corners
-  - Expand/contract by displacement bounds
-- [ ] Test AABB correctness (visualize in CPU)
+- [ ] Sample base triangle at UV rectangle corners
+- [ ] Expand/contract by displacement bounds
 
-**Tuesday Nov 12** (Integration + Milestone 1):
-- [ ] **MILESTONE 1 PRESENTATION**
-- [ ] Integration with Developer A's pipeline
-- [ ] First end-to-end test (may be slow)
-
-**Wednesday Nov 13**:
-- [ ] Implement 2D bound subdivision
-- [ ] Find longest axis, compute split point
-- [ ] Test split balancing (should be ~50/50)
-
-**Thursday Nov 14**:
-- [ ] Implement hierarchical traversal loop
-- [ ] Stack management (LIFO, front-to-back)
-- [ ] Early termination on first hit
-
-**Friday Nov 15** (End of Week 2):
-- [ ] Code review
-- [ ] Performance profiling (iteration count)
-- **Deliverable**: RMIP traversal working (may be slow)
-
----
-
-### Week 3: Nov 16-22 (Texel Marching & Optimization)
-
-#### Developer A Daily Schedule
-
-**Saturday Nov 16**:
-- [ ] Implement RMIP compression (lower resolution)
-- [ ] Test memory savings vs. quality trade-off
-- [ ] Document compression parameters
-
-**Sunday Nov 17**:
-- [ ] Add multiple displacement materials to test scene
-- [ ] Create material library loader
-- [ ] Test scene with 3+ displaced objects
-
-**Monday Nov 18**:
-- [ ] Integrate with path tracer BSDF sampling
-- [ ] Ensure hit state is computed correctly
-- [ ] Test with global illumination (multi-bounce)
-
-**Tuesday Nov 19** (Integration Session):
-- [ ] Debug texel marching issues with Developer B
-- [ ] Performance analysis (where is time spent?)
-- [ ] Plan optimization strategy
+**Tuesday Nov 19** (Team Integration):
+- [ ] Implement 2D bound subdivision (split along longer axis)
+- [ ] Implement hierarchical traversal loop (stack-based)
+- [ ] Test with team's Quad LDS integration
 
 **Wednesday Nov 20**:
-- [ ] Implement adaptive RMIP resolution
-- [ ] Higher resolution for close-up, lower for distance
-- [ ] Test LOD switching
+- [ ] Modify BLAS creation for AABB geometry
+- [ ] Handle mixed geometry (triangular + AABB)
+- [ ] Verify acceleration structure builds correctly
 
 **Thursday Nov 21**:
-- [ ] Collect performance data for milestone
-- [ ] Create comparison scenes (RMIP vs. baseline)
-- [ ] Prepare Milestone 2 slides
+- [ ] Implement SBT setup for custom intersection shader
+- [ ] Create hit group with intersection shader
+- [ ] Test ray tracing pipeline invokes shader
 
-**Friday Nov 22** (End of Week 3):
-- [ ] Code review and integration
-- **Deliverable**: 3+ materials, performance data
-
----
-
-#### Developer B Daily Schedule
-
-**Saturday Nov 16**:
-- [ ] Implement implicit ray projection form
-  - `ψ(u,v) = det(P(u,v) - O, N(u,v), D)`
-- [ ] Test zero-crossing detection
-
-**Sunday Nov 17**:
-- [ ] Implement turning point computation
-  - Solve `∂ψ/∂u = 0` and `∂ψ/∂v = 0`
-- [ ] Split initial ray projection at turning points
-
-**Monday Nov 18**:
-- [ ] Implement texel marching algorithm
-- [ ] Determine ray exit edge per texel
-- [ ] March through texels until hit or exit
-
-**Tuesday Nov 19** (Integration Session):
-- [ ] Debug texel marching with Developer A
-- [ ] Test different marching thresholds
-- [ ] Analyze shader performance (Nsight)
-
-**Wednesday Nov 20**:
-- [ ] Optimize traversal (reduce divergence)
-- [ ] Test different stack sizes
-- [ ] Implement adaptive traversal depth
-
-**Thursday Nov 21**:
-- [ ] Quality tuning (marching step size)
-- [ ] Test edge cases (grazing angles, backfaces)
-- [ ] Prepare Milestone 2 demo scenes
-
-**Friday Nov 22** (End of Week 3):
-- [ ] Code review and integration
-- **Deliverable**: Texel marching working, quality improved
-
----
-
-### Week 4: Nov 23-29 (Performance & Polish)
+**Friday Nov 22**:
+- [ ] First end-to-end intersection test
+- [ ] Debug intersection issues
+- [ ] Verify displaced surface is visible
 
 **Saturday Nov 23**:
-- [ ] Joint debugging session (both developers)
-- [ ] Fix any critical bugs
+- [ ] Prepare Milestone 2 demo and slides
+- [ ] Document Week 3 progress
+- **Deliverable**: First successful RMIP intersection
+
+---
+
+### Week 4: Nov 24-30 (Texel Marching & Optimization)
+
+**Goal**: Implement texel marching and performance tuning
 
 **Sunday Nov 24**:
 - [ ] **MILESTONE 2 PRESENTATION**
-- [ ] Plan Week 4 optimization priorities
+- [ ] Implement implicit ray projection form
+- [ ] Test zero-crossing detection
 
 **Monday Nov 25**:
-- **Developer A**: Memory bandwidth profiling
-- **Developer B**: Shader occupancy analysis
+- [ ] Implement turning point computation
+- [ ] Split initial ray projection at turning points
+- [ ] Implement texel marching algorithm
 
-**Tuesday Nov 26** (Integration Session):
-- [ ] Implement agreed optimizations
-- [ ] A/B test performance improvements
+**Tuesday Nov 26** (Team Integration):
+- [ ] Determine ray exit edge per texel
+- [ ] March through texels until hit or exit
+- [ ] Test with team's material system
 
-**Wednesday Nov 27** (Thanksgiving):
-- [ ] (Light work) Documentation and cleanup
+**Wednesday Nov 27** (Thanksgiving - Light Work):
+- [ ] GPU profiling integration (Nsight)
+- [ ] Analyze shader performance
+- [ ] Document optimization opportunities
 
 **Thursday Nov 28** (Thanksgiving):
 - [ ] (Off day)
 
 **Friday Nov 29**:
-- [ ] Integration and testing
-- [ ] Prepare for Milestone 3
+- [ ] Optimize traversal (reduce divergence)
+- [ ] Implement adaptive marching threshold
+- [ ] Test different stack sizes
+
+**Saturday Nov 30**:
+- [ ] Memory bandwidth optimization
+- [ ] Texture coordinate tiling support
+- [ ] Multi-material scene support
+- **Deliverable**: Texel marching working, performance improved
 
 ---
 
-### Week 5: Nov 30-Dec 6 (Final Polish)
+### Week 5: Dec 1-7 (Polish & Documentation)
+
+**Goal**: Finalize for submission
 
 **Sunday Dec 1**:
 - [ ] **MILESTONE 3 PRESENTATION**
-- [ ] Final bug list prioritization
+- [ ] Prepare Milestone 3 demo: 3+ materials
 
 **Monday Dec 2**:
-- **Developer A**: Build instructions and setup documentation
-- **Developer B**: Algorithm documentation and comments
+- [ ] Code cleanup and comprehensive documentation
+- [ ] Shader code comments and explanations
+- [ ] Known limitations documentation
 
-**Tuesday Dec 3** (Integration Session):
-- [ ] Final code review (all code)
-- [ ] Merge all feature branches
+**Tuesday Dec 3** (Team Integration):
+- [ ] Material library coordination with team
+- [ ] Test integration with Bounded VNDF and Fast-MSX
+- [ ] Final code review with team
 
 **Wednesday Dec 4**:
-- [ ] Demo video planning and recording
-- [ ] Screenshot collection
+- [ ] Build instructions and README updates
+- [ ] Performance data collection and analysis
+- [ ] Create comparison scenes (RMIP vs. baseline)
 
 **Thursday Dec 5**:
-- [ ] Final presentation slide creation
-- [ ] Practice presentation
+- [ ] Demo video recording (RMIP portions)
+- [ ] Screenshot collection
+- [ ] Visual quality comparison renders
 
 **Friday Dec 6**:
+- [ ] Final presentation slides (RMIP sections)
+- [ ] Practice presentation with team
 - [ ] Final testing and validation
-- [ ] Package submission materials
-
----
-
-### Week 6: Dec 7-8 (Submission)
 
 **Saturday Dec 7**:
+- [ ] Package submission materials
 - [ ] **FINAL PROJECT DUE (end of day)**
 - [ ] Submit all materials
 
@@ -555,7 +439,7 @@ BLAS/AABB Setup ───────────────────→  Cu
 
 ## Detailed Task Breakdown
 
-### Task 1: RMIP Data Structure Builder (Developer A)
+### Task 1: RMIP Data Structure Builder (CPU-Side)
 
 **File**: `src/rmip_builder.hpp`, `src/rmip_builder.cpp`
 
@@ -607,7 +491,7 @@ public:
 
 ---
 
-### Task 2: Inverse Displacement Mapping (Developer B)
+### Task 2: Inverse Displacement Mapping (GPU-Side)
 
 **File**: `shaders/rmip_common.h.slang`
 
@@ -700,7 +584,7 @@ float2 inverseDisplacement(float3 worldPos, Triangle tri, Texture2D<float> dispM
 
 ---
 
-### Task 3: RMIP Traversal (Developer B)
+### Task 3: RMIP Traversal (GPU-Side)
 
 **File**: `shaders/rmip_intersection.slang`
 
@@ -833,7 +717,7 @@ HitInfo traverseRMIP(
 
 ---
 
-### Task 4: Texel Marching (Developer B)
+### Task 4: Texel Marching (GPU-Side)
 
 **File**: `shaders/rmip_intersection.slang`
 
@@ -915,7 +799,7 @@ HitInfo texelMarch(
 
 ---
 
-### Task 5: BLAS/SBT Setup (Developer A)
+### Task 5: BLAS/SBT Setup (CPU-Side)
 
 **File**: `src/renderer_pathtracer.cpp`
 
@@ -1000,16 +884,16 @@ void PathTracer::createShaderBindingTable() {
 
 ## Integration Checkpoints
 
-### Checkpoint 1: Data Flow Validation (End of Week 1)
+### Checkpoint 1: Data Flow Validation (End of Week 1 - Nov 9)
 
 **Test**: Verify CPU → GPU data transfer
 
 **Steps**:
-1. Developer A: Build RMIP for 256×256 checkerboard
-2. Developer A: Upload to GPU buffer
-3. Developer B: Create test shader that samples RMIP
-4. Developer B: Visualize RMIP min/max as color (red=min, green=max)
-5. Both: Verify output image looks correct
+1. Build RMIP for 256×256 checkerboard pattern
+2. Upload RMIP data to GPU buffer
+3. Create test shader that samples RMIP
+4. Visualize RMIP min/max as color (red=min, green=max)
+5. Verify output image looks correct
 
 **Success Criteria**:
 - [ ] RMIP data uploads correctly (no corruption)
@@ -1018,7 +902,28 @@ void PathTracer::createShaderBindingTable() {
 
 ---
 
-### Checkpoint 2: First Intersection (Mid Week 2)
+### Checkpoint 2: Inverse Mapping Working (End of Week 2 - Nov 16)
+
+**Test**: Verify inverse displacement mapping converges
+
+**Setup**:
+- Simple test triangle with known displacement
+- Test points at various 3D positions
+
+**Steps**:
+1. Implement full Newton iteration (5 iterations)
+2. Test convergence on flat triangles (should converge in 3-5 iterations)
+3. Test convergence on curved triangles
+4. Handle edge cases (ray misses, non-convergence)
+
+**Success Criteria**:
+- [ ] Inverse mapping converges correctly
+- [ ] UV coordinates are accurate
+- [ ] Edge cases handled gracefully
+
+---
+
+### Checkpoint 3: First Intersection (End of Week 3 - Nov 23)
 
 **Test**: Intersect a single displaced plane
 
@@ -1028,40 +933,20 @@ void PathTracer::createShaderBindingTable() {
 - Expected: See wavy surface
 
 **Steps**:
-1. Developer A: Create AABB for quad
-2. Developer B: Implement basic traversal (no optimizations)
-3. Both: Run path tracer, check for hits
-4. Both: Debug if no intersection or incorrect results
+1. Create AABB for quad
+2. Implement basic traversal (no optimizations yet)
+3. Run path tracer, check for hits
+4. Debug intersection issues
 
 **Success Criteria**:
 - [ ] Ray-AABB intersection works
 - [ ] Custom intersection shader is invoked
 - [ ] Displaced surface is visible (even if slow)
+- [ ] UVs and normals computed correctly
 
 ---
 
-### Checkpoint 3: Correct Normal and UV (End of Week 2)
-
-**Test**: Verify hit attributes are correct
-
-**Setup**:
-- Displaced sphere with texture
-- Visualize: UV as color (R=U, G=V), normal as color
-
-**Steps**:
-1. Developer B: Compute UV at hit point from inverse mapping
-2. Developer B: Compute normal (derivative of displaced surface)
-3. Both: Render and check UV/normal visualization
-4. Both: Compare with reference (tessellated mesh)
-
-**Success Criteria**:
-- [ ] UVs match reference (texture aligned correctly)
-- [ ] Normals match reference (shading looks correct)
-- [ ] No seams or discontinuities
-
----
-
-### Checkpoint 4: Performance Baseline (Mid Week 3)
+### Checkpoint 4: Performance Baseline (End of Week 4 - Nov 30)
 
 **Test**: Measure performance vs. targets
 
@@ -1077,10 +962,10 @@ void PathTracer::createShaderBindingTable() {
 - Memory: < 100MB for 4K displacement
 
 **Steps**:
-1. Developer A: Integrate Nsight profiler
-2. Developer B: Add performance counters to shader
-3. Both: Run benchmark scenes
-4. Both: Identify bottlenecks
+1. Integrate Nsight profiler
+2. Add performance counters to shader
+3. Run benchmark scenes
+4. Identify bottlenecks
 
 **Success Criteria**:
 - [ ] Profiler working correctly
@@ -1093,7 +978,7 @@ void PathTracer::createShaderBindingTable() {
 
 ### Unit Tests (Continuous)
 
-**CPU-Side (Developer A)**:
+**CPU-Side Tests**:
 ```cpp
 // Test RMIP builder
 TEST(RMIPBuilder, MinMaxCorrect) {
@@ -1108,7 +993,7 @@ TEST(RMIPBuilder, MinMaxCorrect) {
 }
 ```
 
-**GPU-Side (Developer B)**:
+**GPU-Side Tests**:
 ```slang
 // Test inverse displacement
 [numthreads(1,1,1)]
@@ -1234,66 +1119,56 @@ void testInverseDisplacement() {
 
 ### Milestone 1 (Nov 12)
 
-**Developer A**:
-- [x] Repository cloned and build verified
+**RMIP Foundation**:
+- [x] Repository cloned and build verified (Nov 1)
 - [ ] RMIP builder implemented and tested
 - [ ] RMIP data uploaded to GPU
 - [ ] Basic AABB geometry created
-
-**Developer B**:
-- [x] Repository cloned and build verified
 - [ ] Custom intersection shader compiling
 - [ ] Ray-triangle utilities implemented
 - [ ] Basic inverse mapping working
 
-**Joint**:
-- [ ] Integration test: Data flows CPU → GPU → Shader
-- [ ] Presentation slides (5 minutes)
-- [ ] Demo: Visualize RMIP data (even if not intersecting yet)
+**Team Deliverables**:
+- [ ] Present RMIP progress to team (5 minutes)
+- [ ] Demo: Visualize RMIP data
+- [ ] Coordinate with Person B (Quad LDS) and Person C (Materials)
 
 ---
 
 ### Milestone 2 (Nov 24)
 
-**Developer A**:
+**RMIP Core Implementation**:
 - [ ] glTF displacement loading
 - [ ] SBT setup complete
-- [ ] Multiple materials supported
+- [ ] Full RMIP traversal working
+- [ ] First successful intersection
+- [ ] 2+ test scenes with displacement
 - [ ] Performance profiling integrated
 
-**Developer B**:
-- [ ] Full RMIP traversal working
-- [ ] Texel marching implemented
-- [ ] Quality tuning complete
-- [ ] Shader performance optimized
-
-**Joint**:
-- [ ] Integration test: Full path tracing with 2+ displaced objects
+**Team Deliverables**:
 - [ ] Performance comparison: RMIP vs. baseline (FPS, memory)
-- [ ] Presentation slides (10 minutes)
+- [ ] Present to team (10 minutes)
 - [ ] Demo: Interactive scene with displacement
+- [ ] Integration with Quad LDS sampling
 
 ---
 
 ### Milestone 3 (Dec 1)
 
-**Developer A**:
-- [ ] 5+ materials in library
-- [ ] LOD system (if time)
+**RMIP Production Features**:
+- [ ] Texel marching implemented
+- [ ] Quality tuning complete
+- [ ] Shader performance optimized
+- [ ] 3+ materials with RMIP displacement
 - [ ] Memory optimization complete
-- [ ] Build documentation
-
-**Developer B**:
 - [ ] All shader code documented
 - [ ] Known limitations documented
-- [ ] Quality vs. performance modes
-- [ ] Algorithm documentation
 
-**Joint**:
-- [ ] Integration test: Full material library
+**Team Deliverables**:
 - [ ] Benchmarks: FPS at different resolutions
-- [ ] Presentation slides (10 minutes)
+- [ ] Present to team (10 minutes)
 - [ ] Demo: Material showcase scene
+- [ ] Material library contribution (coordinate with team)
 
 ---
 
@@ -1325,69 +1200,65 @@ void testInverseDisplacement() {
 
 ## Communication Templates
 
-### Daily Standup (Async in Discord/Slack)
+### Team Standup (Discord/Slack - Mon/Wed/Fri)
 
 **Format**:
 ```
-**Developer A** - [Date]
-✅ Yesterday: Implemented RMIP builder base class
-🎯 Today: Add compression support
+**Person A (RMIP)** - [Date]
+✅ Progress: Implemented RMIP builder base class
+🎯 Today: Add compression support and GPU upload
 🚧 Blockers: None
+🔗 Dependencies: Will need Quad LDS integration next week
 
-**Developer B** - [Date]
-✅ Yesterday: Inverse mapping initial guess working
-🎯 Today: Newton iteration implementation
-🚧 Blockers: Need RMIP data format spec from Dev A
+**Person B (Quad LDS)** - [Date]
+[Their update]
+
+**Person C (Bounded VNDF + Fast-MSX)** - [Date]
+[Their update]
 ```
 
 ---
 
-### Integration Session Notes
+### Team Integration Session Notes
 
 **Format**:
 ```
-**Integration Session** - [Date]
-📌 Goal: Test CPU-GPU data transfer
+**Team Integration Session** - [Date]
+📌 Goal: Test all 4 techniques together
 ✅ Completed:
+  - RMIP displacement working with Quad LDS sampling
+  - Bounded VNDF integrated with material system
+✅ Person A (RMIP):
   - RMIP buffer uploads correctly
-  - Shader can read data
-❌ Issues:
-  - Stride mismatch in buffer (fixed)
-  - Sampler binding wrong (fixed)
+  - Custom intersection shader invoked
 📋 Next Steps:
-  - Dev A: Add tiling support
-  - Dev B: Implement traversal loop
+  - Person A: Add tiling support for materials
+  - Team: Test multi-material scene
 🗓️ Next Session: [Date + 3 days]
 ```
 
 ---
 
-### Bug Report
+### Personal Progress Tracking
 
 **Format**:
 ```
-**Bug**: Inverse mapping doesn't converge for curved triangles
+**RMIP Progress Log** - Week [X]
 
-**Reported By**: Developer B
-**Date**: Nov 10
-**Priority**: High
-**Assigned To**: Developer B
+**Completed This Week**:
+- [x] Task 1
+- [x] Task 2
 
-**Symptoms**:
-- Iteration count exceeds 10 for triangles with high curvature
-- UV coordinates end up outside [0,1] range
+**In Progress**:
+- [ ] Task 3 (50% complete)
 
-**Root Cause**:
-- Initial guess projects to base plane, which is far from actual surface
-- Jacobian becomes ill-conditioned
+**Blocked/Issues**:
+- Issue: Inverse mapping convergence on curved surfaces
+- Solution: Implementing better initial guess
 
-**Fix**:
-- Use better initial guess (sample displacement at projected point)
-- Add damping factor to Newton step
-- Clamp UV to valid range each iteration
-
-**Status**: Fixed
-**Verified By**: Developer A
+**Next Week Goals**:
+- [ ] Complete traversal algorithm
+- [ ] First intersection test
 ```
 
 ---
@@ -1435,26 +1306,35 @@ void testInverseDisplacement() {
 
 ## Conclusion
 
-This implementation plan provides a **structured roadmap** for implementing RMIP with 2 developers over 5.5 weeks. Key features:
+This implementation plan provides a **structured roadmap** for implementing RMIP as a single developer within the 3-person MatForge team over 5 weeks. Key features:
 
-✅ **Clear Role Division**: Developer A (CPU), Developer B (GPU)
-✅ **Parallel Development**: Independent work Weeks 1-2, joint Weeks 3-5
+✅ **Full-Stack Ownership**: Complete CPU and GPU implementation by Person A
+✅ **Sequential Development**: Week 1 (CPU), Week 2 (GPU), Weeks 3-5 (Integration & Optimization)
+✅ **Team Integration**: Clear coordination points with Person B (Quad LDS) and Person C (Materials)
 ✅ **Integration Checkpoints**: 4 major checkpoints to verify progress
 ✅ **Risk Mitigation**: Fallback plans for each major risk
 ✅ **Detailed Tasks**: 5 core tasks with code snippets and acceptance criteria
-✅ **Daily Schedule**: Hour-by-hour breakdown for Week 1-2
+✅ **Weekly Schedule**: Day-by-day breakdown for all 5 weeks
 
-**Next Steps**:
-1. Both developers review this plan
-2. Customize daily schedule to personal working style
-3. Set up communication channels (Discord, GitHub, etc.)
-4. Begin Week 1 tasks (RMIP builder + shader skeleton)
+**Next Steps for Person A**:
+1. Review this plan and customize to personal working style
+2. Set up communication with teammates (Discord, GitHub, etc.)
+3. Begin Week 1 tasks (RMIP builder - CPU infrastructure)
+4. Attend team standups Mon/Wed/Fri
+5. Participate in team integration sessions Tuesdays
 
-**Remember**: This is a living document. Update as you learn and adapt!
+**Team Context**:
+- **Person A (You)**: RMIP displacement ray tracing (~800 LOC)
+- **Person B**: Quad LDS sampling (~400 LOC)
+- **Person C**: Bounded VNDF + Fast-MSX (~350 LOC)
+- **Total**: Complete 4-paper integrated system
+
+**Remember**: This is a living document. Update as you learn and adapt! Communicate blockers early and leverage team expertise when needed.
 
 ---
 
-**Document Version**: 1.0
+**Document Version**: 2.0 (Single-Person Workflow)
 **Created**: November 1, 2025
-**Authors**: MatForge RMIP Team
-**Last Updated**: November 1, 2025
+**Updated for Single-Person**: November 4, 2025
+**Author**: MatForge Person A (RMIP Specialist)
+**Team**: 3-person MatForge team (CIS 5650 Fall 2025)
