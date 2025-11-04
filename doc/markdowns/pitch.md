@@ -106,20 +106,20 @@ Advanced material rendering requires a complete pipeline, but each stage has fun
                           │      MatForge Pipeline              │
                           ├─────────────────────────────────────┤
                           │                                     │
-glTF Scene ───────────→   │  1. QUAD LDS (Person B)            │
+glTF Scene ───────────→   │  1. QUAD LDS (Yiding)               │
                           │     └─ Generate high-quality        │
                           │        random numbers               │
-Displacement Maps ─────→  │        ↓                           │
-                          │  2. RMIP (Person A)                │
-                          │     └─ Displacement ray tracing    │
-                          │        ↓                           │
-                          │  3. BOUNDED VNDF (Person C)        │
-                          │     └─ Efficient importance sample │
-                          │        ↓                           │
-                          │  4. FAST-MSX (Person C)            │
-                          │     └─ Multiple scattering BRDF    │
-                          │        ↓                           │
-                          │  FINAL RADIANCE                    │
+Displacement Maps ─────→  │        ↓                            │
+                          │  2. RMIP (Cecilia)                  │
+                          │     └─ Displacement ray tracing     │
+                          │        ↓                            │
+                          │  3. BOUNDED VNDF (Xiaonan)          │
+                          │     └─ Efficient importance sample  │
+                          │        ↓                            │
+                          │  4. FAST-MSX (Xiaonan)              │
+                          │     └─ Multiple scattering BRDF     │
+                          │        ↓                            │
+                          │  FINAL RADIANCE                     │
                           └─────────────────────────────────────┘
 ```
 
