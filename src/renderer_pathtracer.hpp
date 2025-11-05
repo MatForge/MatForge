@@ -98,6 +98,9 @@ public:
   bool                       m_adaptiveSampling{true};
   int                        m_totalSamplesAccumulated{0};  // Track total samples separately
 
+  // QOLDS sampling method 
+  bool m_useQOLDS{false};  // Toggle between default sampler and QOLDS
+
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
   // Adaptive performance targets

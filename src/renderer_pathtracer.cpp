@@ -177,6 +177,13 @@ bool PathTracer::onUIRender(Resources& resources)
     PE::end();
   }
 
+  // Sampling method selection 
+  if(PE::begin())
+  {
+    changed |= PE::Checkbox("Use QOLDS", &m_useQOLDS, "Use Quad-Optimized Low-Discrepancy Sequences for Monte Carlo sampling");
+    PE::end();
+  }
+
   // Manual sampling controls
   if(PE::begin())
   {
@@ -321,6 +328,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.skyParams         = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+  m_pushConst.useQOLDS          = m_useQOLDS ? 1 : 0;  // QOLDS sampling toggle 
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 
   // Track total samples accumulated
