@@ -18,7 +18,14 @@ message(STATUS "Processing: ${PROJECT_NAME}")
 file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 
+# QOLDS files for better organization in Visual Studio
+set(QOLDS_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/qolds_builder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/qolds_builder.hpp
+)
+
 source_group("Source Files" FILES ${EXE_SOURCES})
+source_group("Source Files/QOLDS" FILES ${QOLDS_SOURCES})
 
 # Add the executable
 add_executable(${PROJECT_NAME} ${EXE_SOURCES})
