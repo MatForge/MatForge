@@ -81,8 +81,14 @@ compile_slang(
   DEBUG_LEVEL 1
 )
 
+# QOLDS shader files for better organization
+set(QOLDS_SHADER_FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/qolds_sampling.h.slang
+)
+
 # Add shader files to the project
 source_group("Shaders" FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_H_FILES})
+source_group("Shaders/QOLDS" FILES ${QOLDS_SHADER_FILES})
 source_group("Shaders/Compiled" FILES ${GENERATED_SHADER_HEADERS})
 source_group("Shaders/Shared" FILES ${SHADER_SHARED_SLANG_FILES})
 
