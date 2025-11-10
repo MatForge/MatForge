@@ -644,6 +644,69 @@ void GltfRenderer::createVulkanScene()
 
   // Build mapping for faster node lookups
   updateNodeToRenderNodeMap();
+
+  // Initialize QOLDS sampling
+  createQoldsBuffers();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Create and upload QOLDS sampling buffers
+void GltfRenderer::createQoldsBuffers()
+{
+  // Initialize QOLDS builder
+  m_qoldsBuilder = std::make_unique<QOLDSBuilder>();
+
+  // Load irreducible polynomials using proper path resolution
+  std::filesystem::path qoldsDataPath = nvutils::findFile("initIrreducibleGF3.dat", nvsamples::getResourcesDirs(), false);
+  if(qoldsDataPath.empty())
+  {
+    // Fallback: try relative to executable
+    qoldsDataPath = nvutils::getExecutablePath().parent_path() / "resources" / "initIrreducibleGF3.dat";
+  }
+
+  if(!m_qoldsBuilder->loadInitData(qoldsDataPath.string()))
+  {
+    LOGE("Failed to load QOLDS initialization data from: %s\n", qoldsDataPath.string().c_str());
+    return;
+  }
+
+  // Build matrices: 47 dimensions, m=5 (243 max points)
+  // Note: The initIrreducibleGF3.dat file contains data for 47 dimensions (1-47)
+  m_qoldsBuilder->buildMatrices(47, 5);
+
+  // Generate scrambling seeds (use fixed seed for reproducibility, or 0 for random)
+  m_qoldsBuilder->generateScrambleSeeds(0);
+
+  // Get data for GPU upload
+  const auto& matrices = m_qoldsBuilder->getMatrixData();
+  const auto& seeds    = m_qoldsBuilder->getScrambleSeeds();
+
+  // Create matrices buffer
+  VkDeviceSize matrixSize = matrices.size() * sizeof(int32_t);
+  NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bQoldsMatrices, matrixSize,
+                                                VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                                                VMA_MEMORY_USAGE_GPU_ONLY));
+  NVVK_DBG_NAME(m_resources.bQoldsMatrices.buffer);
+
+  // Create seeds buffer
+  VkDeviceSize seedsSize = seeds.size() * sizeof(uint32_t);
+  NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bQoldsSeeds, seedsSize,
+                                                VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                                                VMA_MEMORY_USAGE_GPU_ONLY));
+  NVVK_DBG_NAME(m_resources.bQoldsSeeds.buffer);
+
+  // Upload data using staging buffer
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+  m_resources.staging.appendBuffer(m_resources.bQoldsMatrices, 0, matrixSize, matrices.data());
+  m_resources.staging.appendBuffer(m_resources.bQoldsSeeds, 0, seedsSize, seeds.data());
+  m_resources.staging.cmdUploadAppended(cmd);
+
+  nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+  LOGI("QOLDS buffers created: %d dimensions, %d max points\n", m_qoldsBuilder->getDimensions(),
+       m_qoldsBuilder->getMaxPoints());
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -735,10 +798,14 @@ void GltfRenderer::createDescriptorSets()
   NVVK_DBG_NAME(m_resources.descriptorSet);
 
 
-  // 1: Descriptor PUSH: top level acceleration structure and the output image
+  // 1: Descriptor PUSH: top level acceleration structure, output images, and QOLDS buffers
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eTlas,
                                               VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eOutImages, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10,
+                                              VK_SHADER_STAGE_ALL);
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eQoldsMatrices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              1, VK_SHADER_STAGE_ALL);
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eQoldsSeeds, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                               VK_SHADER_STAGE_ALL);
 
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
@@ -897,6 +964,8 @@ void GltfRenderer::destroyResources()
 
   m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);
   m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
+  m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
+  m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
 
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);

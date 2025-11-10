@@ -64,6 +64,8 @@ enum BindingPoints
   eTexturesCube,  // Textures (array of textures)
   eTexturesHdr,   // HDR textures (array of textures)
   eTexturesStorage,
+  eQoldsMatrices, // QOLDS generator matrices
+  eQoldsSeeds,    // QOLDS Owen scrambling seeds
 };
 
 // Binding points for descriptors

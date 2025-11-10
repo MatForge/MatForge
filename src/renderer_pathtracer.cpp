@@ -71,6 +71,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
       (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
   m_useSER = m_supportSER;
 
+  // Log initial sampling mode
+  LOGI("Path tracer initialized with %s sampling\n", m_useQOLDS ? "QOLDS" : "PCG (default)");
+
   // #DLSS - Create the DLSS denoiser
 #if defined(USE_DLSS)
   m_dlss->init(resources);
@@ -177,10 +180,21 @@ bool PathTracer::onUIRender(Resources& resources)
     PE::end();
   }
 
-  // Sampling method selection 
+  // Sampling method selection
   if(PE::begin())
   {
+    bool prevQOLDS = m_useQOLDS;
     changed |= PE::Checkbox("Use QOLDS", &m_useQOLDS, "Use Quad-Optimized Low-Discrepancy Sequences for Monte Carlo sampling");
+
+    // Log when QOLDS toggle changes
+    if(m_useQOLDS != prevQOLDS)
+    {
+      if(m_useQOLDS)
+        LOGI("Switched to QOLDS sampling (Quad-Optimized Low-Discrepancy Sequences)\n");
+      else
+        LOGI("Switched to PCG sampling (default pseudo-random)\n");
+    }
+
     PE::end();
   }
 
@@ -492,6 +506,13 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   VkWriteDescriptorSet allTextures = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutImages);
   allTextures.descriptorCount      = uint32_t(outputImages.size());
   write.append(allTextures, outputImages.data());
+
+  // Add QOLDS sampling buffers
+  VkDescriptorBufferInfo qoldsMatricesInfo{resources.bQoldsMatrices.buffer, 0, VK_WHOLE_SIZE};
+  VkDescriptorBufferInfo qoldsSeedsInfo{resources.bQoldsSeeds.buffer, 0, VK_WHOLE_SIZE};
+  write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eQoldsMatrices), &qoldsMatricesInfo);
+  write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eQoldsSeeds), &qoldsSeedsInfo);
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 

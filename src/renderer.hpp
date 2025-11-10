@@ -53,6 +53,7 @@
 #include "ui_animation_control.hpp"
 #include "ui_busy_window.hpp"
 #include "ui_scene_graph.hpp"
+#include "qolds_builder.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -86,6 +87,7 @@ private:
   void createDescriptorSets();
   void createResourceBuffers();
   void createVulkanScene();
+  void createQoldsBuffers();
   void destroyResources();
   void resetFrame();
   void silhouette(VkCommandBuffer cmd);
@@ -137,6 +139,9 @@ private:
   BusyWindow       m_busy;
   AnimationControl m_animControl;  // Animation control (UI)
   Silhouette       m_silhouette;   // Silhouette renderer
+
+  // QOLDS sampling
+  std::unique_ptr<QOLDSBuilder> m_qoldsBuilder;  // QOLDS matrix generator
 
   std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 

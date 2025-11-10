@@ -211,12 +211,15 @@ struct FCRNG
     }
 
     // Generate next random number
+    [mutating]
     uint sample()
     {
-        return hash(++n * key);
+        n++;
+        return hash(n * key);
     }
 
     // Generate random number in range [0, range)
+    [mutating]
     uint sampleRange(uint range)
     {
         // Efficiently generating a number in a range
@@ -268,7 +271,8 @@ Integer3 scramble_base3(Integer3 a3, uint seed, uint ndigits)
     for (uint i = 0; i < ndigits; i++)
     {
         // Get a random permutation using the node index
-        uint flip = rng.index(nodeIndex).sampleRange(6u);
+        FCRNG tempRng = rng.index(nodeIndex);
+        uint flip = tempRng.sampleRange(6u);
 
         // Get digit (process most significant first)
         uint digit = uint(a3.digits[ndigits - 1 - i]);

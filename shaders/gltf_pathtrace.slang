@@ -39,6 +39,7 @@
 
 #include "common.h.slang"
 #include "raytracer_interface.h.slang"
+#include "qolds_sampling.h.slang"
 
 
 // Bindings
@@ -48,6 +49,8 @@
 [[vk::binding(BindingPoints::eTexturesHdr, 0)]]     Sampler2D                               texturesHdr[];
 [[vk::binding(BindingPoints::eTlas, 1)]]            RaytracingAccelerationStructure         topLevelAS;
 [[vk::binding(BindingPoints::eOutImages, 1)]]       RWTexture2D<float4>                     outImages[];
+[[vk::binding(BindingPoints::eQoldsMatrices, 1)]]   StructuredBuffer<int>                   qoldsMatrices;
+[[vk::binding(BindingPoints::eQoldsSeeds, 1)]]      StructuredBuffer<uint>                  qoldsSeeds;
 
 // HDR Environment
 [[vk::binding(EnvBindings::eImpSamples, 2)]]    StructuredBuffer<EnvAccel>  envSamplingData;
@@ -69,6 +72,38 @@ struct DirectLight
 };
 
 static const float MIN_TRANSMISSION = 0.01;  // Minimum transmission factor to continue tracing
+
+//-----------------------------------------------------------------------
+// Sampling abstraction: Allows switching between PCG and QOLDS
+//-----------------------------------------------------------------------
+
+// Sample a 1D random value
+float sample1D(inout uint seed, uint sampleIndex, inout uint dimension)
+{
+  if (pushConst.useQOLDS == 1)
+  {
+    float result = qolds_sample(sampleIndex, dimension, qoldsMatrices, qoldsSeeds, 5);
+    dimension++;
+    return result;
+  }
+  else
+  {
+    return rand(seed);
+  }
+}
+
+// Sample a 2D random value
+float2 sample2D(inout uint seed, uint sampleIndex, inout uint dimension)
+{
+  return float2(sample1D(seed, sampleIndex, dimension), sample1D(seed, sampleIndex, dimension));
+}
+
+// Sample a 3D random value
+float3 sample3D(inout uint seed, uint sampleIndex, inout uint dimension)
+{
+  return float3(sample1D(seed, sampleIndex, dimension), sample1D(seed, sampleIndex, dimension),
+                sample1D(seed, sampleIndex, dimension));
+}
 
 // #DLSS - Information for the DLSS
 struct DlssOutput
@@ -458,7 +493,7 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 // 3. Accumulates radiance along the path while applying Russian Roulette for optimization,
 //    handling both surface and volumetric effects, and returns the final color contribution for that ray path
 //
-SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
+SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint sampleIndex, inout uint dimension)
 {
   float3 radiance     = float3(0.0F, 0.0F, 0.0F);
   float3 throughput   = float3(1.0F, 1.0F, 1.0F);
@@ -750,6 +785,8 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 //-----------------------------------------------------------------------
 SampleResult samplePixel(IRaytracer raytracer,
                          inout uint seed,
+                         uint       sampleIndex,
+                         inout uint dimension,
                          float2     samplePos,
                          float2     subpixelJitter,
                          float2     imageSize,
@@ -762,8 +799,8 @@ SampleResult samplePixel(IRaytracer raytracer,
 
   // Depth-of-Field
   float3 focalPoint        = focalDist * ray.Direction;
-  float  cam_r1            = rand(seed) * M_TWO_PI;
-  float  cam_r2            = rand(seed) * aperture;
+  float  cam_r1            = sample1D(seed, sampleIndex, dimension) * M_TWO_PI;
+  float  cam_r2            = sample1D(seed, sampleIndex, dimension) * aperture;
   float4 cam_right         = mul(viewMatrixI, float4(1, 0, 0, 0));
   float4 cam_up            = mul(viewMatrixI, float4(0, 1, 0, 0));
   float3 randomAperturePos = (cos(cam_r1) * cam_right.xyz + sin(cam_r1) * cam_up.xyz) * sqrt(cam_r2);
@@ -774,7 +811,7 @@ SampleResult samplePixel(IRaytracer raytracer,
   ray.Direction = finalRayDir;
 
 
-  SampleResult sampleResult = pathTrace(raytracer, ray, seed);
+  SampleResult sampleResult = pathTrace(raytracer, ray, seed, sampleIndex, dimension);
 
   // Removing fireflies
   float lum = dot(sampleResult.radiance.xyz, float3(1.0F / 3.0F));
@@ -807,14 +844,18 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     selectObject(samplePos, imageSize);
   }
 
-  // Initialize the random number
+  // Initialize random number generation
   uint seed = xxhash32(uint3(uint2(samplePos.xy), pushConst.frameCount));
+
+  // Initialize QOLDS sampling state
+  uint sampleIndex = pushConst.frameCount;  // Global sample index for QOLDS
+  uint dimension = 0;                       // Track current dimension
 
   // Subpixel jitter: send the ray through a different position inside the
   // pixel each time, to provide antialiasing.
   float2 subpixelJitter = float2(0.5f, 0.5f);
   if(pushConst.frameCount > 0)
-    subpixelJitter += ANTIALIASING_STANDARD_DEVIATION * sampleGaussian(float2(rand(seed), rand(seed)));
+    subpixelJitter += ANTIALIASING_STANDARD_DEVIATION * sampleGaussian(sample2D(seed, sampleIndex, dimension));
 
   // #DLSS - use the DLSS jitter and frame index (not resetting to zero)
   if(pushConst.useDlss == 1)
@@ -823,14 +864,16 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // Sampling n times the pixel
-  SampleResult sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo.projInv,
-                                          pushConst.frameInfo.viewInv, pushConst.focalDistance, pushConst.aperture);
+  SampleResult sampleResult = samplePixel(raytracer, seed, sampleIndex, dimension, samplePos, subpixelJitter, imageSize,
+                                          pushConst.frameInfo.projInv, pushConst.frameInfo.viewInv, pushConst.focalDistance,
+                                          pushConst.aperture);
   float4 pixel_color = sampleResult.radiance;
   for(int s = 1; s < pushConst.numSamples; s++)
   {
-    subpixelJitter = float2(rand(seed), rand(seed));
-    sampleResult   = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo.projInv,
-                                 pushConst.frameInfo.viewInv, pushConst.focalDistance, pushConst.aperture);
+    subpixelJitter = sample2D(seed, sampleIndex, dimension);
+    sampleResult   = samplePixel(raytracer, seed, sampleIndex, dimension, samplePos, subpixelJitter, imageSize,
+                                 pushConst.frameInfo.projInv, pushConst.frameInfo.viewInv, pushConst.focalDistance,
+                                 pushConst.aperture);
     pixel_color += sampleResult.radiance;
   }
   pixel_color /= pushConst.numSamples;
