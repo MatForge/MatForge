@@ -226,6 +226,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 #endif
   }
 
+  // Initialize RMIP builder
+  m_rmipBuilder.init(m_resources.allocator, m_transientCmdPool);
+
   // ===== Renderer Initialization =====
 
   // Create resources
@@ -640,6 +643,17 @@ void GltfRenderer::createVulkanScene()
         m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
       }
     }
+
+    // Build RMIPs for displacement maps
+    {
+        VkCommandBuffer cmd{};
+        nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+        buildDisplacementRMIPs(cmd);
+
+        std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
+        m_cmdBufferQueue.push({ cmd, false });
+    }
   }
 
   // Build mapping for faster node lookups
@@ -917,6 +931,15 @@ void GltfRenderer::destroyResources()
   m_resources.staging.deinit();
   m_rayPicker.deinit();
   m_resources.allocator.deinit();
+
+  for (auto& [matIdx, rmipData] : m_displacementRMIPs)
+  {
+      vkDestroyImageView(m_device, rmipData.view, nullptr);
+      m_resources.allocator.destroyImage(rmipData.image);
+  }
+  m_displacementRMIPs.clear();
+
+  m_rmipBuilder.deinit();
 }
 
 
@@ -1060,4 +1083,134 @@ bool GltfRenderer::processQueuedCommandBuffers()
     return true;  // Command buffer was processed
   }
   return false;  // No command buffer was processed
+}
+
+void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
+{
+    NVVK_DBG_SCOPE(cmd);
+    SCOPED_TIMER(__FUNCTION__);
+
+    const tinygltf::Model& model = m_resources.scene.getModel();
+
+    for (size_t matIdx = 0; matIdx < model.materials.size(); matIdx++)
+    {
+        const tinygltf::Material& material = model.materials[matIdx];
+
+        // Check for displacement extension
+        auto it = material.extensions.find("KHR_materials_displacement");
+        if (it == material.extensions.end())
+            continue;
+
+        const tinygltf::Value& ext = it->second;
+
+        // The extension should have displacementGeometryTexture
+        if (!ext.Has("displacementGeometryTexture"))
+            continue;
+
+        const tinygltf::Value& texInfo = ext.Get("displacementGeometryTexture");
+
+        // Get texture index
+        if (!texInfo.Has("index"))
+            continue;
+
+        int textureIdx = texInfo.Get("index").Get<int>();
+        if (textureIdx < 0 || textureIdx >= static_cast<int>(model.textures.size()))
+            continue;
+
+        // Get displacement factor
+        float displacementFactor = 1.0f;
+        if (ext.Has("displacementGeometryFactor"))
+        {
+            displacementFactor = static_cast<float>(ext.Get("displacementGeometryFactor").Get<double>());
+        }
+
+        const tinygltf::Texture& texture = model.textures[textureIdx];
+        int imageIdx = texture.source;
+
+        if (imageIdx < 0 || imageIdx >= static_cast<int>(model.images.size()))
+            continue;
+
+        // Get the Vulkan texture
+        const auto& sceneTextures = m_resources.sceneVk.textures();
+        if (textureIdx >= static_cast<int>(sceneTextures.size()))
+            continue;
+
+        VkImage     displacementImage = sceneTextures[textureIdx].image;
+        VkImageView displacementView = sceneTextures[textureIdx].descriptor.imageView;
+
+        // Get image resolution
+        const tinygltf::Image& image = model.images[imageIdx];
+        uint32_t width = static_cast<uint32_t>(image.width);
+        uint32_t height = static_cast<uint32_t>(image.height);
+
+        // RMIP requires square, power-of-2 textures
+        if (width != height)
+        {
+            LOGW("Displacement map %d is not square (%dx%d), skipping RMIP\n",
+                imageIdx, width, height);
+            continue;
+        }
+
+        uint32_t resolution = width;
+
+        // Validate power of 2
+        if ((resolution & (resolution - 1)) != 0)
+        {
+            LOGW("Displacement map %d is not power of 2 (%dx%d), skipping RMIP\n",
+                imageIdx, width, height);
+            continue;
+        }
+
+        // Calculate RMIP layers
+        uint32_t maxLevel = static_cast<uint32_t>(std::log2(resolution));
+        uint32_t numLayers = (maxLevel + 1) * (maxLevel + 1);
+
+        // Create RMIP output image
+        RmipData rmipData;
+
+        VkImageCreateInfo rmipImageInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R32G32_SFLOAT,  // (min, max) pairs
+            .extent = {resolution, resolution, 1},
+            .mipLevels = 1,
+            .arrayLayers = numLayers,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        NVVK_CHECK(m_resources.allocator.createImage(rmipData.image, rmipImageInfo));
+        NVVK_DBG_NAME(rmipData.image.image);
+
+        VkImageViewCreateInfo viewInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = rmipData.image.image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = numLayers
+            },
+        };
+
+        NVVK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &rmipData.view));
+        NVVK_DBG_NAME(rmipData.view);
+
+        // Build the RMIP structure
+        m_rmipBuilder.buildRMIP(cmd, displacementImage, displacementView,
+            rmipData.image.image, rmipData.view, resolution);
+
+        // Store the RMIP and factor for later use
+        rmipData.displacementFactor = displacementFactor;  // Store the scale factor
+        m_displacementRMIPs[static_cast<int>(matIdx)] = rmipData;
+
+        LOGI("Built RMIP for material %zu '%s', displacement map %d (%dx%d, %d layers, factor=%.3f)\n",
+            matIdx, material.name.c_str(), imageIdx, resolution, resolution, numLayers, displacementFactor);
+    }
 }

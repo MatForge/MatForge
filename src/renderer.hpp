@@ -53,6 +53,7 @@
 #include "ui_animation_control.hpp"
 #include "ui_busy_window.hpp"
 #include "ui_scene_graph.hpp"
+#include "rmip_builder.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -130,6 +131,7 @@ private:
   bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
 
   Resources  m_resources;
+  RmipBuilder m_rmipBuilder;
   PathTracer m_pathTracer;  // Path tracer renderer
   Rasterizer m_rasterizer;  // Rasterizer renderer
 
@@ -152,4 +154,14 @@ private:
   glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
 
   VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
+
+  struct RmipData
+  {
+      nvvk::Image image;
+      VkImageView view;
+      float       displacementFactor = 1.0f;  // Scale factor from extension
+      int         texCoord = 0;
+  };
+  std::unordered_map<int, RmipData> m_displacementRMIPs;
+  void buildDisplacementRMIPs(VkCommandBuffer cmd);
 };
