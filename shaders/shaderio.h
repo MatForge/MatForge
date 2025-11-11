@@ -126,6 +126,7 @@ struct PathtracePushConstant
   float aperture              = 0.0f;  // Aperture for depth of field
   int   useDlss               = 0;     // Use DLSS (0: no, 1: yes)
   int   useQOLDS              = 0;     // Use QOLDS sampling (0: default, 1: QOLDS)
+  int   useFastMSX			  = 0;     
   int   renderSelection       = 1;     // Padding to align the structure
   /// Infinite plane
   float2                 jitter;               // Jitter for the DLSS
