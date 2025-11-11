@@ -3,8 +3,6 @@
 
 float3 compute_fast_msx(PbrMaterial mat, float3 v, float3 l, float3 n)
 {
-
-
     // G_I Term
     float3 h = normalize(l + v);
 
