@@ -18,7 +18,14 @@ message(STATUS "Processing: ${PROJECT_NAME}")
 file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 
+# QOLDS files for better organization in Visual Studio
+set(QOLDS_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/qolds_builder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/qolds_builder.hpp
+)
+
 source_group("Source Files" FILES ${EXE_SOURCES})
+source_group("Source Files/QOLDS" FILES ${QOLDS_SOURCES})
 
 # Add the executable
 add_executable(${PROJECT_NAME} ${EXE_SOURCES})
@@ -74,8 +81,14 @@ compile_slang(
   DEBUG_LEVEL 1
 )
 
+# QOLDS shader files for better organization
+set(QOLDS_SHADER_FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/qolds_sampling.h.slang
+)
+
 # Add shader files to the project
 source_group("Shaders" FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_H_FILES})
+source_group("Shaders/QOLDS" FILES ${QOLDS_SHADER_FILES})
 source_group("Shaders/Compiled" FILES ${GENERATED_SHADER_HEADERS})
 source_group("Shaders/Shared" FILES ${SHADER_SHARED_SLANG_FILES})
 

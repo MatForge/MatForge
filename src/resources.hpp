@@ -115,6 +115,10 @@ struct Resources
   nvvk::Buffer                    bFrameInfo;    // Scene/Frame information
   nvvk::Buffer                    bSkyParams;    // Sky parameters
   shaderio::SkyPhysicalParameters skyParams{};   // Sky parameters
+
+  // QOLDS sampling buffers
+  nvvk::Buffer bQoldsMatrices;  // QOLDS generator matrices
+  nvvk::Buffer bQoldsSeeds;     // QOLDS Owen scrambling seeds
   nvshaders::Tonemapper           tonemapper{};  // Tonemapper
   shaderio::TonemapperData        tonemapperData{
              .autoExposure = 1,
