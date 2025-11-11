@@ -692,7 +692,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
 
         bool useFastMSX = (pushConst.useFastMSX == 1);
 
-        bsdfEvaluate_new(evalData, pbrMat, useFastMSX);
+        bsdfEvaluate_msx(evalData, pbrMat, useFastMSX);
 
         // If the PDF is greater than 0, then we can sample the BSDF
         if(evalData.pdf > 0.0)

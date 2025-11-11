@@ -37,7 +37,7 @@ float3 compute_fast_msx(PbrMaterial mat, float3 v, float3 l, float3 n)
     return f_sI;
 }
 
-void bsdfEvaluate_new(inout BsdfEvaluateData data, PbrMaterial mat, bool useFastMSX)
+void bsdfEvaluate_msx(inout BsdfEvaluateData data, PbrMaterial mat, bool useFastMSX)
 {
     bsdfEvaluate(data, mat);
 
