@@ -198,6 +198,22 @@ bool PathTracer::onUIRender(Resources& resources)
     PE::end();
   }
 
+  if (PE::begin())
+  {
+      bool prevFastMSX = m_useFastMSX;
+      changed |= PE::Checkbox("Use FastMSX", &m_useFastMSX, "Use Fast-MSX to fix Smith GGX");
+
+      if (m_useFastMSX != prevFastMSX)
+      {
+          if (m_useFastMSX)
+              LOGI("Switched to FastMSX\n");
+          else
+              LOGI("Switched to Smith's GGX\n");
+      }
+
+      PE::end();
+  }
+
   // Manual sampling controls
   if(PE::begin())
   {
@@ -343,6 +359,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   m_pushConst.useQOLDS          = m_useQOLDS ? 1 : 0;  // QOLDS sampling toggle 
+  m_pushConst.useFastMSX        = m_useFastMSX ? 1 : 0;
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 
   // Track total samples accumulated

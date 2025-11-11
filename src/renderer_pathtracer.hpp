@@ -101,6 +101,8 @@ public:
   // QOLDS sampling method 
   bool m_useQOLDS{false};  // Toggle between default sampler and QOLDS
 
+  bool m_useFastMSX{true};  // Toggle for fast multi-sample anti-aliasing
+
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
   // Adaptive performance targets
