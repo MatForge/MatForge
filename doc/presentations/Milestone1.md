@@ -139,8 +139,8 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 ### Next Steps (Week 2)
 
 - ⏭️ Custom intersection shader for ray-displacement intersection
+- ⏭️ Hybrid traversal algorithm (Algorithm 1 from the paper)
 - ⏭️ Inverse displacement mapping implementation
-- ⏭️ BLAS/AABB setup for procedural geometry
 - ⏭️ First end-to-end ray intersection test
 
 ---
