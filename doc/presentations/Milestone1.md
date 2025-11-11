@@ -17,7 +17,7 @@
 All three team members have successfully completed their Milestone 1 deliverables:
 - **Cecilia (RMIP)**: RMIP data structure builder and GPU compute pipeline operational
 - **Yiding (QOLDS)**: Complete QOLDS sampling system integrated into path tracer
-- **Xiaonan (Fast-MSX)**: Fast-MSX and Bounded VNDF foundations implemented
+- **Xiaonan (Fast-MSX)**: Fast-MSX implemented
 
 We are **ahead of schedule**, with strong foundations in place for full integration by Milestone 2 (November 24).
 
@@ -72,7 +72,7 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 |-------------|-----------|-------------------|--------|---------------|
 | **Cecilia** | RMIP | ✅ Builder + GPU pipeline | **COMPLETE** | ~800 LOC |
 | **Yiding** | Quad LDS | ✅ Host + Device + Integration | **COMPLETE** | ~400 LOC |
-| **Xiaonan** | Fast-MSX + Bounded VNDF | ✅ Foundation implemented | **COMPLETE** | ~350 LOC |
+| **Xiaonan** | Fast-MSX | ✅ Foundation implemented | **COMPLETE** | ~350 LOC |
 
 **Total Implementation**: ~1,550 lines of production code (excluding comments and whitespace)
 
@@ -203,7 +203,7 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
        static int mod(int x);
        static int fma(int a, int b, int c);
    };
-
+   
    float qolds_sample(uint index, uint dimension,
                       StructuredBuffer<int> matrices,
                       StructuredBuffer<uint> seeds,
@@ -292,11 +292,6 @@ Switched to PCG sampling (default pseudo-random)
 - Modified GGX distribution for multiple scattering
 - Integration into PBR material evaluation
 
-✅ **Bounded VNDF Foundation**
-- Spherical cap bounding computation
-- Tighter bounds for rejection sampling
-- Integration point identification in `pbr_ggx_microfacet.h.slang`
-
 ✅ **Framework Integration**
 - Modified nvpro-core PBR shaders (`pbr_material_eval.h.slang`, `pbr_ggx_microfacet.h.slang`)
 - GUI toggles planned for Milestone 2
@@ -319,7 +314,6 @@ Switched to PCG sampling (default pseudo-random)
 
 ### Next Steps (Week 2-3)
 
-- ⏭️ Complete Fast-MSX BRDF evaluation
 - ⏭️ Complete Bounded VNDF sampler
 - ⏭️ Rejection rate measurement and comparison
 - ⏭️ Test spheres with varying roughness (α = 0.3 to 0.9)
@@ -627,7 +621,7 @@ Total Initialization               -> 248.2 ms
 The MatForge team has successfully completed all Milestone 1 deliverables:
 - **QOLDS**: Fully integrated sampling system (700 LOC)
 - **RMIP**: GPU-accelerated data structure builder (800 LOC)
-- **Fast-MSX + Bounded VNDF**: Foundation implementations (350 LOC)
+- **Fast-MSX**: Foundation implementations (350 LOC)
 
 **Total Contribution**: 1,850 lines of production code in 8 days of development.
 
