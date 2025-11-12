@@ -71,7 +71,7 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 |-------------|-----------|-------------------|--------|---------------|
 | **Cecilia** | RMIP | ✅ Builder + GPU pipeline | **COMPLETE** | ~800 LOC |
 | **Yiding** | Quad LDS | ✅ Host + Device + Integration | **COMPLETE** | ~400 LOC |
-| **Xiaonan** | Fast-MSX | ✅ Foundation implemented | **COMPLETE** | ~350 LOC |
+| **Xiaonan** | Fast-MSX | ✅ Implemented | **COMPLETE** | ~350 LOC |
 
 **Total Implementation**: ~1,550 lines of production code (excluding comments and whitespace)
 
@@ -222,8 +222,13 @@ Switched to PCG sampling (default pseudo-random)
 
 ## Xiaonan: Fast-MSX + Bounded VNDF (Material System)
 
+![](./img/msxshowcase.png)
+
+
+
 **Developer**: Xiaonan
 **Papers**:
+
 - "Bounded VNDF Sampling for Smith-GGX Reflections" (SIGGRAPH Asia 2023)
 - "Fast Multiple Scattering Approximation" (SIGGRAPH 2023)
 **Timeline**: Week 1 (Nov 3-9) - **Completed foundation**
@@ -363,13 +368,12 @@ Switched to PCG sampling (default pseudo-random)
 ### Xiaonan (Fast-MSX + Bounded VNDF)
 
 **Priority Tasks**:
-1. Complete Fast-MSX BRDF evaluation
-2. Complete Bounded VNDF sampler
-3. Rejection rate measurement
-4. Test spheres with varying roughness
+
+1. Complete Bounded VNDF sampler
+2. Rejection rate measurement
 
 **Expected Deliverables**:
-- Working Fast-MSX toggle
+
 - Working Bounded VNDF toggle
 - Comparison images (with/without each technique)
 
@@ -378,7 +382,7 @@ Switched to PCG sampling (default pseudo-random)
 **Integration Milestone (Nov 16)**:
 - ✅ QOLDS providing samples to all techniques
 - ✅ RMIP ray tracing working (basic test)
-- ✅ Fast-MSX and Bounded VNDF toggleable
+- ✅ Bounded VNDF toggleable
 - ⏭️ Full pipeline test (all 4 techniques together)
 
 ---
