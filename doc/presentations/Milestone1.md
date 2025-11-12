@@ -86,6 +86,8 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 
 ### Milestone 1 Achievements
 
+<img src="./RMIP_structure.png" alt="RMIP Structure" width="60%">
+
 ✅ **RMIP Data Structure Builder** (C++)
 - Hierarchical min-max pyramid construction for rectangular texture queries
 - GPU compute shader implementation (~5ms build time for 4K maps)
