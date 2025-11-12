@@ -222,43 +222,33 @@ Switched to PCG sampling (default pseudo-random)
 
 ## Xiaonan: Fast-MSX + Bounded VNDF (Material System)
 
+![](./img/msx.png)
+
 ![](./img/msxshowcase.png)
-
-
 
 **Developer**: Xiaonan
 **Papers**:
 
 - "Bounded VNDF Sampling for Smith-GGX Reflections" (SIGGRAPH Asia 2023)
 - "Fast Multiple Scattering Approximation" (SIGGRAPH 2023)
-**Timeline**: Week 1 (Nov 3-9) - **Completed foundation**
 
 ### Milestone 1 Achievements
 
-✅ **Fast-MSX Foundation**
+✅ **Fast-MSX Implementation**
 - Relaxed V-cavity model implementation
 - Modified GGX distribution for multiple scattering
 - Integration into PBR material evaluation
 
 ✅ **Framework Integration**
-- Modified nvpro-core PBR shaders (`pbr_material_eval.h.slang`, `pbr_ggx_microfacet.h.slang`)
-- GUI toggles planned for Milestone 2
+- Modified nvpro-core PBR shaders
 - Coordinate with QOLDS for better sampling quality
 
 ### Technical Approach
 
 **Fast-MSX** (Multiple Scattering):
-- Extends single-scatter GGX with multi-scatter term
-- Relaxed V-cavity orientation: `C = normalize(H + N)`
-- Modified geometry term `G_I` and distribution `D_I`
-- Fresnel squared: `F_I = F²` for multi-bounce
-- **Expected benefit**: 100× better energy conservation at α=0.7
-
-**Bounded VNDF** (Importance Sampling):
-- Tighter spherical cap bound: `k = (1 - a²)s² / (s² + a²z²)`
-- Reduces rejection rate by 15-40% for rough surfaces (α = 0.6-1.0)
-- Replaces `SampleGGXVNDF()` in microfacet sampling
-- Leverages QOLDS for better sampling quality
+- **Extends single-scatter GGX with multi-scatter term**
+- Simulating all bounces is slow, we assume most of the lost energy comes from the **second bounce**
+- Add the indirect term (multi-scatter term) to the original smith's GGX evaluation
 
 ### Next Steps (Week 2-3)
 
@@ -344,6 +334,7 @@ Switched to PCG sampling (default pseudo-random)
 ### Cecilia (RMIP)
 
 **Priority Tasks**:
+
 1. Implement custom intersection shader (`rmip_intersection.slang`)
 2. Inverse displacement mapping (ray → texture space)
 3. BLAS/AABB setup for procedural geometry
@@ -362,6 +353,7 @@ Switched to PCG sampling (default pseudo-random)
 4. Integration with RMIP texel marching
 
 **Expected Deliverables**:
+
 - Convergence plots (variance reduction measurement)
 - Validation report (discrepancy metrics)
 
