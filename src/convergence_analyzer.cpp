@@ -1,0 +1,348 @@
+/*
+ * Copyright (c) 2025, MatForge Team (CIS 5650, University of Pennsylvania)
+ */
+
+#include <volk.h>
+#include "convergence_analyzer.hpp"
+#include <fstream>
+#include <cmath>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>  // For printf
+#include <cstring> // For memcpy
+#include <filesystem>
+
+// Note: STB image headers are included in nvpro-core2
+// We'll use simplified PNG export for now
+// #define STB_IMAGE_WRITE_IMPLEMENTATION
+// #include <stb_image_write.h>
+// #define STB_IMAGE_IMPLEMENTATION
+// #include <stb_image.h>
+
+namespace matforge {
+
+//--------------------------------------------------------------------------------------------------
+// Initialization
+//--------------------------------------------------------------------------------------------------
+void ConvergenceAnalyzer::init(nvvk::ResourceAllocator& allocator, VkDevice device, VkExtent2D resolution)
+{
+  m_allocator  = &allocator;
+  m_device     = device;
+  m_resolution = resolution;
+
+  // Create staging buffer for image downloads (RGBA32F)
+  VkDeviceSize bufferSize = resolution.width * resolution.height * 4 * sizeof(float);
+  m_allocator->createBuffer(m_stagingBuffer, bufferSize,
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VMA_MEMORY_USAGE_CPU_ONLY);
+}
+
+void ConvergenceAnalyzer::destroy()
+{
+  if(m_allocator && m_stagingBuffer.buffer != VK_NULL_HANDLE)
+  {
+    m_allocator->destroyBuffer(m_stagingBuffer);
+  }
+  m_allocator = nullptr;
+  m_device    = VK_NULL_HANDLE;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Reference Image Management
+//--------------------------------------------------------------------------------------------------
+void ConvergenceAnalyzer::captureReference(VkCommandBuffer cmd, VkImage sourceImage, VkExtent2D extent)
+{
+  m_referenceImage = downloadImage(cmd, sourceImage, extent);
+  m_hasReference   = true;
+  m_resolution     = extent;
+
+  printf("Convergence Analyzer: Reference image captured (%ux%u)\n", extent.width, extent.height);
+}
+
+void ConvergenceAnalyzer::loadReference(const std::string& filepath)
+{
+  uint32_t width, height;
+  m_referenceImage = loadImage(filepath, width, height);
+  m_hasReference   = true;
+  m_resolution     = {width, height};
+
+  printf("Convergence Analyzer: Reference loaded from %s (%ux%u)\n", filepath.c_str(), width, height);
+}
+
+void ConvergenceAnalyzer::saveReference(const std::string& filepath)
+{
+  if(!m_hasReference)
+  {
+    printf("Error: No reference image to save\n");
+    return;
+  }
+
+  saveImage(filepath, m_referenceImage, m_resolution.width, m_resolution.height);
+  printf("Convergence Analyzer: Reference saved to %s\n", filepath.c_str());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Session Management
+//--------------------------------------------------------------------------------------------------
+void ConvergenceAnalyzer::startSession(const std::string& sessionName, bool useQOLDS)
+{
+  if(!m_hasReference)
+  {
+    printf("Error: Cannot start session without reference image\n");
+    return;
+  }
+
+  m_sessionActive = true;
+  m_sessionName   = sessionName;
+  m_useQOLDS      = useQOLDS;
+  m_metrics.clear();
+  m_capturedFrames.clear();
+
+  printf("Convergence Analyzer: Session started: %s (using %s)\n",
+           sessionName.c_str(), useQOLDS ? "QOLDS" : "PCG");
+}
+
+void ConvergenceAnalyzer::captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double timeMs)
+{
+  if(!m_sessionActive)
+  {
+    printf("Error: No active session\n");
+    return;
+  }
+
+  // Download image from GPU
+  std::vector<float> frameData = downloadImage(cmd, sourceImage, m_resolution);
+
+  // Compute metrics
+  ConvergenceMetrics metrics;
+  metrics.sampleCount   = sampleCount;
+  metrics.mse           = computeMSE(frameData, m_referenceImage, m_resolution.width, m_resolution.height);
+  metrics.psnr          = computePSNR(metrics.mse);
+  metrics.captureTimeMs = timeMs;
+  metrics.useQOLDS      = m_useQOLDS;
+
+  m_metrics.push_back(metrics);
+
+  // Store frame for side-by-side comparison
+  CapturedFrame frame;
+  frame.sampleCount = sampleCount;
+  frame.data        = frameData;
+  m_capturedFrames.push_back(frame);
+
+  printf("Convergence Analyzer: Captured frame at %u samples (MSE: %.6f, PSNR: %.2f dB)\n",
+           sampleCount, metrics.mse, metrics.psnr);
+}
+
+void ConvergenceAnalyzer::endSession()
+{
+  if(!m_sessionActive)
+    return;
+
+  m_sessionActive = false;
+  printf("Convergence Analyzer: Session ended: %s (%zu captures)\n",
+           m_sessionName.c_str(), m_metrics.size());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Metrics Computation
+//--------------------------------------------------------------------------------------------------
+double ConvergenceAnalyzer::computeMSE(const std::vector<float>& img1, const std::vector<float>& img2,
+                                       uint32_t width, uint32_t height)
+{
+  if(img1.size() != img2.size())
+  {
+    printf("Error: Image size mismatch for MSE computation\n");
+    return -1.0;
+  }
+
+  double mse    = 0.0;
+  size_t pixels = width * height;
+
+  for(size_t i = 0; i < pixels; ++i)
+  {
+    // RGB channels only (skip alpha)
+    float diffR = img1[i * 4 + 0] - img2[i * 4 + 0];
+    float diffG = img1[i * 4 + 1] - img2[i * 4 + 1];
+    float diffB = img1[i * 4 + 2] - img2[i * 4 + 2];
+
+    mse += (diffR * diffR + diffG * diffG + diffB * diffB) / 3.0;
+  }
+
+  return mse / static_cast<double>(pixels);
+}
+
+double ConvergenceAnalyzer::computePSNR(double mse)
+{
+  if(mse <= 0.0)
+    return 100.0;  // Perfect match
+
+  // PSNR = 10 * log10(MAX^2 / MSE), where MAX = 1.0 for HDR
+  return 10.0 * std::log10(1.0 / mse);
+}
+
+double ConvergenceAnalyzer::computeVariance(const std::vector<float>& accumulated,
+                                            const std::vector<float>& squaredAccum,
+                                            uint32_t sampleCount, uint32_t width, uint32_t height)
+{
+  if(sampleCount <= 1)
+    return 0.0;
+
+  double totalVariance = 0.0;
+  size_t pixels        = width * height;
+
+  for(size_t i = 0; i < pixels; ++i)
+  {
+    // Variance = E[X^2] - E[X]^2
+    float meanR = accumulated[i * 4 + 0] / sampleCount;
+    float meanG = accumulated[i * 4 + 1] / sampleCount;
+    float meanB = accumulated[i * 4 + 2] / sampleCount;
+
+    float mean2R = squaredAccum[i * 4 + 0] / sampleCount;
+    float mean2G = squaredAccum[i * 4 + 1] / sampleCount;
+    float mean2B = squaredAccum[i * 4 + 2] / sampleCount;
+
+    float varR = mean2R - meanR * meanR;
+    float varG = mean2G - meanG * meanG;
+    float varB = mean2B - meanB * meanB;
+
+    totalVariance += (varR + varG + varB) / 3.0;
+  }
+
+  return totalVariance / static_cast<double>(pixels);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Export
+//--------------------------------------------------------------------------------------------------
+void ConvergenceAnalyzer::exportToCSV(const std::string& filepath)
+{
+  std::ofstream file(filepath);
+  if(!file.is_open())
+  {
+    printf("Error: Could not open file for writing: %s\n", filepath.c_str());
+    return;
+  }
+
+  // CSV header
+  file << "SampleCount,MSE,PSNR,TimeMs,Sampler\n";
+
+  // Data rows
+  for(const auto& metric : m_metrics)
+  {
+    file << metric.sampleCount << ","
+         << metric.mse << ","
+         << metric.psnr << ","
+         << metric.captureTimeMs << ","
+         << (metric.useQOLDS ? "QOLDS" : "PCG") << "\n";
+  }
+
+  file.close();
+  printf("Convergence Analyzer: Exported to CSV: %s\n", filepath.c_str());
+}
+
+void ConvergenceAnalyzer::exportComparisonImages(const std::string& directory)
+{
+  // Create directory if it doesn't exist
+  std::filesystem::create_directories(directory);
+
+  for(const auto& frame : m_capturedFrames)
+  {
+    std::string filename = directory + "/" + m_sessionName + "_" + std::to_string(frame.sampleCount) + "spp.png";
+    saveImage(filename, frame.data, m_resolution.width, m_resolution.height);
+  }
+
+  printf("Convergence Analyzer: Exported %zu comparison images to %s\n",
+           m_capturedFrames.size(), directory.c_str());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Image I/O
+//--------------------------------------------------------------------------------------------------
+std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkImage image, VkExtent2D extent)
+{
+  // Transition image to TRANSFER_SRC_OPTIMAL
+  VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  barrier.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  barrier.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+  barrier.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  barrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.image               = image;
+  barrier.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+  // Copy image to staging buffer
+  VkBufferImageCopy region{};
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageExtent      = {extent.width, extent.height, 1};
+
+  vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_stagingBuffer.buffer, 1, &region);
+
+  // Transition back to GENERAL
+  barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  barrier.newLayout     = VK_IMAGE_LAYOUT_GENERAL;
+
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+  // Download to CPU (must be called after command buffer submission!)
+  std::vector<float> data(extent.width * extent.height * 4);
+
+  // TODO: Implement proper memory mapping with nvvk allocator
+  // For now, return empty data (stub)
+  printf("Warning: downloadImage not fully implemented yet\n");
+
+  return data;
+}
+
+void ConvergenceAnalyzer::saveImage(const std::string& filepath, const std::vector<float>& data,
+                                    uint32_t width, uint32_t height)
+{
+  // TODO: Implement image saving using STB or EXR library
+  // For now, just save raw float data
+  std::ofstream file(filepath + ".raw", std::ios::binary);
+  if(file.is_open())
+  {
+    file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    file.close();
+    printf("  Saved raw image data: %s.raw (%ux%u)\n", filepath.c_str(), width, height);
+  }
+  else
+  {
+    printf("  Error: Could not save image: %s\n", filepath.c_str());
+  }
+}
+
+std::vector<float> ConvergenceAnalyzer::loadImage(const std::string& filepath, uint32_t& width, uint32_t& height)
+{
+  // TODO: Implement image loading using STB or EXR library
+  // For now, attempt to load raw float data
+  std::ifstream file(filepath + ".raw", std::ios::binary | std::ios::ate);
+
+  if(!file.is_open())
+  {
+    printf("Error: Could not load image: %s\n", filepath.c_str());
+    return {};
+  }
+
+  size_t fileSize = file.tellg();
+  file.seekg(0, std::ios::beg);
+
+  // Assume square image for now (simplification)
+  size_t pixels = fileSize / (4 * sizeof(float));
+  width = height = static_cast<uint32_t>(std::sqrt(pixels));
+
+  std::vector<float> data(width * height * 4);
+  file.read(reinterpret_cast<char*>(data.data()), data.size() * sizeof(float));
+  file.close();
+
+  printf("Loaded raw image data: %s.raw (%ux%u)\n", filepath.c_str(), width, height);
+  return data;
+}
+
+}  // namespace matforge
