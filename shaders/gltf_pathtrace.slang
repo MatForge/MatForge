@@ -39,8 +39,8 @@
 
 #include "common.h.slang"
 #include "raytracer_interface.h.slang"
+#include "fast_msx.h.slang"
 #include "qolds_sampling.h.slang"
-
 
 // Bindings
 // clang-format off
@@ -689,7 +689,10 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
         evalData.k1 = -ray.Direction;
         evalData.k2 = directLight.direction;
         evalData.xi = float3(rand(seed), rand(seed), rand(seed));
-        bsdfEvaluate(evalData, pbrMat);
+
+        bool useFastMSX = (pushConst.useFastMSX == 1);
+
+        bsdfEvaluate_msx(evalData, pbrMat, useFastMSX);
 
         // If the PDF is greater than 0, then we can sample the BSDF
         if(evalData.pdf > 0.0)

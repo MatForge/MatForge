@@ -4,7 +4,6 @@
 **Course**: CIS 5650 GPU Programming (University of Pennsylvania)
 **Team**: 3 Students
 **Milestone Date**: November 12, 2025
-**Report Date**: November 11, 2025
 
 ---
 
@@ -17,7 +16,7 @@
 All three team members have successfully completed their Milestone 1 deliverables:
 - **Cecilia (RMIP)**: RMIP data structure builder and GPU compute pipeline operational
 - **Yiding (QOLDS)**: Complete QOLDS sampling system integrated into path tracer
-- **Xiaonan (Fast-MSX)**: Fast-MSX and Bounded VNDF foundations implemented
+- **Xiaonan (Fast-MSX)**: Fast-MSX implemented
 
 We are **ahead of schedule**, with strong foundations in place for full integration by Milestone 2 (November 24).
 
@@ -57,9 +56,9 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 └─────────────────────────────────────────────────────┘
 ```
 
-**Base Framework**: NVIDIA nvpro-samples/vk_gltf_renderer
+**Base Framework**: [NVIDIA nvpro-samples/vk_gltf_renderer](https://github.com/nvpro-samples/vk_gltf_renderer)
 **Platform**: Vulkan 1.3 with ray tracing extensions
-**Target Hardware**: NVIDIA RTX 4070
+**Target Hardware**: NVIDIA RTX 4070, RTX 4070 Laptop, RTX 5080
 **Shader Language**: Slang with hot-reload support
 
 ---
@@ -72,7 +71,7 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 |-------------|-----------|-------------------|--------|---------------|
 | **Cecilia** | RMIP | ✅ Builder + GPU pipeline | **COMPLETE** | ~800 LOC |
 | **Yiding** | Quad LDS | ✅ Host + Device + Integration | **COMPLETE** | ~400 LOC |
-| **Xiaonan** | Fast-MSX + Bounded VNDF | ✅ Foundation implemented | **COMPLETE** | ~350 LOC |
+| **Xiaonan** | Fast-MSX | ✅ Implemented | **COMPLETE** | ~350 LOC |
 
 **Total Implementation**: ~1,550 lines of production code (excluding comments and whitespace)
 
@@ -85,6 +84,8 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 **Timeline**: Week 1 (Nov 3-9) - **Completed on schedule**
 
 ### Milestone 1 Achievements
+
+<img src="./RMIP_structure.png" alt="RMIP Structure" width="60%">
 
 ✅ **RMIP Data Structure Builder** (C++)
 - Hierarchical min-max pyramid construction for rectangular texture queries
@@ -139,17 +140,33 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 ### Next Steps (Week 2)
 
 - ⏭️ Custom intersection shader for ray-displacement intersection
+- ⏭️ Hybrid traversal algorithm (Algorithm 1 from the paper)
 - ⏭️ Inverse displacement mapping implementation
-- ⏭️ BLAS/AABB setup for procedural geometry
 - ⏭️ First end-to-end ray intersection test
 
 ---
 
 ## Yiding: Quad-Optimized LDS (Sampling Foundation)
 
-**Developer**: Yiding (Report Author)
+**Developer**: Yiding
 **Paper**: "Quad-Optimized Low-Discrepancy Sequences" (SIGGRAPH 2024)
 **Timeline**: Week 1 (Nov 4-10) - **Completed on schedule**
+
+### Algorithm Overview
+
+**Base-3 Sobol' Sequences**:
+1. Convert sample index to base-3 representation
+2. Apply generator matrices (from GF(3) irreducible polynomials)
+3. Apply Owen scrambling (nested uniform permutations)
+4. Convert back to float in [0, 1)
+
+**Benefits**:
+- **Low Discrepancy**: (1,4)-sequence property ensures better space-filling
+- **Quad Optimization**: Designed for 2×2 pixel blocks (GPU warp-friendly)
+- **Owen Scrambling**: Randomization prevents aliasing artifacts
+- **Fast**: ~10 arithmetic operations per sample (negligible overhead)
+
+![](QOLDS_paper_chart.png)
 
 ### Milestone 1 Achievements
 
@@ -176,60 +193,7 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 - Console logging confirms correct initialization
 - Toggle verified working (switches between PCG and QOLDS)
 
-### Technical Implementation
-
-**Key Components**:
-
-1. **QOLDSBuilder Class** (`src/qolds_builder.hpp/cpp`)
-   ```cpp
-   class QOLDSBuilder {
-       bool loadInitData(const std::string& filepath);
-       void buildMatrices(int dimensions, int digits);
-       void generateScrambleSeeds(uint32_t masterSeed);
-       const std::vector<int32_t>& getMatrixData() const;
-       const std::vector<uint32_t>& getScrambleSeeds() const;
-   };
-   ```
-
-2. **GPU Data Structures**:
-   - **Matrices Buffer**: 47 × 5 × 5 int32 matrices (flattened) = 11,175 elements
-   - **Seeds Buffer**: 47 uint32 scrambling seeds
-   - **Total GPU Memory**: ~45KB (negligible overhead)
-
-3. **Shader Integration** (`shaders/qolds_sampling.h.slang`):
-   ```slang
-   struct Integer3 {
-       int digits[10];  // Base-3 digits
-       static int mod(int x);
-       static int fma(int a, int b, int c);
-   };
-
-   float qolds_sample(uint index, uint dimension,
-                      StructuredBuffer<int> matrices,
-                      StructuredBuffer<uint> seeds,
-                      uint m = 5);
-   ```
-
-4. **Path Tracer Wrapper Functions**:
-   ```slang
-   float sample1D(inout uint seed, uint sampleIndex, inout uint dimension);
-   float2 sample2D(inout uint seed, uint sampleIndex, inout uint dimension);
-   float3 sample3D(inout uint seed, uint sampleIndex, inout uint dimension);
-   ```
-
-### Algorithm Overview
-
-**Base-3 Sobol' Sequences**:
-1. Convert sample index to base-3 representation
-2. Apply generator matrices (from GF(3) irreducible polynomials)
-3. Apply Owen scrambling (nested uniform permutations)
-4. Convert back to float in [0, 1)
-
-**Benefits**:
-- **Low Discrepancy**: (1,4)-sequence property ensures better space-filling
-- **Quad Optimization**: Designed for 2×2 pixel blocks (GPU warp-friendly)
-- **Owen Scrambling**: Randomization prevents aliasing artifacts
-- **Fast**: ~10 arithmetic operations per sample (negligible overhead)
+![](QOLDS_screenshot.png)
 
 ### Console Output
 
@@ -238,7 +202,7 @@ MatForge implements **FOUR complementary SIGGRAPH papers** (2023-2024) in a unif
 [QOLDS] Built 47 matrices of size 5x5 (max 243 points)
 [QOLDS] Generated 47 scrambling seeds
 QOLDS buffers created: 47 dimensions, 243 max points
-Path tracer initialized with PCG (default) sampling
+|-> 8.792 ms
 ```
 
 **Toggle Logging**:
@@ -246,27 +210,6 @@ Path tracer initialized with PCG (default) sampling
 Switched to QOLDS sampling (Quad-Optimized Low-Discrepancy Sequences)
 Switched to PCG sampling (default pseudo-random)
 ```
-
-### Challenges & Solutions
-
-**Challenge 1**: File path resolution for `initIrreducibleGF3.dat`
-- **Solution**: Implemented robust path resolution using `nvutils::findFile()` with fallback to executable-relative path
-- **Result**: Works from any working directory
-
-**Challenge 2**: Array bounds violation (48 vs 47 dimensions)
-- **Problem**: Init file contains 47 dimensions, code requested 48
-- **Solution**: Changed `buildMatrices(48, 5)` → `buildMatrices(47, 5)`
-- **Result**: No crashes, stable operation
-
-**Challenge 3**: Slang mutability errors in FCRNG
-- **Problem**: `++n` in method requires `[mutating]` attribute
-- **Solution**: Added `[mutating]` to `sample()` and `sampleRange()`, split increment
-- **Result**: Compiles cleanly, no warnings
-
-**Challenge 4**: Immutable return value from `index()`
-- **Problem**: `rng.index(nodeIndex).sampleRange(6u)` - temporary is immutable
-- **Solution**: Store in mutable variable: `FCRNG tempRng = rng.index(nodeIndex);`
-- **Result**: Owen scrambling works correctly
 
 ### Next Steps (Week 2)
 
@@ -279,47 +222,36 @@ Switched to PCG sampling (default pseudo-random)
 
 ## Xiaonan: Fast-MSX + Bounded VNDF (Material System)
 
+![](./img/msx.png)
+
+![](./img/msxshowcase.png)
+
 **Developer**: Xiaonan
 **Papers**:
+
 - "Bounded VNDF Sampling for Smith-GGX Reflections" (SIGGRAPH Asia 2023)
 - "Fast Multiple Scattering Approximation" (SIGGRAPH 2023)
-**Timeline**: Week 1 (Nov 3-9) - **Completed foundation**
 
 ### Milestone 1 Achievements
 
-✅ **Fast-MSX Foundation**
+✅ **Fast-MSX Implementation**
 - Relaxed V-cavity model implementation
 - Modified GGX distribution for multiple scattering
 - Integration into PBR material evaluation
 
-✅ **Bounded VNDF Foundation**
-- Spherical cap bounding computation
-- Tighter bounds for rejection sampling
-- Integration point identification in `pbr_ggx_microfacet.h.slang`
-
 ✅ **Framework Integration**
-- Modified nvpro-core PBR shaders (`pbr_material_eval.h.slang`, `pbr_ggx_microfacet.h.slang`)
-- GUI toggles planned for Milestone 2
+- Modified nvpro-core PBR shaders
 - Coordinate with QOLDS for better sampling quality
 
 ### Technical Approach
 
 **Fast-MSX** (Multiple Scattering):
-- Extends single-scatter GGX with multi-scatter term
-- Relaxed V-cavity orientation: `C = normalize(H + N)`
-- Modified geometry term `G_I` and distribution `D_I`
-- Fresnel squared: `F_I = F²` for multi-bounce
-- **Expected benefit**: 100× better energy conservation at α=0.7
-
-**Bounded VNDF** (Importance Sampling):
-- Tighter spherical cap bound: `k = (1 - a²)s² / (s² + a²z²)`
-- Reduces rejection rate by 15-40% for rough surfaces (α = 0.6-1.0)
-- Replaces `SampleGGXVNDF()` in microfacet sampling
-- Leverages QOLDS for better sampling quality
+- **Extends single-scatter GGX with multi-scatter term**
+- Simulating all bounces is slow, we assume most of the lost energy comes from the **second bounce**
+- Add the indirect term (multi-scatter term) to the original smith's GGX evaluation
 
 ### Next Steps (Week 2-3)
 
-- ⏭️ Complete Fast-MSX BRDF evaluation
 - ⏭️ Complete Bounded VNDF sampler
 - ⏭️ Rejection rate measurement and comparison
 - ⏭️ Test spheres with varying roughness (α = 0.3 to 0.9)
@@ -368,127 +300,6 @@ Switched to PCG sampling (default pseudo-random)
 
 ---
 
-## Technical Metrics
-
-### Code Statistics
-
-| Metric | QOLDS | RMIP | MSX/VNDF | Total |
-|--------|-------|------|----------|-------|
-| **C++ LOC** | 300 | 400 | 0 | 700 |
-| **Slang LOC** | 400 | 400 | 350 | 1,150 |
-| **Total LOC** | 700 | 800 | 350 | 1,850 |
-| **New Files** | 5 | 5 | 2 | 12 |
-| **Modified Files** | 8 | 7 | 2 | 17 |
-
-*Note: LOC = Lines of Code (excluding comments and whitespace)*
-
-### Build Statistics
-
-- **Clean Build Time**: ~2 minutes (Release mode)
-- **Incremental Build Time**: ~10 seconds (shader changes only)
-- **Executable Size**: 10.3 MB
-- **Total Repository Size**: ~850 MB (with build artifacts)
-
-### Runtime Performance
-
-**Startup Performance** (measured on RTX 4070):
-```
-Creating Vulkan Context            -> 112.3 ms
-Scene Loading                      -> 1.2 ms
-BLAS Construction                  -> 0.5 ms
-TLAS Construction                  -> 0.1 ms
-QOLDS Initialization               -> 0.3 ms
-RMIP Builder Setup                 -> 0.2 ms
-Pipeline Compilation (cached)      -> 133.6 ms
-Total Initialization               -> 248.2 ms
-```
-
-**Memory Usage**:
-- **Base Framework**: ~1.2 GB
-- **QOLDS Data**: 45 KB (negligible)
-- **RMIP Structures**: ~32 MB (for 4K displacement maps)
-- **Total**: ~1.25 GB
-
----
-
-## Challenges & Solutions
-
-### QOLDS Implementation
-
-**Challenge**: Base-3 arithmetic in Slang
-- **Solution**: Lookup tables for `mod(3)` and `fma(a,b,c)` operations
-- **Result**: ~3× faster than naive modulo
-
-**Challenge**: Slang mutability semantics
-- **Solution**: Added `[mutating]` attributes, stored temporaries
-- **Result**: Clean compilation, no warnings
-
-**Challenge**: 47 vs 48 dimensions mismatch
-- **Solution**: Verified init file contents, adjusted code
-- **Result**: Stable, crash-free operation
-
-### RMIP Implementation
-
-**Challenge**: Async command buffer queueing
-- **Solution**: Mutex-protected queue for GPU work
-- **Result**: Non-blocking RMIP builds during scene load
-
-**Challenge**: Descriptor set management for compute
-- **Solution**: Separate descriptor pools and layouts
-- **Result**: Clean separation from ray tracing descriptors
-
-### Team Coordination
-
-**Challenge**: Parallel development without conflicts
-- **Solution**: Clear file ownership, early integration planning
-- **Result**: Zero merge conflicts, smooth integration
-
-**Challenge**: Testing without full pipeline
-- **Solution**: Individual unit tests for each component
-- **Result**: Confident in individual implementations
-
----
-
-## Testing & Validation
-
-### Unit Tests Completed
-
-✅ **QOLDS**
-- Initialization data loading (47 dimensions verified)
-- Matrix generation (5×5 matrices per dimension)
-- Owen scrambling (6 permutation lookup)
-- Toggle switching (PCG ↔ QOLDS)
-
-✅ **RMIP**
-- Builder initialization
-- Compute pipeline creation
-- Command buffer recording
-- Descriptor set binding
-
-✅ **Integration**
-- Vulkan resource management (no leaks)
-- Shader hot-reload (F5 working)
-- GUI updates (real-time parameter changes)
-
-### Visual Tests Pending (Milestone 2)
-
-⏭️ **QOLDS Convergence**
-- Side-by-side rendering (PCG vs QOLDS)
-- Variance measurement over iterations
-- 4D projection analysis
-
-⏭️ **RMIP Displacement**
-- Single displaced plane test
-- Comparison with tessellation baseline
-- Performance profiling (FPS, memory)
-
-⏭️ **Fast-MSX Energy Conservation**
-- White furnace test
-- Rough sphere rendering (α = 0.7, 0.9)
-- Comparison with reference implementation
-
----
-
 ## Schedule Status
 
 ### Original Schedule
@@ -523,6 +334,7 @@ Total Initialization               -> 248.2 ms
 ### Cecilia (RMIP)
 
 **Priority Tasks**:
+
 1. Implement custom intersection shader (`rmip_intersection.slang`)
 2. Inverse displacement mapping (ray → texture space)
 3. BLAS/AABB setup for procedural geometry
@@ -541,19 +353,19 @@ Total Initialization               -> 248.2 ms
 4. Integration with RMIP texel marching
 
 **Expected Deliverables**:
+
 - Convergence plots (variance reduction measurement)
 - Validation report (discrepancy metrics)
 
 ### Xiaonan (Fast-MSX + Bounded VNDF)
 
 **Priority Tasks**:
-1. Complete Fast-MSX BRDF evaluation
-2. Complete Bounded VNDF sampler
-3. Rejection rate measurement
-4. Test spheres with varying roughness
+
+1. Complete Bounded VNDF sampler
+2. Rejection rate measurement
 
 **Expected Deliverables**:
-- Working Fast-MSX toggle
+
 - Working Bounded VNDF toggle
 - Comparison images (with/without each technique)
 
@@ -562,7 +374,7 @@ Total Initialization               -> 248.2 ms
 **Integration Milestone (Nov 16)**:
 - ✅ QOLDS providing samples to all techniques
 - ✅ RMIP ray tracing working (basic test)
-- ✅ Fast-MSX and Bounded VNDF toggleable
+- ✅ Bounded VNDF toggleable
 - ⏭️ Full pipeline test (all 4 techniques together)
 
 ---
@@ -627,7 +439,7 @@ Total Initialization               -> 248.2 ms
 The MatForge team has successfully completed all Milestone 1 deliverables:
 - **QOLDS**: Fully integrated sampling system (700 LOC)
 - **RMIP**: GPU-accelerated data structure builder (800 LOC)
-- **Fast-MSX + Bounded VNDF**: Foundation implementations (350 LOC)
+- **Fast-MSX**: Foundation implementations (350 LOC)
 
 **Total Contribution**: 1,850 lines of production code in 8 days of development.
 
