@@ -1178,11 +1178,12 @@ void GltfRenderer::startConvergenceTest(bool useQOLDS)
   m_convergenceTestCurrentIndex = 0;
   m_convergenceTestStartTime    = std::chrono::steady_clock::now();
 
-  // Set QOLDS mode in path tracer
+  // Set QOLDS mode in path tracer (both push constant and checkbox state)
   if(m_pathTracer.m_pushConst.useQOLDS != (useQOLDS ? 1 : 0))
   {
     m_pathTracer.m_pushConst.useQOLDS = useQOLDS ? 1 : 0;
   }
+  m_pathTracer.m_useQOLDS = useQOLDS;  // Update checkbox state to reflect current sampling method
 
   // Reset rendering to start fresh
   resetFrame();
