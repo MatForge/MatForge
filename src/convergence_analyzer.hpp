@@ -55,6 +55,9 @@ public:
   // Set reference image (ground truth) from current frame
   void captureReference(VkCommandBuffer cmd, VkImage sourceImage, VkExtent2D extent);
 
+  // Finalize reference capture (call after command buffer completes)
+  void finalizeReferenceCapture();
+
   // Load reference from file (high-quality render)
   void loadReference(const std::string& filepath);
 
@@ -70,6 +73,9 @@ public:
 
   // Capture current frame at given sample count
   void captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double timeMs);
+
+  // Finalize frame capture (call after command buffer completes)
+  void finalizeFrameCapture();
 
   // End session and export results
   void endSession();
@@ -106,7 +112,13 @@ public:
   std::string getSessionName() const { return m_sessionName; }
 
 private:
-  // Download image from GPU to CPU
+  // Record image download command (GPU -> staging buffer)
+  void recordImageDownload(VkCommandBuffer cmd, VkImage image, VkExtent2D extent);
+
+  // Read from staging buffer (call after GPU copy completes)
+  std::vector<float> readStagingBuffer(VkExtent2D extent);
+
+  // Download image from GPU to CPU (convenience function - handles sync internally)
   std::vector<float> downloadImage(VkCommandBuffer cmd, VkImage image, VkExtent2D extent);
 
   // Save image to file (PNG or EXR)
@@ -128,6 +140,10 @@ private:
   bool        m_sessionActive{false};
   std::string m_sessionName;
   bool        m_useQOLDS{false};
+
+  // Pending capture (for async download)
+  uint32_t m_pendingSampleCount{0};
+  double   m_pendingTimeMs{0.0};
 
   // Captured metrics
   std::vector<ConvergenceMetrics> m_metrics;

@@ -193,6 +193,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Silhouette renderer
   m_silhouette.init(m_resources);
 
+  // Convergence analyzer
+  m_convergenceAnalyzer.init(m_resources.allocator, m_device, {100, 100});  // Will be resized on first use
+
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.sceneRtx.init(&m_resources.allocator);
@@ -371,6 +374,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         m_rasterizer.onRender(cmd, m_resources);
         break;
     }
+
+    // Update convergence test if active
+    updateConvergenceTest(cmd);
   }
   else
   {
@@ -985,6 +991,10 @@ void GltfRenderer::destroyResources()
   m_resources.samplerPool.deinit();
   m_resources.staging.deinit();
   m_rayPicker.deinit();
+
+  // Destroy convergence analyzer before allocator to prevent memory leak
+  m_convergenceAnalyzer.destroy();
+
   m_resources.allocator.deinit();
 }
 
@@ -1129,4 +1139,110 @@ bool GltfRenderer::processQueuedCommandBuffers()
     return true;  // Command buffer was processed
   }
   return false;  // No command buffer was processed
+}
+
+//--------------------------------------------------------------------------------------------------
+// Convergence Testing
+//--------------------------------------------------------------------------------------------------
+
+void GltfRenderer::startConvergenceTest(bool useQOLDS)
+{
+  // Capture reference image first (must be at high sample count)
+  if(m_resources.frameCount < 100)
+  {
+    printf("Warning: Current frame count is %d. Please render to 512+ samples before starting test.\n", m_resources.frameCount);
+    printf("Capturing reference anyway, but results may be inaccurate.\n");
+  }
+
+  // Capture reference from current frame
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+  VkImage  refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+  VkExtent2D size   = m_resources.gBuffers.getSize();
+
+  m_convergenceAnalyzer.captureReference(cmd, refImage, size);
+
+  nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+  // Finalize reference capture after GPU sync
+  m_convergenceAnalyzer.finalizeReferenceCapture();
+
+  // Start convergence session
+  std::string sessionName = useQOLDS ? "qolds_test" : "pcg_test";
+  m_convergenceAnalyzer.startSession(sessionName, useQOLDS);
+
+  // Set test state
+  m_convergenceTestActive       = true;
+  m_convergenceTestUseQOLDS     = useQOLDS;
+  m_convergenceTestCurrentIndex = 0;
+  m_convergenceTestStartTime    = std::chrono::steady_clock::now();
+
+  // Set QOLDS mode in path tracer
+  if(m_pathTracer.m_pushConst.useQOLDS != (useQOLDS ? 1 : 0))
+  {
+    m_pathTracer.m_pushConst.useQOLDS = useQOLDS ? 1 : 0;
+  }
+
+  // Reset rendering to start fresh
+  resetFrame();
+
+  printf("Convergence test started: %s (will capture at %zu sample counts)\n",
+         sessionName.c_str(), m_convergenceTestSampleCounts.size());
+}
+
+void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
+{
+  if(!m_convergenceTestActive)
+    return;
+
+  // Finalize previous capture if pending (by now the GPU has completed the copy)
+  if(m_convergenceTestPendingFinalize)
+  {
+    m_convergenceAnalyzer.finalizeFrameCapture();
+    m_convergenceTestPendingFinalize = false;
+  }
+
+  // Check if we've reached the next sample count milestone
+  if(m_convergenceTestCurrentIndex >= m_convergenceTestSampleCounts.size())
+  {
+    // Test complete
+    m_convergenceTestActive = false;
+    m_convergenceAnalyzer.endSession();
+
+    // Export results
+    std::string sessionName = m_convergenceTestUseQOLDS ? "qolds_test" : "pcg_test";
+    std::string csvFile     = sessionName + ".csv";
+    m_convergenceAnalyzer.exportToCSV(csvFile);
+
+    auto duration = std::chrono::steady_clock::now() - m_convergenceTestStartTime;
+    auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+
+    printf("Convergence test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+    return;
+  }
+
+  uint32_t targetSamples = m_convergenceTestSampleCounts[m_convergenceTestCurrentIndex];
+
+  // Wait until we've accumulated enough samples
+  if(static_cast<uint32_t>(m_resources.frameCount + 1) >= targetSamples)
+  {
+    // Capture this milestone (records GPU copy command)
+    VkImage    testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+    VkExtent2D size      = m_resources.gBuffers.getSize();
+
+    auto      duration = std::chrono::steady_clock::now() - m_convergenceTestStartTime;
+    double    timeMs   = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    m_convergenceAnalyzer.captureFrame(cmd, testImage, targetSamples, timeMs);
+
+    // Mark as pending - will finalize on next frame after GPU completes
+    m_convergenceTestPendingFinalize = true;
+
+    // Move to next milestone
+    m_convergenceTestCurrentIndex++;
+
+    printf("Recorded capture %zu/%zu at %u samples (will finalize next frame)\n", m_convergenceTestCurrentIndex,
+           m_convergenceTestSampleCounts.size(), targetSamples);
+  }
 }

@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <queue>
 #include <mutex>
+#include <chrono>
 
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
@@ -54,6 +55,7 @@
 #include "ui_busy_window.hpp"
 #include "ui_scene_graph.hpp"
 #include "qolds_builder.hpp"
+#include "convergence_analyzer.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -99,6 +101,11 @@ private:
   bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
 
   /////
+  /// Convergence Testing
+  void startConvergenceTest(bool useQOLDS);
+  void updateConvergenceTest(VkCommandBuffer cmd);
+
+  /////
   /// UI
   void          renderUI();
   void          renderMenu();
@@ -142,6 +149,17 @@ private:
 
   // QOLDS sampling
   std::unique_ptr<QOLDSBuilder> m_qoldsBuilder;  // QOLDS matrix generator
+
+  // Convergence analysis
+  matforge::ConvergenceAnalyzer m_convergenceAnalyzer;  // Convergence analyzer for QOLDS testing
+
+  // Convergence test state
+  bool                     m_convergenceTestActive{false};
+  bool                     m_convergenceTestUseQOLDS{false};
+  bool                     m_convergenceTestPendingFinalize{false};
+  std::vector<uint32_t>    m_convergenceTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128};
+  size_t                   m_convergenceTestCurrentIndex{0};
+  std::chrono::steady_clock::time_point m_convergenceTestStartTime;
 
   std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 

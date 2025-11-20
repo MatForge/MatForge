@@ -28,16 +28,36 @@ void ConvergenceAnalyzer::init(nvvk::ResourceAllocator& allocator, VkDevice devi
   m_resolution = resolution;
 
   // Create staging buffer for image downloads (RGBA32F)
+  // Use CPU_TO_GPU for host-visible memory that can be mapped
   VkDeviceSize bufferSize = resolution.width * resolution.height * 4 * sizeof(float);
   m_allocator->createBuffer(m_stagingBuffer, bufferSize,
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VMA_MEMORY_USAGE_CPU_ONLY);
+                            VMA_MEMORY_USAGE_CPU_TO_GPU);  // CPU-visible for readback
+
+  // Map the staging buffer persistently
+  void* mapped = nullptr;
+  VkResult result = vmaMapMemory(*m_allocator, m_stagingBuffer.allocation, &mapped);
+  if(result == VK_SUCCESS)
+  {
+    m_stagingBuffer.mapping = static_cast<uint8_t*>(mapped);
+    printf("Convergence Analyzer: Staging buffer mapped successfully (%llu bytes)\n", (unsigned long long)bufferSize);
+  }
+  else
+  {
+    printf("Error: Failed to map staging buffer (VkResult: %d)\n", result);
+  }
 }
 
 void ConvergenceAnalyzer::destroy()
 {
   if(m_allocator && m_stagingBuffer.buffer != VK_NULL_HANDLE)
   {
+    // Unmap before destroying
+    if(m_stagingBuffer.mapping != nullptr)
+    {
+      vmaUnmapMemory(*m_allocator, m_stagingBuffer.allocation);
+      m_stagingBuffer.mapping = nullptr;
+    }
     m_allocator->destroyBuffer(m_stagingBuffer);
   }
   m_allocator = nullptr;
@@ -49,11 +69,21 @@ void ConvergenceAnalyzer::destroy()
 //--------------------------------------------------------------------------------------------------
 void ConvergenceAnalyzer::captureReference(VkCommandBuffer cmd, VkImage sourceImage, VkExtent2D extent)
 {
-  m_referenceImage = downloadImage(cmd, sourceImage, extent);
-  m_hasReference   = true;
-  m_resolution     = extent;
+  // Record the download command (GPU copy to staging buffer)
+  recordImageDownload(cmd, sourceImage, extent);
+  m_resolution = extent;
 
-  printf("Convergence Analyzer: Reference image captured (%ux%u)\n", extent.width, extent.height);
+  // NOTE: Caller must submit and wait for command buffer, then call finalizeReferenceCapture()
+  printf("Convergence Analyzer: Reference download recorded (%ux%u) - waiting for GPU sync...\n", extent.width, extent.height);
+}
+
+void ConvergenceAnalyzer::finalizeReferenceCapture()
+{
+  // Read from staging buffer (after GPU copy completes)
+  m_referenceImage = readStagingBuffer(m_resolution);
+  m_hasReference   = true;
+
+  printf("Convergence Analyzer: Reference image finalized (%ux%u)\n", m_resolution.width, m_resolution.height);
 }
 
 void ConvergenceAnalyzer::loadReference(const std::string& filepath)
@@ -107,27 +137,45 @@ void ConvergenceAnalyzer::captureFrame(VkCommandBuffer cmd, VkImage sourceImage,
     return;
   }
 
-  // Download image from GPU
-  std::vector<float> frameData = downloadImage(cmd, sourceImage, m_resolution);
+  // Record the download command (GPU copy to staging buffer)
+  recordImageDownload(cmd, sourceImage, m_resolution);
+
+  // Store pending capture info
+  m_pendingSampleCount = sampleCount;
+  m_pendingTimeMs      = timeMs;
+
+  // NOTE: Caller must submit and wait for command buffer, then call finalizeFrameCapture()
+}
+
+void ConvergenceAnalyzer::finalizeFrameCapture()
+{
+  if(!m_sessionActive)
+  {
+    printf("Error: No active session\n");
+    return;
+  }
+
+  // Read from staging buffer (after GPU copy completes)
+  std::vector<float> frameData = readStagingBuffer(m_resolution);
 
   // Compute metrics
   ConvergenceMetrics metrics;
-  metrics.sampleCount   = sampleCount;
+  metrics.sampleCount   = m_pendingSampleCount;
   metrics.mse           = computeMSE(frameData, m_referenceImage, m_resolution.width, m_resolution.height);
   metrics.psnr          = computePSNR(metrics.mse);
-  metrics.captureTimeMs = timeMs;
+  metrics.captureTimeMs = m_pendingTimeMs;
   metrics.useQOLDS      = m_useQOLDS;
 
   m_metrics.push_back(metrics);
 
   // Store frame for side-by-side comparison
   CapturedFrame frame;
-  frame.sampleCount = sampleCount;
+  frame.sampleCount = m_pendingSampleCount;
   frame.data        = frameData;
   m_capturedFrames.push_back(frame);
 
   printf("Convergence Analyzer: Captured frame at %u samples (MSE: %.6f, PSNR: %.2f dB)\n",
-           sampleCount, metrics.mse, metrics.psnr);
+           m_pendingSampleCount, metrics.mse, metrics.psnr);
 }
 
 void ConvergenceAnalyzer::endSession()
@@ -255,8 +303,47 @@ void ConvergenceAnalyzer::exportComparisonImages(const std::string& directory)
 //--------------------------------------------------------------------------------------------------
 // Image I/O
 //--------------------------------------------------------------------------------------------------
-std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkImage image, VkExtent2D extent)
+void ConvergenceAnalyzer::recordImageDownload(VkCommandBuffer cmd, VkImage image, VkExtent2D extent)
 {
+  // Resize staging buffer if resolution changed
+  if(extent.width != m_resolution.width || extent.height != m_resolution.height)
+  {
+    printf("Convergence Analyzer: Resizing staging buffer from %ux%u to %ux%u\n",
+           m_resolution.width, m_resolution.height, extent.width, extent.height);
+
+    // Destroy old buffer
+    if(m_stagingBuffer.buffer != VK_NULL_HANDLE)
+    {
+      if(m_stagingBuffer.mapping != nullptr)
+      {
+        vmaUnmapMemory(*m_allocator, m_stagingBuffer.allocation);
+        m_stagingBuffer.mapping = nullptr;
+      }
+      m_allocator->destroyBuffer(m_stagingBuffer);
+    }
+
+    // Create new buffer with correct size
+    VkDeviceSize bufferSize = extent.width * extent.height * 4 * sizeof(float);
+    m_allocator->createBuffer(m_stagingBuffer, bufferSize,
+                              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    // Map the new buffer
+    void* mapped = nullptr;
+    VkResult result = vmaMapMemory(*m_allocator, m_stagingBuffer.allocation, &mapped);
+    if(result == VK_SUCCESS)
+    {
+      m_stagingBuffer.mapping = static_cast<uint8_t*>(mapped);
+      printf("Convergence Analyzer: Staging buffer mapped successfully (%llu bytes)\n", (unsigned long long)bufferSize);
+    }
+    else
+    {
+      printf("Error: Failed to map staging buffer (VkResult: %d)\n", result);
+    }
+
+    m_resolution = extent;
+  }
+
   // Transition image to TRANSFER_SRC_OPTIMAL
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   barrier.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -286,13 +373,12 @@ std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkIma
 
   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                        0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
 
-  // Download to CPU - Buffer is persistently mapped with VMA_MEMORY_USAGE_CPU_ONLY
+std::vector<float> ConvergenceAnalyzer::readStagingBuffer(VkExtent2D extent)
+{
   std::vector<float> data(extent.width * extent.height * 4);
 
-  // Copy from staging buffer mapping to CPU vector
-  // Note: This assumes the command buffer has been submitted and completed
-  // The caller should ensure proper synchronization (e.g., vkQueueWaitIdle)
   if(m_stagingBuffer.mapping != nullptr)
   {
     std::memcpy(data.data(), m_stagingBuffer.mapping, data.size() * sizeof(float));
@@ -303,6 +389,18 @@ std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkIma
   }
 
   return data;
+}
+
+std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkImage image, VkExtent2D extent)
+{
+  // This is a convenience function that records the download command
+  // NOTE: The caller MUST submit and wait for the command buffer before the data is valid!
+  // For proper usage, call recordImageDownload(), submit/wait, then readStagingBuffer()
+  recordImageDownload(cmd, image, extent);
+
+  // DO NOT read here - data won't be ready yet!
+  // Return empty to indicate async operation
+  return std::vector<float>();
 }
 
 void ConvergenceAnalyzer::saveImage(const std::string& filepath, const std::vector<float>& data,

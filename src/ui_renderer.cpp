@@ -23,6 +23,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 
+#include <nvvk/commands.hpp>
 #include <nvvk/helpers.hpp>
 #include <nvutils/bounding_box.hpp>
 #include <nvgui/tonemapper.hpp>
@@ -411,6 +412,111 @@ void GltfRenderer::renderUI()
         {
           ImGui::SetTooltip("Copy statistics to clipboard");
         }
+      }
+
+      // Convergence Analysis
+      if(headerManager.beginHeader("Convergence Analysis"))
+      {
+        ImGui::TextWrapped("Test QOLDS variance reduction by comparing convergence speed vs PCG sampling.");
+        ImGui::Spacing();
+
+        // Step 1: Capture reference
+        ImGui::Text(ICON_MS_CAMERA " Step 1: Capture Reference");
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Current samples: %d", m_resources.frameCount + 1);
+        if(ImGui::Button("Capture Reference (Current Frame)"))
+        {
+          VkCommandBuffer cmd{};
+          nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+          VkImage    refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+          VkExtent2D size     = m_resources.gBuffers.getSize();
+
+          m_convergenceAnalyzer.captureReference(cmd, refImage, size);
+
+          nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+          // Finalize capture after GPU sync
+          m_convergenceAnalyzer.finalizeReferenceCapture();
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Render to 512+ samples first, then capture as ground truth");
+        }
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Step 2: Run test
+        ImGui::Text(ICON_MS_SCIENCE " Step 2: Quick Convergence Test");
+        ImGui::Indent();
+
+        bool testRunning = m_convergenceTestActive;
+        ImGui::BeginDisabled(testRunning);
+
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start QOLDS Test", ImVec2(200, 0)))
+        {
+          startConvergenceTest(true);
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Automatically captures frames at 1, 2, 4, 8, 16, 32, 64, 128 samples");
+        }
+
+        ImGui::SameLine();
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start PCG Test", ImVec2(200, 0)))
+        {
+          startConvergenceTest(false);
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Run baseline comparison with standard PCG sampling");
+        }
+
+        ImGui::EndDisabled();
+
+        if(testRunning)
+        {
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+                           ICON_MS_HOURGLASS_EMPTY " Test in progress... (%zu/%zu)",
+                           m_convergenceTestCurrentIndex, m_convergenceTestSampleCounts.size());
+        }
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Status display
+        if(m_convergenceAnalyzer.isSessionActive())
+        {
+          ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
+                           ICON_MS_FIBER_MANUAL_RECORD " Active: %s",
+                           m_convergenceAnalyzer.getSessionName().c_str());
+
+          const auto& metrics = m_convergenceAnalyzer.getMetrics();
+          if(!metrics.empty())
+          {
+            ImGui::Text("Captured: %zu frames", metrics.size());
+            ImGui::Text("Latest MSE: %.6f", metrics.back().mse);
+            ImGui::Text("Latest PSNR: %.2f dB", metrics.back().psnr);
+          }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Export
+        ImGui::Text(ICON_MS_SAVE " Export Results");
+        ImGui::Indent();
+        if(ImGui::Button("Export to CSV"))
+        {
+          std::string filename = "convergence_results.csv";
+          m_convergenceAnalyzer.exportToCSV(filename);
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Export Images"))
+        {
+          m_convergenceAnalyzer.exportComparisonImages("convergence_images");
+        }
+        ImGui::Unindent();
       }
     }
     ImGui::End();  // End Settings
