@@ -12,12 +12,9 @@
 #include <cstring> // For memcpy
 #include <filesystem>
 
-// Note: STB image headers are included in nvpro-core2
-// We'll use simplified PNG export for now
-// #define STB_IMAGE_WRITE_IMPLEMENTATION
-// #include <stb_image_write.h>
-// #define STB_IMAGE_IMPLEMENTATION
-// #include <stb_image.h>
+// STB image I/O (implementation already compiled in tiny_stb_implementation.cpp)
+#include <stb_image_write.h>
+#include <stb_image.h>
 
 namespace matforge {
 
@@ -290,12 +287,20 @@ std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkIma
   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                        0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-  // Download to CPU (must be called after command buffer submission!)
+  // Download to CPU - Buffer is persistently mapped with VMA_MEMORY_USAGE_CPU_ONLY
   std::vector<float> data(extent.width * extent.height * 4);
 
-  // TODO: Implement proper memory mapping with nvvk allocator
-  // For now, return empty data (stub)
-  printf("Warning: downloadImage not fully implemented yet\n");
+  // Copy from staging buffer mapping to CPU vector
+  // Note: This assumes the command buffer has been submitted and completed
+  // The caller should ensure proper synchronization (e.g., vkQueueWaitIdle)
+  if(m_stagingBuffer.mapping != nullptr)
+  {
+    std::memcpy(data.data(), m_stagingBuffer.mapping, data.size() * sizeof(float));
+  }
+  else
+  {
+    printf("Warning: Staging buffer not mapped - returning empty data\n");
+  }
 
   return data;
 }
@@ -303,45 +308,143 @@ std::vector<float> ConvergenceAnalyzer::downloadImage(VkCommandBuffer cmd, VkIma
 void ConvergenceAnalyzer::saveImage(const std::string& filepath, const std::vector<float>& data,
                                     uint32_t width, uint32_t height)
 {
-  // TODO: Implement image saving using STB or EXR library
-  // For now, just save raw float data
-  std::ofstream file(filepath + ".raw", std::ios::binary);
-  if(file.is_open())
+  if(data.empty())
   {
-    file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
-    file.close();
-    printf("  Saved raw image data: %s.raw (%ux%u)\n", filepath.c_str(), width, height);
+    printf("  Error: Cannot save empty image data\n");
+    return;
+  }
+
+  // Determine format from extension
+  std::filesystem::path path(filepath);
+  std::string ext = path.extension().string();
+
+  // Default to HDR if no extension
+  if(ext.empty())
+  {
+    ext = ".hdr";
+    path += ext;
+  }
+
+  bool success = false;
+
+  if(ext == ".hdr")
+  {
+    // Save as HDR (preserves full float precision)
+    success = stbi_write_hdr(path.string().c_str(), width, height, 4, data.data());
+  }
+  else if(ext == ".png" || ext == ".jpg" || ext == ".bmp")
+  {
+    // Convert float [0,1] to 8-bit [0,255]
+    std::vector<uint8_t> data8(data.size());
+    for(size_t i = 0; i < data.size(); ++i)
+    {
+      float val = std::clamp(data[i], 0.0f, 1.0f);
+      data8[i] = static_cast<uint8_t>(val * 255.0f + 0.5f);
+    }
+
+    if(ext == ".png")
+    {
+      success = stbi_write_png(path.string().c_str(), width, height, 4, data8.data(), width * 4);
+    }
+    else if(ext == ".jpg")
+    {
+      success = stbi_write_jpg(path.string().c_str(), width, height, 4, data8.data(), 95);
+    }
+    else if(ext == ".bmp")
+    {
+      success = stbi_write_bmp(path.string().c_str(), width, height, 4, data8.data());
+    }
   }
   else
   {
-    printf("  Error: Could not save image: %s\n", filepath.c_str());
+    printf("  Error: Unsupported image format '%s' (use .hdr, .png, .jpg, or .bmp)\n", ext.c_str());
+    return;
+  }
+
+  if(success)
+  {
+    printf("  Saved image: %s (%ux%u)\n", path.string().c_str(), width, height);
+  }
+  else
+  {
+    printf("  Error: Failed to save image: %s\n", path.string().c_str());
   }
 }
 
 std::vector<float> ConvergenceAnalyzer::loadImage(const std::string& filepath, uint32_t& width, uint32_t& height)
 {
-  // TODO: Implement image loading using STB or EXR library
-  // For now, attempt to load raw float data
-  std::ifstream file(filepath + ".raw", std::ios::binary | std::ios::ate);
+  std::filesystem::path path(filepath);
+  std::string ext = path.extension().string();
 
-  if(!file.is_open())
+  // Try adding .hdr extension if no extension provided
+  if(ext.empty())
   {
-    printf("Error: Could not load image: %s\n", filepath.c_str());
+    path += ".hdr";
+    ext = ".hdr";
+  }
+
+  // Check if file exists
+  if(!std::filesystem::exists(path))
+  {
+    printf("Error: Image file not found: %s\n", path.string().c_str());
     return {};
   }
 
-  size_t fileSize = file.tellg();
-  file.seekg(0, std::ios::beg);
+  std::vector<float> data;
+  int w, h, channels;
 
-  // Assume square image for now (simplification)
-  size_t pixels = fileSize / (4 * sizeof(float));
-  width = height = static_cast<uint32_t>(std::sqrt(pixels));
+  if(ext == ".hdr")
+  {
+    // Load HDR (native float format)
+    float* pixels = stbi_loadf(path.string().c_str(), &w, &h, &channels, 4);  // Force RGBA
+    if(pixels)
+    {
+      size_t pixelCount = static_cast<size_t>(w) * h * 4;
+      data.assign(pixels, pixels + pixelCount);
+      stbi_image_free(pixels);
 
-  std::vector<float> data(width * height * 4);
-  file.read(reinterpret_cast<char*>(data.data()), data.size() * sizeof(float));
-  file.close();
+      width = static_cast<uint32_t>(w);
+      height = static_cast<uint32_t>(h);
+      printf("Loaded HDR image: %s (%ux%u, %d channels)\n", path.string().c_str(), width, height, channels);
+    }
+    else
+    {
+      printf("Error: Failed to load HDR image: %s\n", path.string().c_str());
+      printf("  STB Error: %s\n", stbi_failure_reason());
+    }
+  }
+  else if(ext == ".png" || ext == ".jpg" || ext == ".bmp" || ext == ".tga")
+  {
+    // Load LDR image and convert to float [0,1]
+    unsigned char* pixels = stbi_load(path.string().c_str(), &w, &h, &channels, 4);  // Force RGBA
+    if(pixels)
+    {
+      size_t pixelCount = static_cast<size_t>(w) * h * 4;
+      data.resize(pixelCount);
 
-  printf("Loaded raw image data: %s.raw (%ux%u)\n", filepath.c_str(), width, height);
+      // Convert 8-bit [0,255] to float [0,1]
+      for(size_t i = 0; i < pixelCount; ++i)
+      {
+        data[i] = static_cast<float>(pixels[i]) / 255.0f;
+      }
+
+      stbi_image_free(pixels);
+
+      width = static_cast<uint32_t>(w);
+      height = static_cast<uint32_t>(h);
+      printf("Loaded LDR image: %s (%ux%u, %d channels)\n", path.string().c_str(), width, height, channels);
+    }
+    else
+    {
+      printf("Error: Failed to load LDR image: %s\n", path.string().c_str());
+      printf("  STB Error: %s\n", stbi_failure_reason());
+    }
+  }
+  else
+  {
+    printf("Error: Unsupported image format '%s' (use .hdr, .png, .jpg, .bmp, or .tga)\n", ext.c_str());
+  }
+
   return data;
 }
 
