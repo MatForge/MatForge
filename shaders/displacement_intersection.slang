@@ -102,8 +102,6 @@ float2 invertDisplacement(float3 worldPoint,
                           float2 uv0, float2 uv1, float2 uv2, // Triangle UVs
                           float3 n0, float3 n1, float3 n2)    // Vertex normals
 {
-    // For intersection shader, we can use a simpler approach
-    // since we know the point lies on a displacement line
     
     // Start with barycentric coordinates of the point projected onto base triangle
     float3 bary = computeBarycentrics(worldPoint, v0, v1, v2);
@@ -116,10 +114,6 @@ float2 invertDisplacement(float3 worldPoint,
     
     // Convert barycentric to UV
     float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
-    
-    // Optional: Newton refinement for better accuracy
-    // In practice, for the ray-prism intersection endpoints,
-    // the simple projection is often sufficient
     
     return clamp(uv, 0.0, 1.0);
 }
