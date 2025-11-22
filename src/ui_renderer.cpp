@@ -574,6 +574,7 @@ void GltfRenderer::renderMenu()
   GltfRenderer::windowTitle();
   bool newScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
   bool openFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+  bool addToSceneFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_A);
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
@@ -593,6 +594,9 @@ void GltfRenderer::renderMenu()
   {
     newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
     openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
+    ImGui::BeginDisabled(!validScene);
+    addToSceneFile |= ImGui::MenuItem(ICON_MS_ADD_BOX " Add to Scene", "Ctrl+Shift+A");
+    ImGui::EndDisabled();
     loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
     if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
     {
@@ -689,6 +693,22 @@ void GltfRenderer::renderMenu()
   if(!sceneToLoadFilename.empty())
   {
     onFileDrop(sceneToLoadFilename.c_str());
+  }
+
+  if(addToSceneFile && validScene)
+  {
+    std::filesystem::path addFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Add to Scene",
+                                                      "3D Scene Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
+                                                      m_lastSceneDirectory);
+    if(!addFilename.empty())
+    {
+      m_lastSceneDirectory = addFilename.parent_path();
+      std::thread([=, this]() {
+        m_busy.start("Adding to Scene");
+        addToScene(addFilename);
+        m_busy.stop();
+      }).detach();
+    }
   }
 
   if(loadHdrFile)

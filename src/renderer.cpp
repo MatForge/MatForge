@@ -587,6 +587,293 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Add a glTF file to the existing scene (merge models)
+void GltfRenderer::addToScene(const std::filesystem::path& sceneFilename)
+{
+  nvutils::ScopedTimer st(__FUNCTION__);
+
+  if(sceneFilename.empty() || !m_resources.scene.valid())
+  {
+    LOGW("Cannot add to scene: no file specified or no existing scene\n");
+    return;
+  }
+
+  std::filesystem::path filename = nvutils::findFile(sceneFilename, nvsamples::getResourcesDirs(), false);
+  if(!filename.has_filename())
+  {
+    LOGW("Cannot find file: %s\n", nvutils::utf8FromPath(sceneFilename).c_str());
+    return;
+  }
+
+  // Only support glTF files for adding (not OBJ)
+  if(nvutils::extensionMatches(sceneFilename, ".obj"))
+  {
+    LOGW("OBJ files cannot be added to scene. Please use glTF format.\n");
+    return;
+  }
+
+  LOGI("Adding to scene: %s\n", nvutils::utf8FromPath(filename).c_str());
+
+  // Load the new model
+  tinygltf::Model     newModel;
+  tinygltf::TinyGLTF  loader;
+  std::string         err, warn;
+  bool                result = false;
+
+  if(nvutils::extensionMatches(filename, ".glb"))
+  {
+    result = loader.LoadBinaryFromFile(&newModel, &err, &warn, nvutils::utf8FromPath(filename));
+  }
+  else
+  {
+    result = loader.LoadASCIIFromFile(&newModel, &err, &warn, nvutils::utf8FromPath(filename));
+  }
+
+  if(!warn.empty())
+    LOGW("Warning loading glTF: %s\n", warn.c_str());
+  if(!err.empty())
+    LOGE("Error loading glTF: %s\n", err.c_str());
+  if(!result)
+  {
+    LOGE("Failed to load glTF file: %s\n", nvutils::utf8FromPath(filename).c_str());
+    return;
+  }
+
+  // Get the existing model
+  tinygltf::Model& existingModel = m_resources.scene.getModel();
+
+  // Calculate offsets for merging
+  int bufferOffset     = static_cast<int>(existingModel.buffers.size());
+  int bufferViewOffset = static_cast<int>(existingModel.bufferViews.size());
+  int accessorOffset   = static_cast<int>(existingModel.accessors.size());
+  int imageOffset      = static_cast<int>(existingModel.images.size());
+  int samplerOffset    = static_cast<int>(existingModel.samplers.size());
+  int textureOffset    = static_cast<int>(existingModel.textures.size());
+  int materialOffset   = static_cast<int>(existingModel.materials.size());
+  int meshOffset       = static_cast<int>(existingModel.meshes.size());
+  int nodeOffset       = static_cast<int>(existingModel.nodes.size());
+  int skinOffset       = static_cast<int>(existingModel.skins.size());
+  int cameraOffset     = static_cast<int>(existingModel.cameras.size());
+
+  // Merge buffers
+  for(auto& buffer : newModel.buffers)
+  {
+    existingModel.buffers.push_back(std::move(buffer));
+  }
+
+  // Merge buffer views (update buffer indices)
+  for(auto& bv : newModel.bufferViews)
+  {
+    if(bv.buffer >= 0)
+      bv.buffer += bufferOffset;
+    existingModel.bufferViews.push_back(std::move(bv));
+  }
+
+  // Merge accessors (update buffer view indices)
+  for(auto& accessor : newModel.accessors)
+  {
+    if(accessor.bufferView >= 0)
+      accessor.bufferView += bufferViewOffset;
+    if(accessor.sparse.indices.bufferView >= 0)
+      accessor.sparse.indices.bufferView += bufferViewOffset;
+    if(accessor.sparse.values.bufferView >= 0)
+      accessor.sparse.values.bufferView += bufferViewOffset;
+    existingModel.accessors.push_back(std::move(accessor));
+  }
+
+  // Merge images
+  for(auto& image : newModel.images)
+  {
+    if(image.bufferView >= 0)
+      image.bufferView += bufferViewOffset;
+    existingModel.images.push_back(std::move(image));
+  }
+
+  // Merge samplers
+  for(auto& sampler : newModel.samplers)
+  {
+    existingModel.samplers.push_back(std::move(sampler));
+  }
+
+  // Merge textures (update source and sampler indices)
+  for(auto& texture : newModel.textures)
+  {
+    if(texture.source >= 0)
+      texture.source += imageOffset;
+    if(texture.sampler >= 0)
+      texture.sampler += samplerOffset;
+    existingModel.textures.push_back(std::move(texture));
+  }
+
+  // Helper to update texture info indices
+  auto updateTextureInfo = [textureOffset](tinygltf::TextureInfo& ti) {
+    if(ti.index >= 0)
+      ti.index += textureOffset;
+  };
+  auto updateNormalTextureInfo = [textureOffset](tinygltf::NormalTextureInfo& ti) {
+    if(ti.index >= 0)
+      ti.index += textureOffset;
+  };
+  auto updateOcclusionTextureInfo = [textureOffset](tinygltf::OcclusionTextureInfo& ti) {
+    if(ti.index >= 0)
+      ti.index += textureOffset;
+  };
+
+  // Merge materials (update texture indices)
+  for(auto& mat : newModel.materials)
+  {
+    updateTextureInfo(mat.pbrMetallicRoughness.baseColorTexture);
+    updateTextureInfo(mat.pbrMetallicRoughness.metallicRoughnessTexture);
+    updateNormalTextureInfo(mat.normalTexture);
+    updateOcclusionTextureInfo(mat.occlusionTexture);
+    updateTextureInfo(mat.emissiveTexture);
+    existingModel.materials.push_back(std::move(mat));
+  }
+
+  // Merge meshes (update accessor and material indices)
+  for(auto& mesh : newModel.meshes)
+  {
+    for(auto& prim : mesh.primitives)
+    {
+      if(prim.indices >= 0)
+        prim.indices += accessorOffset;
+      if(prim.material >= 0)
+        prim.material += materialOffset;
+      for(auto& attr : prim.attributes)
+      {
+        if(attr.second >= 0)
+          attr.second += accessorOffset;
+      }
+      for(auto& target : prim.targets)
+      {
+        for(auto& attr : target)
+        {
+          if(attr.second >= 0)
+            attr.second += accessorOffset;
+        }
+      }
+    }
+    existingModel.meshes.push_back(std::move(mesh));
+  }
+
+  // Merge skins (update accessor and node indices)
+  for(auto& skin : newModel.skins)
+  {
+    if(skin.inverseBindMatrices >= 0)
+      skin.inverseBindMatrices += accessorOffset;
+    if(skin.skeleton >= 0)
+      skin.skeleton += nodeOffset;
+    for(auto& joint : skin.joints)
+    {
+      if(joint >= 0)
+        joint += nodeOffset;
+    }
+    existingModel.skins.push_back(std::move(skin));
+  }
+
+  // Merge cameras
+  for(auto& camera : newModel.cameras)
+  {
+    existingModel.cameras.push_back(std::move(camera));
+  }
+
+  // Merge nodes (update mesh, skin, camera, and children indices)
+  std::vector<int> newRootNodes;
+  for(size_t i = 0; i < newModel.nodes.size(); i++)
+  {
+    auto& node = newModel.nodes[i];
+    if(node.mesh >= 0)
+      node.mesh += meshOffset;
+    if(node.skin >= 0)
+      node.skin += skinOffset;
+    if(node.camera >= 0)
+      node.camera += cameraOffset;
+    for(auto& child : node.children)
+    {
+      if(child >= 0)
+        child += nodeOffset;
+    }
+    existingModel.nodes.push_back(std::move(node));
+  }
+
+  // Find root nodes from the new model's default scene
+  int newSceneIndex = newModel.defaultScene >= 0 ? newModel.defaultScene : 0;
+  if(newSceneIndex < static_cast<int>(newModel.scenes.size()))
+  {
+    for(int rootNode : newModel.scenes[newSceneIndex].nodes)
+    {
+      newRootNodes.push_back(rootNode + nodeOffset);
+    }
+  }
+
+  // Add new root nodes to the existing scene
+  int existingSceneIndex = existingModel.defaultScene >= 0 ? existingModel.defaultScene : 0;
+  if(existingSceneIndex < static_cast<int>(existingModel.scenes.size()))
+  {
+    for(int newRoot : newRootNodes)
+    {
+      existingModel.scenes[existingSceneIndex].nodes.push_back(newRoot);
+    }
+  }
+
+  // Merge animations (update node and accessor indices)
+  for(auto& anim : newModel.animations)
+  {
+    for(auto& channel : anim.channels)
+    {
+      if(channel.target_node >= 0)
+        channel.target_node += nodeOffset;
+    }
+    for(auto& sampler : anim.samplers)
+    {
+      if(sampler.input >= 0)
+        sampler.input += accessorOffset;
+      if(sampler.output >= 0)
+        sampler.output += accessorOffset;
+    }
+    existingModel.animations.push_back(std::move(anim));
+  }
+
+  LOGI("Merged: +%zu nodes, +%zu meshes, +%zu materials\n",
+       newModel.nodes.size(), newModel.meshes.size(), newModel.materials.size());
+
+  // Re-parse the scene to update render nodes
+  m_resources.scene.setCurrentScene(existingSceneIndex);
+
+  // Destroy existing Vulkan resources and recreate
+  // First wait for all queue operations to complete
+  vkQueueWaitIdle(m_app->getQueue(0).queue);
+  vkDeviceWaitIdle(m_device);
+
+  // Clear the command buffer queue to prevent stale references
+  {
+    std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
+    m_cmdBufferQueue = {};
+  }
+
+  // Release any pending staging operations before destroying scene resources
+  m_resources.staging.releaseStaging(true);
+
+  // Free rasterizer command buffer that may reference old scene
+  m_rasterizer.freeRecordCommandBuffer();
+
+  // Don't call deinit() on sceneVk or sceneRtx - their create functions call destroy() internally
+  // Calling deinit() before create() would cause double-free crashes
+
+  // Recreate Vulkan scene (create functions handle their own cleanup via destroy())
+  createVulkanScene();
+
+  // Update UI
+  m_uiSceneGraph.setModel(&m_resources.scene.getModel());
+  m_uiSceneGraph.setBbox(m_resources.scene.getSceneBounds());
+
+  // Update textures
+  updateTextures();
+
+  LOGI("Scene updated with added content\n");
+}
+
+//--------------------------------------------------------------------------------------------------
 // This function creates the Vulkan scene from the glTF model
 // It builds the bottom-level and top-level acceleration structure
 // The function is called when the scene is loaded

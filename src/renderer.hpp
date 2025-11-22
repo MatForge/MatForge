@@ -65,6 +65,7 @@ public:
   ~GltfRenderer() override = default;
 
   void                                        createScene(const std::filesystem::path& sceneFilename);
+  void                                        addToScene(const std::filesystem::path& sceneFilename);
   void                                        createHDR(const std::filesystem::path& hdrFilename);
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
