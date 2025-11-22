@@ -1477,10 +1477,11 @@ void GltfRenderer::startConvergenceTest(bool useQOLDS)
   m_convergenceAnalyzer.startSession(sessionName, useQOLDS);
 
   // Set test state
-  m_convergenceTestActive       = true;
-  m_convergenceTestUseQOLDS     = useQOLDS;
-  m_convergenceTestCurrentIndex = 0;
-  m_convergenceTestStartTime    = std::chrono::steady_clock::now();
+  m_convergenceTestActive          = true;
+  m_convergenceTestUseQOLDS        = useQOLDS;
+  m_convergenceTestCurrentIndex    = 0;
+  m_convergenceTestStartTime       = std::chrono::steady_clock::now();
+  m_convergenceTestLastCaptureTime = m_convergenceTestStartTime;  // Initialize for delta calculation
 
   // Set QOLDS mode in path tracer (both push constant and checkbox state)
   if(m_pathTracer.m_pushConst.useQOLDS != (useQOLDS ? 1 : 0))
@@ -1500,6 +1501,17 @@ void GltfRenderer::startConvergenceTest(bool useQOLDS)
          sessionName.c_str(), m_convergenceTestSampleCounts.size());
 }
 
+void GltfRenderer::startCombinedConvergenceTest()
+{
+  // Set flag to run both tests sequentially
+  m_convergenceTestRunBoth = true;
+
+  printf("Starting combined convergence test (QOLDS + PCG)...\n");
+
+  // Start with QOLDS test first
+  startConvergenceTest(true);
+}
+
 void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
 {
   if(!m_convergenceTestActive)
@@ -1515,7 +1527,7 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
   // Check if we've reached the next sample count milestone
   if(m_convergenceTestCurrentIndex >= m_convergenceTestSampleCounts.size())
   {
-    // Test complete
+    // Current test complete
     m_convergenceTestActive = false;
     m_convergenceAnalyzer.endSession();
 
@@ -1548,6 +1560,18 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
     auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
 
     printf("Convergence test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+
+    // If running combined test and QOLDS just finished, start PCG test
+    if(m_convergenceTestRunBoth && m_convergenceTestUseQOLDS)
+    {
+      printf("Starting PCG test (part 2 of combined test)...\n");
+      startConvergenceTest(false);  // Start PCG test
+    }
+    else
+    {
+      // All tests done
+      m_convergenceTestRunBoth = false;
+    }
     return;
   }
 
@@ -1560,10 +1584,16 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
     VkImage    testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
     VkExtent2D size      = m_resources.gBuffers.getSize();
 
-    auto      duration = std::chrono::steady_clock::now() - m_convergenceTestStartTime;
-    double    timeMs   = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    auto   currentTime  = std::chrono::steady_clock::now();
+    auto   duration     = currentTime - m_convergenceTestStartTime;
+    auto   deltaDuration = currentTime - m_convergenceTestLastCaptureTime;
+    double timeMs       = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    double timeDeltaMs  = std::chrono::duration_cast<std::chrono::milliseconds>(deltaDuration).count();
 
-    m_convergenceAnalyzer.captureFrame(cmd, testImage, targetSamples, timeMs);
+    m_convergenceAnalyzer.captureFrame(cmd, testImage, targetSamples, timeMs, timeDeltaMs);
+
+    // Update last capture time for next delta calculation
+    m_convergenceTestLastCaptureTime = currentTime;
 
     // Mark as pending - will finalize on next frame after GPU completes
     m_convergenceTestPendingFinalize = true;
@@ -1571,7 +1601,7 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
     // Move to next milestone
     m_convergenceTestCurrentIndex++;
 
-    printf("Recorded capture %zu/%zu at %u samples (will finalize next frame)\n", m_convergenceTestCurrentIndex,
-           m_convergenceTestSampleCounts.size(), targetSamples);
+    printf("Recorded capture %zu/%zu at %u samples (delta: %.0fms)\n", m_convergenceTestCurrentIndex,
+           m_convergenceTestSampleCounts.size(), targetSamples, timeDeltaMs);
   }
 }

@@ -23,7 +23,8 @@ struct ConvergenceMetrics
   double   mse{0.0};              // Mean Squared Error vs reference
   double   psnr{0.0};             // Peak Signal-to-Noise Ratio
   double   variance{0.0};         // Per-pixel variance
-  double   captureTimeMs{0.0};    // Time taken to reach this sample count
+  double   captureTimeMs{0.0};    // Total time taken to reach this sample count
+  double   timeDeltaMs{0.0};      // Time delta since previous capture
   bool     useQOLDS{false};       // Which sampler was used
 };
 
@@ -72,7 +73,7 @@ public:
   void startSession(const std::string& sessionName, bool useQOLDS);
 
   // Capture current frame at given sample count
-  void captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double timeMs);
+  void captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double timeMs, double timeDeltaMs);
 
   // Finalize frame capture (call after command buffer completes)
   void finalizeFrameCapture();
@@ -144,6 +145,7 @@ private:
   // Pending capture (for async download)
   uint32_t m_pendingSampleCount{0};
   double   m_pendingTimeMs{0.0};
+  double   m_pendingTimeDeltaMs{0.0};
 
   // Captured metrics
   std::vector<ConvergenceMetrics> m_metrics;

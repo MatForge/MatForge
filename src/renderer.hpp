@@ -104,6 +104,7 @@ private:
   /////
   /// Convergence Testing
   void startConvergenceTest(bool useQOLDS);
+  void startCombinedConvergenceTest();  // Run both QOLDS and PCG tests sequentially
   void updateConvergenceTest(VkCommandBuffer cmd);
 
   /////
@@ -158,9 +159,11 @@ private:
   bool                     m_convergenceTestActive{false};
   bool                     m_convergenceTestUseQOLDS{false};
   bool                     m_convergenceTestPendingFinalize{false};
+  bool                     m_convergenceTestRunBoth{false};  // Run both QOLDS and PCG tests sequentially
   std::vector<uint32_t>    m_convergenceTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
   size_t                   m_convergenceTestCurrentIndex{0};
   std::chrono::steady_clock::time_point m_convergenceTestStartTime;
+  std::chrono::steady_clock::time_point m_convergenceTestLastCaptureTime;  // For time delta calculation
 
   std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 

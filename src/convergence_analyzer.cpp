@@ -129,7 +129,7 @@ void ConvergenceAnalyzer::startSession(const std::string& sessionName, bool useQ
            sessionName.c_str(), useQOLDS ? "QOLDS" : "PCG");
 }
 
-void ConvergenceAnalyzer::captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double timeMs)
+void ConvergenceAnalyzer::captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double timeMs, double timeDeltaMs)
 {
   if(!m_sessionActive)
   {
@@ -141,8 +141,9 @@ void ConvergenceAnalyzer::captureFrame(VkCommandBuffer cmd, VkImage sourceImage,
   recordImageDownload(cmd, sourceImage, m_resolution);
 
   // Store pending capture info
-  m_pendingSampleCount = sampleCount;
-  m_pendingTimeMs      = timeMs;
+  m_pendingSampleCount   = sampleCount;
+  m_pendingTimeMs        = timeMs;
+  m_pendingTimeDeltaMs   = timeDeltaMs;
 
   // NOTE: Caller must submit and wait for command buffer, then call finalizeFrameCapture()
 }
@@ -164,6 +165,7 @@ void ConvergenceAnalyzer::finalizeFrameCapture()
   metrics.mse           = computeMSE(frameData, m_referenceImage, m_resolution.width, m_resolution.height);
   metrics.psnr          = computePSNR(metrics.mse);
   metrics.captureTimeMs = m_pendingTimeMs;
+  metrics.timeDeltaMs   = m_pendingTimeDeltaMs;
   metrics.useQOLDS      = m_useQOLDS;
 
   m_metrics.push_back(metrics);
@@ -269,7 +271,7 @@ void ConvergenceAnalyzer::exportToCSV(const std::string& filepath)
   }
 
   // CSV header
-  file << "SampleCount,MSE,PSNR,TimeMs,Sampler\n";
+  file << "SampleCount,MSE,PSNR,TimeMs,TimeDeltaMs,Sampler\n";
 
   // Data rows
   for(const auto& metric : m_metrics)
@@ -278,6 +280,7 @@ void ConvergenceAnalyzer::exportToCSV(const std::string& filepath)
          << metric.mse << ","
          << metric.psnr << ","
          << metric.captureTimeMs << ","
+         << metric.timeDeltaMs << ","
          << (metric.useQOLDS ? "QOLDS" : "PCG") << "\n";
   }
 

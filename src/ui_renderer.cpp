@@ -447,38 +447,30 @@ void GltfRenderer::renderUI()
         ImGui::Spacing();
 
         // Step 2: Run test
-        ImGui::Text(ICON_MS_SCIENCE " Step 2: Quick Convergence Test");
+        ImGui::Text(ICON_MS_SCIENCE " Step 2: Convergence Test");
         ImGui::Indent();
 
         bool testRunning = m_convergenceTestActive;
         ImGui::BeginDisabled(testRunning);
 
-        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start QOLDS Test", ImVec2(200, 0)))
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start Convergence Test", ImVec2(250, 0)))
         {
-          startConvergenceTest(true);
+          startCombinedConvergenceTest();
         }
         if(ImGui::IsItemHovered())
         {
-          ImGui::SetTooltip("Automatically captures frames at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples");
-        }
-
-        ImGui::SameLine();
-        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start PCG Test", ImVec2(200, 0)))
-        {
-          startConvergenceTest(false);
-        }
-        if(ImGui::IsItemHovered())
-        {
-          ImGui::SetTooltip("Run baseline comparison with standard PCG sampling");
+          ImGui::SetTooltip("Runs QOLDS test followed by PCG test.\nCaptures at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples each.");
         }
 
         ImGui::EndDisabled();
 
         if(testRunning)
         {
+          const char* currentTest = m_convergenceTestUseQOLDS ? "QOLDS" : "PCG";
+          const char* phase = m_convergenceTestRunBoth ? (m_convergenceTestUseQOLDS ? " (1/2)" : " (2/2)") : "";
           ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
-                           ICON_MS_HOURGLASS_EMPTY " Test in progress... (%zu/%zu)",
-                           m_convergenceTestCurrentIndex, m_convergenceTestSampleCounts.size());
+                           ICON_MS_HOURGLASS_EMPTY " %s%s: %zu/%zu samples",
+                           currentTest, phase, m_convergenceTestCurrentIndex, m_convergenceTestSampleCounts.size());
         }
 
         ImGui::Unindent();
