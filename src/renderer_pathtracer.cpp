@@ -31,8 +31,11 @@
 #include "renderer_pathtracer.hpp"
 #include "utils.hpp"
 
+
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
+#include "_autogen/displacement_intersection.slang.h"
+
 
 
 PathTracer::PathTracer()
@@ -75,6 +78,8 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 #if defined(USE_DLSS)
   m_dlss->init(resources);
 #endif
+
+  checkForDisplacement(resources);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -112,6 +117,10 @@ void PathTracer::onDetach(Resources& resources)
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
   m_pipelineCache.deinit();
+
+  // Clear displacement info vector
+  m_displacementInfo.clear();
+  m_hasDisplacement = false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -258,6 +267,20 @@ bool PathTracer::onUIRender(Resources& resources)
     PE::end();
   }
 
+  // ADD displacement info display
+  if (m_hasDisplacement && PE::begin())
+  {
+      ImGui::TextDisabled("Displacement Mapping: Active");
+      int displacedPrimitives = 0;
+      for (const auto& info : m_displacementInfo)
+      {
+          if (info.hasDisplacement)
+              displacedPrimitives++;
+      }
+      ImGui::TextDisabled("Displaced Primitives: %d/%zu", displacedPrimitives, m_displacementInfo.size());
+      PE::end();
+  }
+
 // DLSS section
 #if defined(USE_DLSS)
   changed |= m_dlss->onUi(resources);
@@ -295,6 +318,8 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   // Current frame count, can be overridden by DLSS
   int frameCount = resources.frameCount;
+
+  m_pushConst.hasDisplacement = m_hasDisplacement ? 1 : 0;
 
 #if defined(USE_DLSS)
   // Lazy initialize DLSS if enabled and not yet initialized
@@ -338,6 +363,10 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   }
 #endif
 
+  if (m_hasDisplacement)
+  {
+      writeDisplacementDescriptors(cmd, resources);
+  }
 
   if(m_renderTechnique == RenderTechnique::RayQuery)
   {
@@ -484,6 +513,33 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   VkWriteDescriptorSet allTextures = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutImages);
   allTextures.descriptorCount      = uint32_t(outputImages.size());
   write.append(allTextures, outputImages.data());
+
+  // ADD: RMIP textures for displacement
+  if (m_hasDisplacement)
+  {
+      std::vector<VkDescriptorImageInfo> rmipImageInfos;
+      for (const auto& dispInfo : m_displacementInfo)
+      {
+          if (dispInfo.hasDisplacement && dispInfo.rmipView != VK_NULL_HANDLE)
+          {
+              VkDescriptorImageInfo info{};
+              info.imageView = dispInfo.rmipView;
+              info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+              info.sampler = VK_NULL_HANDLE;  // Use existing samplers
+              rmipImageInfos.push_back(info);
+          }
+      }
+
+      if (!rmipImageInfos.empty())
+      {
+          // Assuming binding 8 is for RMIP textures in your shader
+          VkWriteDescriptorSet rmipWrite = resources.descriptorBinding[1].getWriteSet(8);
+          rmipWrite.descriptorCount = static_cast<uint32_t>(rmipImageInfos.size());
+          rmipWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+          write.append(rmipWrite, rmipImageInfos.data());
+      }
+  }
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 
@@ -549,16 +605,26 @@ void PathTracer::createRtxPipeline(Resources& resources)
     eShadowClosestHit,
     eAnyHit,
     eShadowAnyHit,
+    // ADD displacement stages
+    eDisplacementClosestHit,
+    eDisplacementAnyHit,
+    eDisplacementIntersection,
+    // END
     eShaderGroupCount
   };
 
+  // Base shader count (without displacement)
+  int baseShaderCount = 7;
+  int totalShaderCount = m_hasDisplacement ? 10 : baseShaderCount;
+
   // RTX Pipeline
-  std::array<VkPipelineShaderStageCreateInfo, 7> stages{};
-  for(auto& stage : stages)
+  std::vector<VkPipelineShaderStageCreateInfo> stages(totalShaderCount);
+  for (auto& stage : stages)
   {
-    stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.module = m_shaderModule;
+      stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      stage.module = m_shaderModule;
   }
+
   stages[eRaygen].pName = "rgenMain";
   stages[eRaygen].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
@@ -580,6 +646,21 @@ void PathTracer::createRtxPipeline(Resources& resources)
 
   stages[eShadowAnyHit].pName = "rahitShadow";
   stages[eShadowAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+
+  if (m_hasDisplacement)
+  {
+      stages[eDisplacementClosestHit].pName = "rchitDisplacement";
+      stages[eDisplacementClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+      stages[eDisplacementClosestHit].module = m_shaderModule;  // Or m_displacementClosestHitShader
+
+      stages[eDisplacementAnyHit].pName = "rahitDisplacement";
+      stages[eDisplacementAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+      stages[eDisplacementAnyHit].module = m_shaderModule;  // Or m_displacementAnyHitShader
+
+      stages[eDisplacementIntersection].pName = "intersectionMain";
+      stages[eDisplacementIntersection].stage = VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+      stages[eDisplacementIntersection].module = m_shaderModule;  // Or m_displacementIntersectionShader
+  }
 
   // Shader groups
   VkRayTracingShaderGroupCreateInfoKHR group{
@@ -620,11 +701,32 @@ void PathTracer::createRtxPipeline(Resources& resources)
   group.anyHitShader     = eShadowAnyHit;
   shader_groups.push_back(group);
 
+  if (m_hasDisplacement)
+  {
+      // Hit Group-2 (displacement with custom intersection)
+      group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+      group.generalShader = VK_SHADER_UNUSED_KHR;
+      group.closestHitShader = eDisplacementClosestHit;
+      group.anyHitShader = eDisplacementAnyHit;
+      group.intersectionShader = eDisplacementIntersection;
+      shader_groups.push_back(group);
+
+      // Hit Group-3 (shadow for displacement)
+      group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+      group.generalShader = VK_SHADER_UNUSED_KHR;
+      group.closestHitShader = VK_SHADER_UNUSED_KHR;  // No closest hit for shadows
+      group.anyHitShader = eShadowAnyHit;  // Can reuse shadow any hit
+      group.intersectionShader = eDisplacementIntersection;  // Same intersection shader
+      shader_groups.push_back(group);
+  }
+
   // Shader Execution Reorder (SER)
   nvvk::Specialization specialization;
   specialization.add(0, m_useSER ? 1 : 0);
   stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
 
+  // Update max recursion depth if needed for displacement
+  uint32_t maxRecursionDepth = m_hasDisplacement ? 3 : 2;
 
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
   VkRayTracingPipelineCreateInfoKHR rtPipelineCreateInfo{
@@ -633,7 +735,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
       .pStages                      = stages.data(),
       .groupCount                   = static_cast<uint32_t>(shader_groups.size()),
       .pGroups                      = shader_groups.data(),
-      .maxPipelineRayRecursionDepth = 2,  // Ray depth
+      .maxPipelineRayRecursionDepth = maxRecursionDepth,  // Ray depth
       .layout                       = m_pipelineLayout,
   };
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
@@ -782,4 +884,104 @@ void PathTracer::updateAdaptiveSampling(Resources& resources)
     // Clamp to valid range
     m_pushConst.numSamples = std::clamp(m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Set displacement data from external RMIP builder
+// This is called from renderer.cpp after RMIP textures are built
+//--------------------------------------------------------------------------------------------------
+void PathTracer::setDisplacementData(const std::vector<DisplacementInfo>& displacementInfo)
+{
+    m_displacementInfo = displacementInfo;
+
+    // Check if any primitive has displacement
+    m_hasDisplacement = false;
+    for (const auto& info : m_displacementInfo)
+    {
+        if (info.hasDisplacement)
+        {
+            m_hasDisplacement = true;
+            break;
+        }
+    }
+
+    // If we have displacement, we need to recreate the RTX pipeline with intersection shaders
+    if (m_hasDisplacement && m_rtxPipeline != VK_NULL_HANDLE)
+    {
+        vkDeviceWaitIdle(m_device);
+        vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+        m_rtxPipeline = VK_NULL_HANDLE;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Get displacement info for a specific primitive
+//--------------------------------------------------------------------------------------------------
+const PathTracer::DisplacementInfo& PathTracer::getDisplacementInfo(uint32_t primIndex) const
+{
+    static DisplacementInfo emptyInfo{};
+    if (primIndex < m_displacementInfo.size())
+        return m_displacementInfo[primIndex];
+    return emptyInfo;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Check for displacement in materials
+//--------------------------------------------------------------------------------------------------
+void PathTracer::checkForDisplacement(Resources& resources)
+{
+    // This is called during onAttach or when scene changes
+    // Check if displacement info has been set externally
+    if (!m_displacementInfo.empty())
+    {
+        m_hasDisplacement = false;
+        for (const auto& info : m_displacementInfo)
+        {
+            if (info.hasDisplacement)
+            {
+                m_hasDisplacement = true;
+                break;
+            }
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Write displacement descriptors (RMIP textures) to descriptor sets
+//--------------------------------------------------------------------------------------------------
+void PathTracer::writeDisplacementDescriptors(VkCommandBuffer cmd, Resources& resources)
+{
+    if (!m_hasDisplacement)
+        return;
+
+    // Collect RMIP texture views
+    std::vector<VkDescriptorImageInfo> rmipImageInfos;
+    for (const auto& dispInfo : m_displacementInfo)
+    {
+        if (dispInfo.hasDisplacement && dispInfo.rmipView != VK_NULL_HANDLE)
+        {
+            VkDescriptorImageInfo info{};
+            info.imageView = dispInfo.rmipView;
+            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            info.sampler = VK_NULL_HANDLE;  // Sampler will be bound separately
+            rmipImageInfos.push_back(info);
+        }
+    }
+
+    if (!rmipImageInfos.empty())
+    {
+        // Add RMIP textures to the descriptor update
+        // Assuming binding 8 is reserved for RMIP texture array in your shader layout
+        nvvk::WriteSetContainer write{};
+        VkWriteDescriptorSet rmipWrite = resources.descriptorBinding[1].getWriteSet(8);  // Binding 8 for RMIP
+        rmipWrite.descriptorCount = static_cast<uint32_t>(rmipImageInfos.size());
+        rmipWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        write.append(rmipWrite, rmipImageInfos.data());
+
+        // Push the descriptor update
+        VkPipelineBindPoint bindPoint = (m_renderTechnique == RenderTechnique::RayQuery)
+            ? VK_PIPELINE_BIND_POINT_COMPUTE
+            : VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
+        vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
+    }
 }

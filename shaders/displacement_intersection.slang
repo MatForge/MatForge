@@ -359,7 +359,10 @@ bool texelMarch(float3 rayOrigin, float3 rayDir,
     uint2 texSize;
     uint numLevels;
     displacementMap.GetDimensions(0, texSize.x, texSize.y, numLevels);
-    
+
+    hitT = -1.0; 
+    hitUV = float2(0.0, 0.0);
+
     float2 uvStart = bound.minUV;
     float2 uvEnd = bound.maxUV;
     float2 uvStep = 1.0 / float2(texSize);
@@ -445,11 +448,11 @@ void intersectionMain()
         float3 geoNormal = normalize(cross(v1 - v0, v2 - v0));
         n0 = n1 = n2 = geoNormal;
     }
-    
+
     // Fetch texture coordinates
-    float2 uv0 = getVertexTexCoord0(renderPrim, indices.x);
-    float2 uv1 = getVertexTexCoord0(renderPrim, indices.y);
-    float2 uv2 = getVertexTexCoord0(renderPrim, indices.z);
+    float2 uv0 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(1.0, 0.0, 0.0));
+    float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 1.0, 0.0));
+    float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 0.0, 1.0));
     
     // Initialize with bounding prism intersection
     float prismTMin, prismTMax;
