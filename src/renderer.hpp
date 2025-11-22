@@ -158,10 +158,17 @@ private:
   struct RmipData
   {
       nvvk::Image image;
-      VkImageView view;
-      float       displacementFactor = 1.0f;  // Scale factor from extension
+      VkImageView view{ VK_NULL_HANDLE };
+      float       displacementFactor = 1.0f;
       int         texCoord = 0;
+      uint32_t    displacementTextureIndex = UINT32_MAX;  
+      float       maxDisplacement = 0.0f;                
+      bool        hasDisplacement = false;               
   };
-  std::unordered_map<int, RmipData> m_displacementRMIPs;
+
+  std::vector<RmipData> m_displacementRMIPs;
   void buildDisplacementRMIPs(VkCommandBuffer cmd);
+  void cleanupDisplacementRMIPs();
+  void passRMIPToPathTracer();
+  bool checkMaterialHasDisplacement(int materialIndex);
 };

@@ -90,6 +90,7 @@
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
 #include "nvvkgltf/converter.hpp"
+#include "nvvkgltf/tinygltf_utils.hpp"
 
 extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 
@@ -932,7 +933,7 @@ void GltfRenderer::destroyResources()
   m_rayPicker.deinit();
   m_resources.allocator.deinit();
 
-  for (auto& [matIdx, rmipData] : m_displacementRMIPs)
+  for (auto& rmipData : m_displacementRMIPs)
   {
       vkDestroyImageView(m_device, rmipData.view, nullptr);
       m_resources.allocator.destroyImage(rmipData.image);
@@ -1090,40 +1091,26 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
     NVVK_DBG_SCOPE(cmd);
     SCOPED_TIMER(__FUNCTION__);
 
+    cleanupDisplacementRMIPs();
+
     const tinygltf::Model& model = m_resources.scene.getModel();
 
     for (size_t matIdx = 0; matIdx < model.materials.size(); matIdx++)
     {
         const tinygltf::Material& material = model.materials[matIdx];
 
-        // Check for displacement extension
-        auto it = material.extensions.find("KHR_materials_displacement");
-        if (it == material.extensions.end())
-            continue;
+        KHR_materials_displacement displacement = tinygltf::utils::getDisplacement(material);
 
-        const tinygltf::Value& ext = it->second;
+        if (displacement.displacementGeometryTexture.index < 0)
+            continue;  // No displacement texture
 
-        // The extension should have displacementGeometryTexture
-        if (!ext.Has("displacementGeometryTexture"))
-            continue;
-
-        const tinygltf::Value& texInfo = ext.Get("displacementGeometryTexture");
-
-        // Get texture index
-        if (!texInfo.Has("index"))
-            continue;
-
-        int textureIdx = texInfo.Get("index").Get<int>();
+        int textureIdx = displacement.displacementGeometryTexture.index;
         if (textureIdx < 0 || textureIdx >= static_cast<int>(model.textures.size()))
             continue;
 
         // Get displacement factor
-        float displacementFactor = 1.0f;
-        if (ext.Has("displacementGeometryFactor"))
-        {
-            displacementFactor = static_cast<float>(ext.Get("displacementGeometryFactor").Get<double>());
-        }
-
+        float displacementFactor = displacement.displacementGeometryFactor;
+ 
         const tinygltf::Texture& texture = model.textures[textureIdx];
         int imageIdx = texture.source;
 
@@ -1208,9 +1195,60 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
 
         // Store the RMIP and factor for later use
         rmipData.displacementFactor = displacementFactor;  // Store the scale factor
+        rmipData.texCoord = displacement.displacementGeometryTexture.texCoord;
+        rmipData.displacementTextureIndex = static_cast<uint32_t>(textureIdx);
+        rmipData.maxDisplacement = displacement.displacementGeometryFactor;
+        rmipData.hasDisplacement = true;
         m_displacementRMIPs[static_cast<int>(matIdx)] = rmipData;
 
         LOGI("Built RMIP for material %zu '%s', displacement map %d (%dx%d, %d layers, factor=%.3f)\n",
             matIdx, material.name.c_str(), imageIdx, resolution, resolution, numLayers, displacementFactor);
     }
+
+    passRMIPToPathTracer();
 }
+
+void GltfRenderer::cleanupDisplacementRMIPs()
+{
+    for (auto& rmip : m_displacementRMIPs)
+    {
+        if (rmip.view != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(m_device, rmip.view, nullptr);
+            rmip.view = VK_NULL_HANDLE;
+        }
+        if (rmip.image.image != VK_NULL_HANDLE)
+        {
+            m_resources.allocator.destroyImage(rmip.image);
+        }
+        rmip = RmipData{};  // Reset to default
+    }
+    m_displacementRMIPs.clear();
+}
+
+// ADD: Pass RMIP data to PathTracer
+void GltfRenderer::passRMIPToPathTracer()
+{
+    // Convert RmipData to PathTracer::DisplacementInfo
+    std::vector<PathTracer::DisplacementInfo> displacementInfo;
+    displacementInfo.reserve(m_displacementRMIPs.size());
+
+    for (size_t i = 0; i < m_displacementRMIPs.size(); ++i)
+    {
+        const auto& rmip = m_displacementRMIPs[i];
+
+        PathTracer::DisplacementInfo info;
+        info.hasDisplacement = rmip.hasDisplacement;
+        info.rmipView = rmip.view;
+        info.rmipTextureIndex = static_cast<uint32_t>(i);  // Index in the array
+        info.displacementTextureIndex = rmip.displacementTextureIndex;
+        info.maxDisplacement = rmip.maxDisplacement * rmip.displacementFactor;
+
+        displacementInfo.push_back(info);
+    }
+
+    // Pass to PathTracer
+    m_pathTracer.setDisplacementData(displacementInfo);
+}
+
+
