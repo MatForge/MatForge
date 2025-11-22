@@ -806,14 +806,19 @@ void GltfRenderer::addToScene(const std::filesystem::path& sceneFilename)
     }
   }
 
-  // Add new root nodes to the existing scene
+  // Create a wrapper node for the new model to preserve its hierarchy
+  // This prevents the new model's nodes from being flattened into the existing scene
+  tinygltf::Node wrapperNode;
+  wrapperNode.name = sceneFilename.stem().string();  // Use filename as wrapper name
+  wrapperNode.children = newRootNodes;               // New model's root nodes become children of wrapper
+  int wrapperNodeIndex = static_cast<int>(existingModel.nodes.size());
+  existingModel.nodes.push_back(std::move(wrapperNode));
+
+  // Add only the wrapper node to the existing scene (not individual root nodes)
   int existingSceneIndex = existingModel.defaultScene >= 0 ? existingModel.defaultScene : 0;
   if(existingSceneIndex < static_cast<int>(existingModel.scenes.size()))
   {
-    for(int newRoot : newRootNodes)
-    {
-      existingModel.scenes[existingSceneIndex].nodes.push_back(newRoot);
-    }
+    existingModel.scenes[existingSceneIndex].nodes.push_back(wrapperNodeIndex);
   }
 
   // Merge animations (update node and accessor indices)

@@ -25,7 +25,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    MatForge Rendering Pipeline              │
+│             MatForge Rendering Pipeline                     │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  1. QUAD-OPTIMIZED LDS - Sampling Foundation                │
