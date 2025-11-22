@@ -661,6 +661,16 @@ void GltfRenderer::createVulkanScene()
 // Create and upload QOLDS sampling buffers
 void GltfRenderer::createQoldsBuffers()
 {
+  // Destroy existing QOLDS buffers if they exist (happens when loading a new scene)
+  if(m_resources.bQoldsMatrices.buffer != VK_NULL_HANDLE)
+  {
+    m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
+  }
+  if(m_resources.bQoldsSeeds.buffer != VK_NULL_HANDLE)
+  {
+    m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
+  }
+
   // Initialize QOLDS builder
   m_qoldsBuilder = std::make_unique<QOLDSBuilder>();
 

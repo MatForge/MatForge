@@ -459,7 +459,7 @@ void GltfRenderer::renderUI()
         }
         if(ImGui::IsItemHovered())
         {
-          ImGui::SetTooltip("Automatically captures frames at 1, 2, 4, 8, 16, 32, 64, 128 samples");
+          ImGui::SetTooltip("Automatically captures frames at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples");
         }
 
         ImGui::SameLine();
