@@ -25,24 +25,24 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    MatForge Rendering Pipeline               │
+│                    MatForge Rendering Pipeline              │
 ├─────────────────────────────────────────────────────────────┤
-│                                                              │
+│                                                             │
 │  1. QUAD-OPTIMIZED LDS - Sampling Foundation                │
 │     └─ Generate low-discrepancy random numbers              │
-│        ↓                                                     │
+│        ↓                                                    │
 │  2. RMIP - Geometry Detail                                  │
 │     └─ Ray-trace displacement maps directly (WIP)           │
-│        ↓                                                     │
+│        ↓                                                    │
 │  3. BOUNDED VNDF - Direction Sampling (Planned)             │
 │     └─ Efficient importance sampling                        │
-│        ↓                                                     │
+│        ↓                                                    │
 │  4. FAST-MSX - BRDF Evaluation                              │
 │     └─ Multiple scattering approximation                    │
-│        ↓                                                     │
+│        ↓                                                    │
 │  5. MONTE CARLO INTEGRATION                                 │
-│     └─ Combine: f(ωᵢ, ωₒ) × L(ωₒ) × cos(θ) / PDF           │
-│                                                              │
+│     └─ Combine: f(ωᵢ, ωₒ) × L(ωₒ) × cos(θ) / PDF            │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -380,7 +380,6 @@ MatForge/
 ## Performance
 
 TBD
-
 
 ## Milestones
 

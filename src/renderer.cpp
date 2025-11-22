@@ -50,6 +50,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 
 #include <thread>
+#include <ctime>
+#include <filesystem>
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
 #include <fmt/format.h>
@@ -1185,6 +1187,10 @@ void GltfRenderer::startConvergenceTest(bool useQOLDS)
   }
   m_pathTracer.m_useQOLDS = useQOLDS;  // Update checkbox state to reflect current sampling method
 
+  // Disable auto SPP and set SPP to 1 for accurate convergence testing
+  m_pathTracer.m_adaptiveSampling    = false;  
+  m_pathTracer.m_pushConst.numSamples = 1;    
+
   // Reset rendering to start fresh
   resetFrame();
 
@@ -1211,9 +1217,29 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
     m_convergenceTestActive = false;
     m_convergenceAnalyzer.endSession();
 
-    // Export results
+    // Export results with timestamp to test folder
     std::string sessionName = m_convergenceTestUseQOLDS ? "qolds_test" : "pcg_test";
-    std::string csvFile     = sessionName + ".csv";
+
+    // Generate timestamp string (YYYYMMDD_HHMMSS)
+    auto        now       = std::chrono::system_clock::now();
+    std::time_t nowTime   = std::chrono::system_clock::to_time_t(now);
+    std::tm     localTime = {};
+#ifdef _WIN32
+    localtime_s(&localTime, &nowTime);
+#else
+    localtime_r(&nowTime, &localTime);
+#endif
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &localTime);
+
+    // Create test directory if it doesn't exist
+    std::filesystem::path testDir = "../test";
+    if(!std::filesystem::exists(testDir))
+    {
+      std::filesystem::create_directories(testDir);
+    }
+
+    std::string csvFile = (testDir / (sessionName + "_" + timestamp + ".csv")).string();
     m_convergenceAnalyzer.exportToCSV(csvFile);
 
     auto duration = std::chrono::steady_clock::now() - m_convergenceTestStartTime;

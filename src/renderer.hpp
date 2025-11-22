@@ -157,7 +157,7 @@ private:
   bool                     m_convergenceTestActive{false};
   bool                     m_convergenceTestUseQOLDS{false};
   bool                     m_convergenceTestPendingFinalize{false};
-  std::vector<uint32_t>    m_convergenceTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128};
+  std::vector<uint32_t>    m_convergenceTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
   size_t                   m_convergenceTestCurrentIndex{0};
   std::chrono::steady_clock::time_point m_convergenceTestStartTime;
 

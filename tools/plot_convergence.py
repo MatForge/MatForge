@@ -1,354 +1,214 @@
+#!/usr/bin/env python3
 """
-Convergence Analysis Plotter for MatForge QOLDS vs PCG comparison
+Convergence Analysis Plot Generator for MatForge QOLDS Testing
+
+This script takes two CSV files (typically QOLDS and PCG test results) and generates
+comparison graphs for analyzing sampling convergence performance.
 
 Usage:
-    python plot_convergence.py --qolds qolds_data.csv --pcg pcg_data.csv --output plots/
+    python plot_convergence.py <csv_file_1> <csv_file_2> [--output <output_file>]
+
+Example:
+    python plot_convergence.py ../test/qolds_test_20251121_192936.csv ../test/pcg_test_20251121_193006.csv
 """
 
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import argparse
 from pathlib import Path
+from datetime import datetime
 
-# Publication-quality plot settings
-plt.rcParams['figure.figsize'] = (12, 8)
-plt.rcParams['font.size'] = 12
-plt.rcParams['lines.linewidth'] = 2
-plt.rcParams['axes.grid'] = True
-plt.rcParams['grid.alpha'] = 0.3
 
-def load_convergence_data(filepath):
-    """Load convergence data from CSV"""
+def load_csv(filepath: str) -> pd.DataFrame:
+    """Load a convergence test CSV file."""
     df = pd.read_csv(filepath)
-    print(f"Loaded {filepath}: {len(df)} samples")
-    print(f"  Sample counts: {df['SampleCount'].tolist()}")
-    print(f"  MSE range: {df['MSE'].min():.6f} - {df['MSE'].max():.6f}")
     return df
 
-def plot_mse_convergence(qolds_df, pcg_df, output_dir):
-    """Plot MSE vs Sample Count"""
-    fig, ax = plt.subplots(figsize=(12, 7))
 
-    # QOLDS
-    ax.plot(qolds_df['SampleCount'], qolds_df['MSE'],
-            marker='o', label='QOLDS (Quad-Optimized LDS)',
-            color='#2E86AB', linewidth=2.5)
+def compute_improvement(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
+    """Compute improvement metrics between two datasets."""
+    # Merge on SampleCount
+    merged = pd.merge(df1, df2, on='SampleCount', suffixes=('_1', '_2'))
 
-    # PCG
-    ax.plot(pcg_df['SampleCount'], pcg_df['MSE'],
-            marker='s', label='PCG (Pseudo-Random)',
-            color='#A23B72', linewidth=2.5)
+    # Calculate improvements
+    merged['MSE_Improvement_Pct'] = (merged['MSE_2'] - merged['MSE_1']) / merged['MSE_2'] * 100
+    merged['PSNR_Improvement_dB'] = merged['PSNR_1'] - merged['PSNR_2']
 
-    # Monte Carlo convergence rate (1/N)
-    reference_samples = qolds_df['SampleCount'].values
-    reference_mse = pcg_df['MSE'].iloc[0] / (reference_samples / reference_samples[0])
-    ax.plot(reference_samples, reference_mse,
-            linestyle='--', label='Theoretical O(1/N)',
-            color='gray', linewidth=1.5, alpha=0.7)
+    return merged
 
-    ax.set_xlabel('Samples Per Pixel', fontsize=14)
-    ax.set_ylabel('Mean Squared Error (MSE)', fontsize=14)
-    ax.set_title('Convergence Comparison: QOLDS vs PCG', fontsize=16, fontweight='bold')
-    ax.set_xscale('log', base=2)
-    ax.set_yscale('log')
-    ax.legend(fontsize=12, loc='upper right')
-    ax.grid(True, which='both', linestyle=':', alpha=0.3)
 
-    plt.tight_layout()
-    plt.savefig(output_dir / 'convergence_mse.png', dpi=300, bbox_inches='tight')
-    plt.savefig(output_dir / 'convergence_mse.pdf', bbox_inches='tight')
-    print(f"✓ Saved: {output_dir / 'convergence_mse.png'}")
-    plt.close()
+def plot_convergence(csv1: str, csv2: str, output: str = None):
+    """Generate convergence comparison plots."""
+    # Load data
+    df1 = load_csv(csv1)
+    df2 = load_csv(csv2)
 
-def plot_psnr_convergence(qolds_df, pcg_df, output_dir):
-    """Plot PSNR vs Sample Count (quality metric)"""
-    fig, ax = plt.subplots(figsize=(12, 7))
+    # Get sampler names
+    sampler1 = df1['Sampler'].iloc[0] if 'Sampler' in df1.columns else Path(csv1).stem
+    sampler2 = df2['Sampler'].iloc[0] if 'Sampler' in df2.columns else Path(csv2).stem
 
-    ax.plot(qolds_df['SampleCount'], qolds_df['PSNR'],
-            marker='o', label='QOLDS', color='#2E86AB', linewidth=2.5)
-    ax.plot(pcg_df['SampleCount'], pcg_df['PSNR'],
-            marker='s', label='PCG', color='#A23B72', linewidth=2.5)
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f'Convergence Analysis: {sampler1} vs {sampler2}', fontsize=14, fontweight='bold')
 
-    ax.set_xlabel('Samples Per Pixel', fontsize=14)
-    ax.set_ylabel('Peak Signal-to-Noise Ratio (dB)', fontsize=14)
-    ax.set_title('Image Quality Convergence: QOLDS vs PCG', fontsize=16, fontweight='bold')
-    ax.set_xscale('log', base=2)
-    ax.legend(fontsize=12)
-    ax.grid(True, which='both', linestyle=':', alpha=0.3)
+    # Color scheme
+    color1 = '#2ecc71'  # Green for QOLDS
+    color2 = '#3498db'  # Blue for PCG
 
-    plt.tight_layout()
-    plt.savefig(output_dir / 'convergence_psnr.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: {output_dir / 'convergence_psnr.png'}")
-    plt.close()
+    # Swap colors if needed (QOLDS should be green)
+    if 'PCG' in sampler1.upper():
+        color1, color2 = color2, color1
 
-def plot_speedup_analysis(qolds_df, pcg_df, output_dir, target_mse=0.001):
-    """Compute and visualize speedup: how many fewer samples QOLDS needs"""
+    # === Plot 1: PSNR vs Sample Count ===
+    ax1 = axes[0, 0]
+    ax1.semilogx(df1['SampleCount'], df1['PSNR'], 'o-', color=color1,
+                 linewidth=2, markersize=8, label=sampler1)
+    ax1.semilogx(df2['SampleCount'], df2['PSNR'], 's--', color=color2,
+                 linewidth=2, markersize=8, label=sampler2)
+    ax1.set_xlabel('Sample Count', fontsize=11)
+    ax1.set_ylabel('PSNR (dB)', fontsize=11)
+    ax1.set_title('Image Quality vs Sample Count', fontsize=12)
+    ax1.legend(loc='lower right')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xticks(df1['SampleCount'])
+    ax1.set_xticklabels(df1['SampleCount'].astype(int))
 
-    # Find sample count for each method to reach target MSE
-    qolds_samples = np.interp(target_mse, qolds_df['MSE'][::-1], qolds_df['SampleCount'][::-1])
-    pcg_samples = np.interp(target_mse, pcg_df['MSE'][::-1], pcg_df['SampleCount'][::-1])
+    # === Plot 2: MSE vs Sample Count (log-log) ===
+    ax2 = axes[0, 1]
+    ax2.loglog(df1['SampleCount'], df1['MSE'], 'o-', color=color1,
+               linewidth=2, markersize=8, label=sampler1)
+    ax2.loglog(df2['SampleCount'], df2['MSE'], 's--', color=color2,
+               linewidth=2, markersize=8, label=sampler2)
+    ax2.set_xlabel('Sample Count', fontsize=11)
+    ax2.set_ylabel('MSE (log scale)', fontsize=11)
+    ax2.set_title('Error vs Sample Count', fontsize=12)
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3, which='both')
+    ax2.set_xticks(df1['SampleCount'])
+    ax2.set_xticklabels(df1['SampleCount'].astype(int))
 
-    speedup = pcg_samples / qolds_samples
-    reduction_pct = (1.0 - 1.0/speedup) * 100
+    # === Plot 3: PSNR Improvement ===
+    ax3 = axes[1, 0]
+    improvement = compute_improvement(df1, df2)
 
-    print(f"\n📊 Speedup Analysis (target MSE = {target_mse}):")
-    print(f"  QOLDS: {qolds_samples:.1f} samples")
-    print(f"  PCG:   {pcg_samples:.1f} samples")
-    print(f"  Speedup: {speedup:.2f}× ({reduction_pct:.1f}% fewer samples)")
-
-    # Bar chart
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    methods = ['QOLDS', 'PCG']
-    samples = [qolds_samples, pcg_samples]
-    colors = ['#2E86AB', '#A23B72']
-
-    bars = ax.bar(methods, samples, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
+    colors = ['#27ae60' if x > 0 else '#e74c3c' for x in improvement['PSNR_Improvement_dB']]
+    bars = ax3.bar(range(len(improvement)), improvement['PSNR_Improvement_dB'], color=colors, alpha=0.8)
+    ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    ax3.set_xlabel('Sample Count', fontsize=11)
+    ax3.set_ylabel(f'PSNR Improvement (dB)\n({sampler1} - {sampler2})', fontsize=11)
+    ax3.set_title('Quality Improvement per Sample Count', fontsize=12)
+    ax3.set_xticks(range(len(improvement)))
+    ax3.set_xticklabels(improvement['SampleCount'].astype(int))
+    ax3.grid(True, alpha=0.3, axis='y')
 
     # Add value labels on bars
-    for bar, sample in zip(bars, samples):
+    for bar, val in zip(bars, improvement['PSNR_Improvement_dB']):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{sample:.0f} spp',
-                ha='center', va='bottom', fontsize=14, fontweight='bold')
+        ax3.annotate(f'{val:.2f}',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 3 if height >= 0 else -10),
+                     textcoords="offset points",
+                     ha='center', va='bottom' if height >= 0 else 'top',
+                     fontsize=9)
 
-    ax.set_ylabel('Samples Required', fontsize=14)
-    ax.set_title(f'Sample Efficiency to Reach MSE < {target_mse}\n' +
-                 f'QOLDS is {speedup:.2f}× faster ({reduction_pct:.1f}% fewer samples)',
-                 fontsize=16, fontweight='bold')
-    ax.set_ylim(0, max(samples) * 1.2)
+    # === Plot 4: MSE Improvement Percentage ===
+    ax4 = axes[1, 1]
+    colors = ['#27ae60' if x > 0 else '#e74c3c' for x in improvement['MSE_Improvement_Pct']]
+    bars = ax4.bar(range(len(improvement)), improvement['MSE_Improvement_Pct'], color=colors, alpha=0.8)
+    ax4.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+    ax4.set_xlabel('Sample Count', fontsize=11)
+    ax4.set_ylabel(f'MSE Reduction (%)\n({sampler1} vs {sampler2})', fontsize=11)
+    ax4.set_title('Error Reduction per Sample Count', fontsize=12)
+    ax4.set_xticks(range(len(improvement)))
+    ax4.set_xticklabels(improvement['SampleCount'].astype(int))
+    ax4.grid(True, alpha=0.3, axis='y')
 
+    # Add value labels on bars
+    for bar, val in zip(bars, improvement['MSE_Improvement_Pct']):
+        height = bar.get_height()
+        ax4.annotate(f'{val:.1f}%',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 3 if height >= 0 else -10),
+                     textcoords="offset points",
+                     ha='center', va='bottom' if height >= 0 else 'top',
+                     fontsize=9)
+
+    # Adjust layout
     plt.tight_layout()
-    plt.savefig(output_dir / 'speedup_analysis.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: {output_dir / 'speedup_analysis.png'}")
-    plt.close()
 
-    return speedup, reduction_pct
+    # Save or show
+    if output:
+        output_path = Path(output)
+    else:
+        # Generate output filename based on input files
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = Path(csv1).parent / f'convergence_comparison_{timestamp}.png'
 
-def plot_combined_dashboard(qolds_df, pcg_df, output_dir, speedup, reduction_pct):
-    """Create comprehensive 2x2 dashboard"""
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Plot saved to: {output_path}")
 
-    # MSE Convergence
-    ax = axes[0, 0]
-    ax.plot(qolds_df['SampleCount'], qolds_df['MSE'], 'o-', label='QOLDS', color='#2E86AB', linewidth=2)
-    ax.plot(pcg_df['SampleCount'], pcg_df['MSE'], 's-', label='PCG', color='#A23B72', linewidth=2)
-    ax.set_xlabel('Samples Per Pixel')
-    ax.set_ylabel('Mean Squared Error')
-    ax.set_title('MSE Convergence', fontweight='bold')
-    ax.set_xscale('log', base=2)
-    ax.set_yscale('log')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # Close the figure to free memory (skip interactive window)
+    plt.close(fig)
 
-    # PSNR Convergence
-    ax = axes[0, 1]
-    ax.plot(qolds_df['SampleCount'], qolds_df['PSNR'], 'o-', label='QOLDS', color='#2E86AB', linewidth=2)
-    ax.plot(pcg_df['SampleCount'], pcg_df['PSNR'], 's-', label='PCG', color='#A23B72', linewidth=2)
-    ax.set_xlabel('Samples Per Pixel')
-    ax.set_ylabel('PSNR (dB)')
-    ax.set_title('Image Quality (PSNR)', fontweight='bold')
-    ax.set_xscale('log', base=2)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # Print summary statistics
+    print("\n" + "="*60)
+    print("CONVERGENCE ANALYSIS SUMMARY")
+    print("="*60)
+    print(f"\nComparing: {sampler1} vs {sampler2}")
+    print("-"*60)
 
-    # Speedup comparison
-    ax = axes[1, 0]
-    methods = ['QOLDS', 'PCG']
-    final_mse = [qolds_df['MSE'].iloc[-1], pcg_df['MSE'].iloc[-1]]
-    bars = ax.bar(methods, final_mse, color=['#2E86AB', '#A23B72'], alpha=0.8)
-    for bar, mse in zip(bars, final_mse):
-        ax.text(bar.get_x() + bar.get_width()/2., bar.get_height(),
-                f'{mse:.6f}', ha='center', va='bottom', fontweight='bold')
-    ax.set_ylabel('Final MSE (64 spp)')
-    ax.set_title('Final Quality Comparison', fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
+    avg_psnr_improvement = improvement['PSNR_Improvement_dB'].mean()
+    avg_mse_improvement = improvement['MSE_Improvement_Pct'].mean()
 
-    # Summary statistics
-    ax = axes[1, 1]
-    ax.axis('off')
+    print(f"\nAverage PSNR Improvement: {avg_psnr_improvement:+.3f} dB")
+    print(f"Average MSE Reduction:    {avg_mse_improvement:+.2f}%")
 
-    summary_text = f"""
-QOLDS Performance Summary
+    print("\nPer Sample Count:")
+    print("-"*60)
+    print(f"{'Samples':>8} | {'PSNR Gain (dB)':>14} | {'MSE Reduction (%)':>17}")
+    print("-"*60)
+    for _, row in improvement.iterrows():
+        print(f"{int(row['SampleCount']):>8} | {row['PSNR_Improvement_dB']:>+14.3f} | {row['MSE_Improvement_Pct']:>+17.2f}")
+    print("-"*60)
 
-Variance Reduction: {reduction_pct:.1f}% fewer samples
-Speedup Factor: {speedup:.2f}×
+    # Final verdict
+    print("\n" + "="*60)
+    if avg_psnr_improvement > 0:
+        print(f"VERDICT: {sampler1} converges faster than {sampler2}")
+        print(f"         {sampler1} achieves equivalent quality with ~{100/(100-avg_mse_improvement)*100 - 100:.1f}% fewer samples")
+    else:
+        print(f"VERDICT: {sampler2} converges faster than {sampler1}")
+    print("="*60)
 
-Final MSE (64 spp):
-  QOLDS: {qolds_df['MSE'].iloc[-1]:.6f}
-  PCG:   {pcg_df['MSE'].iloc[-1]:.6f}
-
-Final PSNR (64 spp):
-  QOLDS: {qolds_df['PSNR'].iloc[-1]:.2f} dB
-  PCG:   {pcg_df['PSNR'].iloc[-1]:.2f} dB
-
-Implementation:
-  • Base-3 Sobol' sequences
-  • Owen scrambling
-  • 47 dimensions × 243 points
-  • Negligible overhead (<1%)
-"""
-
-    ax.text(0.1, 0.9, summary_text, transform=ax.transAxes,
-            fontsize=13, verticalalignment='top', family='monospace',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
-
-    fig.suptitle('MatForge QOLDS Convergence Analysis', fontsize=18, fontweight='bold', y=0.995)
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
-    plt.savefig(output_dir / 'convergence_dashboard.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: {output_dir / 'convergence_dashboard.png'}")
-    plt.close()
-
-def generate_markdown_report(qolds_df, pcg_df, output_dir, speedup, reduction_pct):
-    """Generate markdown report for documentation"""
-
-    report = f"""# QOLDS Convergence Analysis Report
-
-**Date**: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}
-**Project**: MatForge (CIS 5650 Fall 2025)
-**Author**: Yiding Liu
-
----
-
-## Executive Summary
-
-QOLDS (Quad-Optimized Low-Discrepancy Sequences) demonstrates **{reduction_pct:.1f}% variance reduction** compared to standard PCG pseudo-random sampling in Monte Carlo path tracing.
-
-### Key Results
-
-| Metric | QOLDS | PCG | Improvement |
-|--------|-------|-----|-------------|
-| **Final MSE (64 spp)** | {qolds_df['MSE'].iloc[-1]:.6f} | {pcg_df['MSE'].iloc[-1]:.6f} | {(1 - qolds_df['MSE'].iloc[-1]/pcg_df['MSE'].iloc[-1])*100:.1f}% |
-| **Final PSNR (64 spp)** | {qolds_df['PSNR'].iloc[-1]:.2f} dB | {pcg_df['PSNR'].iloc[-1]:.2f} dB | +{qolds_df['PSNR'].iloc[-1] - pcg_df['PSNR'].iloc[-1]:.2f} dB |
-| **Speedup Factor** | — | — | **{speedup:.2f}×** |
-| **Sample Reduction** | — | — | **{reduction_pct:.1f}%** |
-
----
-
-## Methodology
-
-### Test Scene
-- **Scene**: Cornell Box (reference)
-- **Resolution**: 1920×1080
-- **Max Depth**: 5 bounces
-- **Reference**: 1024 spp converged image
-
-### Sampling Strategy
-- **QOLDS**: Base-3 Sobol' with Owen scrambling, 47 dimensions
-- **PCG**: Standard permuted congruential generator (default)
-
-### Sample Counts Tested
-{qolds_df['SampleCount'].tolist()}
-
----
-
-## Results
-
-### Convergence Plots
-
-![MSE Convergence](convergence_mse.png)
-
-![PSNR Convergence](convergence_psnr.png)
-
-![Speedup Analysis](speedup_analysis.png)
-
-### Quantitative Analysis
-
-At **64 samples per pixel**:
-- QOLDS achieves **{qolds_df['PSNR'].iloc[-1]:.2f} dB PSNR**
-- PCG achieves **{pcg_df['PSNR'].iloc[-1]:.2f} dB PSNR**
-- QOLDS is **{(qolds_df['PSNR'].iloc[-1] - pcg_df['PSNR'].iloc[-1]):.2f} dB better**
-
-To reach MSE < 0.001:
-- QOLDS requires ~{np.interp(0.001, qolds_df['MSE'][::-1], qolds_df['SampleCount'][::-1]):.0f} samples
-- PCG requires ~{np.interp(0.001, pcg_df['MSE'][::-1], pcg_df['SampleCount'][::-1]):.0f} samples
-- **{speedup:.2f}× speedup** ({reduction_pct:.1f}% fewer samples)
-
----
-
-## Implementation Details
-
-### GPU Integration
-- **Host-side**: Generator matrix construction (C++)
-- **Device-side**: Sampling function (Slang shader)
-- **Memory**: ~4.9 KB (47 matrices × 5×5 + 47 seeds)
-- **Overhead**: <1% measured
-
-### Code Statistics
-- **Lines of Code**: ~400 LOC
-- **Integration**: Path tracer dimension tracking
-- **Status**: ✅ Complete (Milestone 1)
-
----
-
-## Conclusions
-
-1. **QOLDS demonstrates measurable variance reduction** ({reduction_pct:.1f}%) vs. PCG
-2. **Convergence rate follows theoretical predictions** from the paper (15-30% improvement)
-3. **Overhead is negligible** (<1%), making it suitable for production use
-4. **Space-filling properties** of (1,4)-sequences are visibly better in 4D projections
-
-### Next Steps (Milestone 2)
-- ⏭️ Integration with RMIP (texel marching sampling)
-- ⏭️ Integration with Bounded VNDF (direction sampling)
-- ⏭️ Extended analysis on complex scenes
-- ⏭️ Discrepancy validation tests
-
----
-
-## References
-
-- **Paper**: Ostromoukhov et al., "Quad-Optimized Low-Discrepancy Sequences", ACM SIGGRAPH 2024
-- **Implementation**: [MatForge GitHub](https://github.com/matforge/MatForge)
-- **Documentation**: [QOLDS Implementation Plan](../markdowns/QOLDS_impl_plan.md)
-
----
-
-*Generated by MatForge Convergence Analyzer*
-"""
-
-    report_path = output_dir / 'QOLDS_convergence_report.md'
-    with open(report_path, 'w') as f:
-        f.write(report)
-
-    print(f"✓ Saved: {report_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Plot QOLDS convergence analysis')
-    parser.add_argument('--qolds', required=True, help='QOLDS convergence CSV file')
-    parser.add_argument('--pcg', required=True, help='PCG convergence CSV file')
-    parser.add_argument('--output', default='analysis_results', help='Output directory')
-    parser.add_argument('--target-mse', type=float, default=0.001, help='Target MSE for speedup calculation')
+    parser = argparse.ArgumentParser(
+        description='Generate convergence comparison plots from CSV test results.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python plot_convergence.py qolds_test.csv pcg_test.csv
+    python plot_convergence.py ../test/qolds_test.csv ../test/pcg_test.csv --output comparison.png
+        """
+    )
+    parser.add_argument('csv1', help='First CSV file (e.g., QOLDS test results)')
+    parser.add_argument('csv2', help='Second CSV file (e.g., PCG test results)')
+    parser.add_argument('--output', '-o', help='Output image file (default: auto-generated)')
 
     args = parser.parse_args()
 
-    # Create output directory
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Validate input files
+    if not Path(args.csv1).exists():
+        print(f"Error: File not found: {args.csv1}")
+        return 1
+    if not Path(args.csv2).exists():
+        print(f"Error: File not found: {args.csv2}")
+        return 1
 
-    print("=" * 60)
-    print("MatForge QOLDS Convergence Analysis")
-    print("=" * 60)
+    plot_convergence(args.csv1, args.csv2, args.output)
+    return 0
 
-    # Load data
-    qolds_df = load_convergence_data(args.qolds)
-    pcg_df = load_convergence_data(args.pcg)
-
-    # Generate plots
-    print("\n📈 Generating plots...")
-    plot_mse_convergence(qolds_df, pcg_df, output_dir)
-    plot_psnr_convergence(qolds_df, pcg_df, output_dir)
-    speedup, reduction_pct = plot_speedup_analysis(qolds_df, pcg_df, output_dir, args.target_mse)
-    plot_combined_dashboard(qolds_df, pcg_df, output_dir, speedup, reduction_pct)
-
-    # Generate report
-    print("\n📝 Generating markdown report...")
-    generate_markdown_report(qolds_df, pcg_df, output_dir, speedup, reduction_pct)
-
-    print("\n✅ Analysis complete!")
-    print(f"📁 Results saved to: {output_dir.absolute()}")
-    print("=" * 60)
 
 if __name__ == '__main__':
-    main()
+    exit(main())

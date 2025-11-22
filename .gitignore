@@ -13,7 +13,7 @@ _bin/
 _install/             
 build/                
 spv/
-others/                  
+others/           
 
 # =============================================================================
 # Project-Specific Exclusions
