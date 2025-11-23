@@ -51,7 +51,10 @@
 
 #include <thread>
 #include <ctime>
+#include <chrono>
 #include <filesystem>
+#include <cctype>
+#include <cstdio>
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
 #include <fmt/format.h>
@@ -409,6 +412,103 @@ void GltfRenderer::onLastHeadlessFrame()
 {
   m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(),
                          nvutils::getExecutablePath().replace_extension(".jpg").string());
+}
+
+// Schedule auto-export images at configured delays after a settings toggle.
+void GltfRenderer::scheduleAutoExportOnToggle()
+{
+  if (!m_autoExportOnToggle || !m_app)
+    return;
+
+  std::filesystem::path baseOutDir = m_autoExportDir;
+  if (baseOutDir.empty())
+    baseOutDir = std::filesystem::current_path();
+
+  Resources::ImageType imgType = m_autoExportImageType;
+
+  // Copy delays (use member vector)
+  std::vector<int> delaysMs = m_autoExportDelaysMs;
+  if (delaysMs.empty())
+    delaysMs = {50, 100, 250, 500, 1000};
+
+  // Determine feature name (fallback to "settings") and sanitize it
+  std::string feature = m_lastToggledFeatureName.empty() ? "settings" : m_lastToggledFeatureName;
+  // sanitize: replace spaces with '_' and remove problematic chars
+  std::string featureSanitized;
+  for (char c : feature)
+  {
+    if (std::isalnum((unsigned char)c) || c == '_')
+      featureSanitized.push_back(c);
+    else if (std::isspace((unsigned char)c) || c == '-')
+      featureSanitized.push_back('_');
+  }
+
+  // Get scene name and sanitize it
+  std::string sceneName = "NoScene";
+  try
+  {
+    auto sfn = m_resources.scene.getFilename().filename();
+    if (!sfn.empty())
+      sceneName = sfn.string();
+  }
+  catch (...)
+  {
+  }
+  std::string sceneSanitized;
+  for (char c : sceneName)
+  {
+    if (std::isalnum((unsigned char)c) || c == '_')
+      sceneSanitized.push_back(c);
+    else if (std::isspace((unsigned char)c) || c == '-' || c == '.')
+      sceneSanitized.push_back('_');
+  }
+
+  // Create a grouped folder for this capture event using human-readable datetime
+  auto now = std::chrono::system_clock::now();
+  auto msSince = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+  std::time_t tt = std::chrono::system_clock::to_time_t(now);
+  std::tm local_tm{};
+#ifdef _WIN32
+  localtime_s(&local_tm, &tt);
+#else
+  localtime_r(&tt, &local_tm);
+#endif
+  int ms_part = static_cast<int>(msSince % 1000);
+  char timebuf[64];
+  std::snprintf(timebuf, sizeof(timebuf), "%04d%02d%02d-%02d%02d%02d-%03d",
+                local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday, local_tm.tm_hour, local_tm.tm_min,
+                local_tm.tm_sec, ms_part);
+  std::string timeStr(timebuf);
+  std::filesystem::path groupFolder = baseOutDir / fmt::format("{}__{}_{}", sceneSanitized, featureSanitized, timeStr);
+  try
+  {
+    std::filesystem::create_directories(groupFolder);
+  }
+  catch (...)
+  {
+  }
+
+  // Spawn a detached thread to capture at the specified intervals
+  std::thread([this, groupFolder, imgType, delaysMs, featureSanitized, timeStr]()
+              {
+    for(int d : delaysMs)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(d));
+      try
+      {
+        // File name: <feature>_<datetime>_<delay>ms.png
+        std::filesystem::path filename = groupFolder / fmt::format("{}_{}_{}ms.png", featureSanitized, timeStr, d);
+        m_app->saveImageToFile(m_resources.gBuffers.getColorImage(imgType), m_resources.gBuffers.getSize(), filename);
+      }
+      catch(const std::exception&)
+      {
+        // ignore errors in background export
+      }
+      catch(...)
+      {
+      }
+    } })
+      .detach();
 }
 
 //--------------------------------------------------------------------------------------------------

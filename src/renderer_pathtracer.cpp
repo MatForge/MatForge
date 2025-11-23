@@ -193,6 +193,7 @@ bool PathTracer::onUIRender(Resources& resources)
         LOGI("Switched to QOLDS sampling (Quad-Optimized Low-Discrepancy Sequences)\n");
       else
         LOGI("Switched to PCG sampling (default pseudo-random)\n");
+      m_lastToggledSetting = m_useQOLDS ? "UseQOLDS_On" : "UseQOLDS_Off";
     }
 
     PE::end();
@@ -203,13 +204,14 @@ bool PathTracer::onUIRender(Resources& resources)
       bool prevFastMSX = m_useFastMSX;
       changed |= PE::Checkbox("Use FastMSX", &m_useFastMSX, "Use Fast-MSX to fix Smith GGX");
 
-      if (m_useFastMSX != prevFastMSX)
-      {
-          if (m_useFastMSX)
-              LOGI("Switched to FastMSX\n");
-          else
-              LOGI("Switched to Smith's GGX\n");
-      }
+    if (m_useFastMSX != prevFastMSX)
+    {
+      if (m_useFastMSX)
+        LOGI("Switched to FastMSX\n");
+      else
+        LOGI("Switched to Smith's GGX\n");
+      m_lastToggledSetting = m_useFastMSX ? "UseFastMSX_On" : "UseFastMSX_Off";
+    }
 
       PE::end();
   }
@@ -219,13 +221,14 @@ bool PathTracer::onUIRender(Resources& resources)
       bool prevBoundedVNDF = m_useBoundedVNDF;
       changed |= PE::Checkbox("Use Bounded VNDF", &m_useBoundedVNDF, "Use Bounded VNDF for better performance");
 
-      if (m_useBoundedVNDF != prevBoundedVNDF)
-      {
-          if (m_useBoundedVNDF)
-              LOGI("Bounded VNDF is now enabled\n");
-          else
-              LOGI("Bounded VNDF is now disabled\n");
-      }
+    if (m_useBoundedVNDF != prevBoundedVNDF)
+    {
+      if (m_useBoundedVNDF)
+        LOGI("Bounded VNDF is now enabled\n");
+      else
+        LOGI("Bounded VNDF is now disabled\n");
+      m_lastToggledSetting = m_useBoundedVNDF ? "UseBoundedVNDF_On" : "UseBoundedVNDF_Off";
+    }
 
       PE::end();
   }

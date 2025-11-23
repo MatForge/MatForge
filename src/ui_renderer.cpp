@@ -19,6 +19,7 @@
 
 #include <filesystem>
 #include <fmt/format.h>
+#include <sstream>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
@@ -245,6 +246,11 @@ void GltfRenderer::renderUI()
           if(headerManager.beginHeader("Path Tracer"))
           {
             changed |= m_pathTracer.onUIRender(m_resources);
+            if (!m_pathTracer.m_lastToggledSetting.empty())
+            {
+              m_lastToggledFeatureName = m_pathTracer.m_lastToggledSetting;
+              m_pathTracer.m_lastToggledSetting.clear();
+            }
           }
         }
         else  // Rasterizer
@@ -268,7 +274,12 @@ void GltfRenderer::renderUI()
                 (m_resources.settings.envSystem == shaderio::EnvSystem::eSky) ? 10.0f : m_resources.hdrIbl.getIntegral();
             changed |= true;
           }
-          changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
+          {
+            bool sc = PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
+            changed |= sc;
+            if (sc)
+              m_lastToggledFeatureName = "Solid Color";
+          }
           if(m_resources.settings.useSolidBackground)
           {
             changed |= PE::ColorEdit3("Background Color", glm::value_ptr(m_resources.settings.solidBackgroundColor));
@@ -302,6 +313,91 @@ void GltfRenderer::renderUI()
       if(headerManager.beginHeader("Tonemapper"))
       {
         nvgui::tonemapperWidget(m_resources.tonemapperData);
+      }
+
+      // Auto-export on toggle
+      if (headerManager.beginHeader("Auto Export"))
+      {
+        ImGui::TextWrapped("When enabled, any change in settings will automatically export the current viewport image at multiple delays. Enter comma-separated ms values below.");
+        bool prev = m_autoExportOnToggle;
+        ImGui::Checkbox("Auto Export On Toggle", &m_autoExportOnToggle);
+        ImGui::SameLine();
+        if (ImGui::Button("Choose Folder"))
+        {
+          // Use Save dialog and take parent directory as folder chooser
+          std::filesystem::path pick = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Choose Folder (select any file)", "Image Files|*.png;*.jpg;*.hdr");
+          if (!pick.empty())
+          {
+            m_autoExportDir = pick.parent_path();
+          }
+        }
+        if (!m_autoExportDir.empty())
+          ImGui::Text("Folder: %s", m_autoExportDir.string().c_str());
+        if (prev != m_autoExportOnToggle && m_autoExportOnToggle)
+        {
+          if (m_autoExportDir.empty())
+            m_autoExportDir = std::filesystem::current_path();
+        }
+
+        // Delays CSV editor
+        static std::string delaysCsv;
+        // Initialize the CSV string from the member vector when empty
+        if (delaysCsv.empty())
+        {
+          std::ostringstream oss;
+          for (size_t i = 0; i < m_autoExportDelaysMs.size(); ++i)
+          {
+            if (i)
+              oss << ',';
+            oss << m_autoExportDelaysMs[i];
+          }
+          delaysCsv = oss.str();
+        }
+
+        // ImGui version here doesn't provide a std::string overload, use a fixed buffer
+        {
+          char buf[256] = {0};
+          std::strncpy(buf, delaysCsv.c_str(), sizeof(buf) - 1);
+          if (ImGui::InputText("Delays (ms, csv)", buf, sizeof(buf)))
+          {
+            delaysCsv = std::string(buf);
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Apply Delays"))
+        {
+          // Parse CSV into ints
+          std::vector<int> parsed;
+          std::istringstream iss(delaysCsv);
+          std::string token;
+          while (std::getline(iss, token, ','))
+          {
+            try
+            {
+              int v = std::stoi(token);
+              if (v > 0)
+                parsed.push_back(v);
+            }
+            catch (...)
+            {
+            }
+          }
+          if (!parsed.empty())
+            m_autoExportDelaysMs = parsed;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Defaults"))
+        {
+          m_autoExportDelaysMs = {50, 100, 250, 500, 1000};
+          std::ostringstream oss;
+          for (size_t i = 0; i < m_autoExportDelaysMs.size(); ++i)
+          {
+            if (i)
+              oss << ',';
+            oss << m_autoExportDelaysMs[i];
+          }
+          delaysCsv = oss.str();
+        }
       }
 
       // Multiple scenes
@@ -514,7 +610,11 @@ void GltfRenderer::renderUI()
     ImGui::End();  // End Settings
 
     if(changed)
+    {
+      if (m_autoExportOnToggle)
+        scheduleAutoExportOnToggle();
       resetFrame();
+    }
   }
 
 
@@ -630,7 +730,10 @@ void GltfRenderer::renderMenu()
     ImGui::EndDisabled();
     ImGui::Separator();
     ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &v_sync);
-    ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
+    if (ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis))
+    {
+      m_lastToggledFeatureName = "3D-Axis";
+    }
     ImGui::EndMenu();
   }
 

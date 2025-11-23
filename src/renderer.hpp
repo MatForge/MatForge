@@ -179,4 +179,12 @@ private:
   glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
 
   VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
+
+  // Auto-export on toggle
+  bool m_autoExportOnToggle{false};
+  std::filesystem::path m_autoExportDir; // Directory to place auto-exported images
+  Resources::ImageType m_autoExportImageType{Resources::ImageType::eImgTonemapped};
+  std::vector<int> m_autoExportDelaysMs{50, 100, 250, 500, 1000};
+  void scheduleAutoExportOnToggle();
+  std::string m_lastToggledFeatureName; // Last feature name that triggered auto-export
 };

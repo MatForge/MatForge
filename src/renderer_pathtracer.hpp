@@ -105,6 +105,9 @@ public:
 
   bool m_useBoundedVNDF{true};  // Toggle for bounded VNDF GGX sampling
 
+  // Last toggled UI setting (used by the outer renderer to name exports)
+  std::string m_lastToggledSetting;
+
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
   // Adaptive performance targets
