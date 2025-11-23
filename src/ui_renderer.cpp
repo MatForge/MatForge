@@ -23,6 +23,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 
+#include <nvvk/commands.hpp>
 #include <nvvk/helpers.hpp>
 #include <nvutils/bounding_box.hpp>
 #include <nvgui/tonemapper.hpp>
@@ -412,6 +413,103 @@ void GltfRenderer::renderUI()
           ImGui::SetTooltip("Copy statistics to clipboard");
         }
       }
+
+      // Convergence Analysis
+      if(headerManager.beginHeader("Convergence Analysis"))
+      {
+        ImGui::TextWrapped("Test QOLDS variance reduction by comparing convergence speed vs PCG sampling.");
+        ImGui::Spacing();
+
+        // Step 1: Capture reference
+        ImGui::Text(ICON_MS_CAMERA " Step 1: Capture Reference");
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Current samples: %d", m_resources.frameCount + 1);
+        if(ImGui::Button("Capture Reference (Current Frame)"))
+        {
+          VkCommandBuffer cmd{};
+          nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+          VkImage    refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+          VkExtent2D size     = m_resources.gBuffers.getSize();
+
+          m_convergenceAnalyzer.captureReference(cmd, refImage, size);
+
+          nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+          // Finalize capture after GPU sync
+          m_convergenceAnalyzer.finalizeReferenceCapture();
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Render to 512+ samples first, then capture as ground truth");
+        }
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Step 2: Run test
+        ImGui::Text(ICON_MS_SCIENCE " Step 2: Convergence Test");
+        ImGui::Indent();
+
+        bool testRunning = m_convergenceTestActive;
+        ImGui::BeginDisabled(testRunning);
+
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start Convergence Test", ImVec2(250, 0)))
+        {
+          startCombinedConvergenceTest();
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Runs QOLDS test followed by PCG test.\nCaptures at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples each.");
+        }
+
+        ImGui::EndDisabled();
+
+        if(testRunning)
+        {
+          const char* currentTest = m_convergenceTestUseQOLDS ? "QOLDS" : "PCG";
+          const char* phase = m_convergenceTestRunBoth ? (m_convergenceTestUseQOLDS ? " (1/2)" : " (2/2)") : "";
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+                           ICON_MS_HOURGLASS_EMPTY " %s%s: %zu/%zu samples",
+                           currentTest, phase, m_convergenceTestCurrentIndex, m_convergenceTestSampleCounts.size());
+        }
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Status display
+        if(m_convergenceAnalyzer.isSessionActive())
+        {
+          ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
+                           ICON_MS_FIBER_MANUAL_RECORD " Active: %s",
+                           m_convergenceAnalyzer.getSessionName().c_str());
+
+          const auto& metrics = m_convergenceAnalyzer.getMetrics();
+          if(!metrics.empty())
+          {
+            ImGui::Text("Captured: %zu frames", metrics.size());
+            ImGui::Text("Latest MSE: %.6f", metrics.back().mse);
+            ImGui::Text("Latest PSNR: %.2f dB", metrics.back().psnr);
+          }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Export
+        ImGui::Text(ICON_MS_SAVE " Export Results");
+        ImGui::Indent();
+        if(ImGui::Button("Export to CSV"))
+        {
+          std::string filename = "convergence_results.csv";
+          m_convergenceAnalyzer.exportToCSV(filename);
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Export Images"))
+        {
+          m_convergenceAnalyzer.exportComparisonImages("convergence_images");
+        }
+        ImGui::Unindent();
+      }
     }
     ImGui::End();  // End Settings
 
@@ -468,6 +566,7 @@ void GltfRenderer::renderMenu()
   GltfRenderer::windowTitle();
   bool newScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
   bool openFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+  bool addToSceneFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_A);
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
@@ -487,6 +586,9 @@ void GltfRenderer::renderMenu()
   {
     newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
     openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
+    ImGui::BeginDisabled(!validScene);
+    addToSceneFile |= ImGui::MenuItem(ICON_MS_ADD_BOX " Add to Scene", "Ctrl+Shift+A");
+    ImGui::EndDisabled();
     loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
     if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
     {
@@ -583,6 +685,22 @@ void GltfRenderer::renderMenu()
   if(!sceneToLoadFilename.empty())
   {
     onFileDrop(sceneToLoadFilename.c_str());
+  }
+
+  if(addToSceneFile && validScene)
+  {
+    std::filesystem::path addFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Add to Scene",
+                                                      "3D Scene Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
+                                                      m_lastSceneDirectory);
+    if(!addFilename.empty())
+    {
+      m_lastSceneDirectory = addFilename.parent_path();
+      std::thread([=, this]() {
+        m_busy.start("Adding to Scene");
+        addToScene(addFilename);
+        m_busy.stop();
+      }).detach();
+    }
   }
 
   if(loadHdrFile)

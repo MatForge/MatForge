@@ -1,0 +1,16 @@
+{
+  "executable": "./_bin/Release/vk_gltf_renderer.exe",
+  "scene": "scenes/cornell_box.gltf",
+  "output_dir": "convergence_results",
+  "sample_counts": [1, 2, 4, 8, 16, 32, 64],
+  "resolution": [1920, 1080],
+  "max_depth": 5,
+  "reference_samples": 1024,
+
+  "notes": [
+    "This configuration runs automated convergence testing",
+    "Modify sample_counts for different test granularity",
+    "Use headless mode for batch testing",
+    "Results exported to convergence_results/"
+  ]
+}

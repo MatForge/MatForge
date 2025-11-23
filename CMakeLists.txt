@@ -24,8 +24,15 @@ set(QOLDS_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/qolds_builder.hpp
 )
 
+# Convergence Analyzer files
+set(CONVERGENCE_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/convergence_analyzer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/convergence_analyzer.hpp
+)
+
 source_group("Source Files" FILES ${EXE_SOURCES})
 source_group("Source Files/QOLDS" FILES ${QOLDS_SOURCES})
+source_group("Source Files/Analysis" FILES ${CONVERGENCE_SOURCES})
 
 # Add the executable
 add_executable(${PROJECT_NAME} ${EXE_SOURCES})

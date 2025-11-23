@@ -214,6 +214,22 @@ bool PathTracer::onUIRender(Resources& resources)
       PE::end();
   }
 
+  if (PE::begin())
+  {
+      bool prevBoundedVNDF = m_useBoundedVNDF;
+      changed |= PE::Checkbox("Use Bounded VNDF", &m_useBoundedVNDF, "Use Bounded VNDF for better performance");
+
+      if (m_useBoundedVNDF != prevBoundedVNDF)
+      {
+          if (m_useBoundedVNDF)
+              LOGI("Bounded VNDF is now enabled\n");
+          else
+              LOGI("Bounded VNDF is now disabled\n");
+      }
+
+      PE::end();
+  }
+
   // Manual sampling controls
   if(PE::begin())
   {
@@ -360,6 +376,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   m_pushConst.useQOLDS          = m_useQOLDS ? 1 : 0;  // QOLDS sampling toggle 
   m_pushConst.useFastMSX        = m_useFastMSX ? 1 : 0;
+  m_pushConst.useBoundedVNDF    = m_useBoundedVNDF ? 1 : 0;
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 
   // Track total samples accumulated

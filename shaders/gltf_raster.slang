@@ -214,7 +214,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     evalData.k1 = -worldRayDirection;
     evalData.k2 = pushConst.skyParams.sunDirection;
 
-    bsdfEvaluate(evalData, pbrMat);
+    bsdfEvaluate(evalData, pbrMat, true);
 
     const float3 w = pushConst.skyParams.sunDiskIntensity;
     contribution += w * evalData.bsdf_diffuse;
@@ -244,7 +244,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     evalData.k1 = -worldRayDirection;
     evalData.k2 = -lightContrib.incidentVector;
 
-    bsdfEvaluate(evalData, pbrMat);
+    bsdfEvaluate(evalData, pbrMat, true);
 
     const float3 w = lightContrib.intensity;
     contribution += w * evalData.bsdf_diffuse;

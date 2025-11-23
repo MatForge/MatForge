@@ -50,6 +50,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 
 #include <thread>
+#include <ctime>
+#include <filesystem>
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
 #include <fmt/format.h>
@@ -192,6 +194,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Silhouette renderer
   m_silhouette.init(m_resources);
+
+  // Convergence analyzer
+  m_convergenceAnalyzer.init(m_resources.allocator, m_device, {100, 100});  // Will be resized on first use
 
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
@@ -371,6 +376,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         m_rasterizer.onRender(cmd, m_resources);
         break;
     }
+
+    // Update convergence test if active
+    updateConvergenceTest(cmd);
   }
   else
   {
@@ -579,6 +587,298 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Add a glTF file to the existing scene (merge models)
+void GltfRenderer::addToScene(const std::filesystem::path& sceneFilename)
+{
+  nvutils::ScopedTimer st(__FUNCTION__);
+
+  if(sceneFilename.empty() || !m_resources.scene.valid())
+  {
+    LOGW("Cannot add to scene: no file specified or no existing scene\n");
+    return;
+  }
+
+  std::filesystem::path filename = nvutils::findFile(sceneFilename, nvsamples::getResourcesDirs(), false);
+  if(!filename.has_filename())
+  {
+    LOGW("Cannot find file: %s\n", nvutils::utf8FromPath(sceneFilename).c_str());
+    return;
+  }
+
+  // Only support glTF files for adding (not OBJ)
+  if(nvutils::extensionMatches(sceneFilename, ".obj"))
+  {
+    LOGW("OBJ files cannot be added to scene. Please use glTF format.\n");
+    return;
+  }
+
+  LOGI("Adding to scene: %s\n", nvutils::utf8FromPath(filename).c_str());
+
+  // Load the new model
+  tinygltf::Model     newModel;
+  tinygltf::TinyGLTF  loader;
+  std::string         err, warn;
+  bool                result = false;
+
+  if(nvutils::extensionMatches(filename, ".glb"))
+  {
+    result = loader.LoadBinaryFromFile(&newModel, &err, &warn, nvutils::utf8FromPath(filename));
+  }
+  else
+  {
+    result = loader.LoadASCIIFromFile(&newModel, &err, &warn, nvutils::utf8FromPath(filename));
+  }
+
+  if(!warn.empty())
+    LOGW("Warning loading glTF: %s\n", warn.c_str());
+  if(!err.empty())
+    LOGE("Error loading glTF: %s\n", err.c_str());
+  if(!result)
+  {
+    LOGE("Failed to load glTF file: %s\n", nvutils::utf8FromPath(filename).c_str());
+    return;
+  }
+
+  // Get the existing model
+  tinygltf::Model& existingModel = m_resources.scene.getModel();
+
+  // Calculate offsets for merging
+  int bufferOffset     = static_cast<int>(existingModel.buffers.size());
+  int bufferViewOffset = static_cast<int>(existingModel.bufferViews.size());
+  int accessorOffset   = static_cast<int>(existingModel.accessors.size());
+  int imageOffset      = static_cast<int>(existingModel.images.size());
+  int samplerOffset    = static_cast<int>(existingModel.samplers.size());
+  int textureOffset    = static_cast<int>(existingModel.textures.size());
+  int materialOffset   = static_cast<int>(existingModel.materials.size());
+  int meshOffset       = static_cast<int>(existingModel.meshes.size());
+  int nodeOffset       = static_cast<int>(existingModel.nodes.size());
+  int skinOffset       = static_cast<int>(existingModel.skins.size());
+  int cameraOffset     = static_cast<int>(existingModel.cameras.size());
+
+  // Merge buffers
+  for(auto& buffer : newModel.buffers)
+  {
+    existingModel.buffers.push_back(std::move(buffer));
+  }
+
+  // Merge buffer views (update buffer indices)
+  for(auto& bv : newModel.bufferViews)
+  {
+    if(bv.buffer >= 0)
+      bv.buffer += bufferOffset;
+    existingModel.bufferViews.push_back(std::move(bv));
+  }
+
+  // Merge accessors (update buffer view indices)
+  for(auto& accessor : newModel.accessors)
+  {
+    if(accessor.bufferView >= 0)
+      accessor.bufferView += bufferViewOffset;
+    if(accessor.sparse.indices.bufferView >= 0)
+      accessor.sparse.indices.bufferView += bufferViewOffset;
+    if(accessor.sparse.values.bufferView >= 0)
+      accessor.sparse.values.bufferView += bufferViewOffset;
+    existingModel.accessors.push_back(std::move(accessor));
+  }
+
+  // Merge images
+  for(auto& image : newModel.images)
+  {
+    if(image.bufferView >= 0)
+      image.bufferView += bufferViewOffset;
+    existingModel.images.push_back(std::move(image));
+  }
+
+  // Merge samplers
+  for(auto& sampler : newModel.samplers)
+  {
+    existingModel.samplers.push_back(std::move(sampler));
+  }
+
+  // Merge textures (update source and sampler indices)
+  for(auto& texture : newModel.textures)
+  {
+    if(texture.source >= 0)
+      texture.source += imageOffset;
+    if(texture.sampler >= 0)
+      texture.sampler += samplerOffset;
+    existingModel.textures.push_back(std::move(texture));
+  }
+
+  // Helper to update texture info indices
+  auto updateTextureInfo = [textureOffset](tinygltf::TextureInfo& ti) {
+    if(ti.index >= 0)
+      ti.index += textureOffset;
+  };
+  auto updateNormalTextureInfo = [textureOffset](tinygltf::NormalTextureInfo& ti) {
+    if(ti.index >= 0)
+      ti.index += textureOffset;
+  };
+  auto updateOcclusionTextureInfo = [textureOffset](tinygltf::OcclusionTextureInfo& ti) {
+    if(ti.index >= 0)
+      ti.index += textureOffset;
+  };
+
+  // Merge materials (update texture indices)
+  for(auto& mat : newModel.materials)
+  {
+    updateTextureInfo(mat.pbrMetallicRoughness.baseColorTexture);
+    updateTextureInfo(mat.pbrMetallicRoughness.metallicRoughnessTexture);
+    updateNormalTextureInfo(mat.normalTexture);
+    updateOcclusionTextureInfo(mat.occlusionTexture);
+    updateTextureInfo(mat.emissiveTexture);
+    existingModel.materials.push_back(std::move(mat));
+  }
+
+  // Merge meshes (update accessor and material indices)
+  for(auto& mesh : newModel.meshes)
+  {
+    for(auto& prim : mesh.primitives)
+    {
+      if(prim.indices >= 0)
+        prim.indices += accessorOffset;
+      if(prim.material >= 0)
+        prim.material += materialOffset;
+      for(auto& attr : prim.attributes)
+      {
+        if(attr.second >= 0)
+          attr.second += accessorOffset;
+      }
+      for(auto& target : prim.targets)
+      {
+        for(auto& attr : target)
+        {
+          if(attr.second >= 0)
+            attr.second += accessorOffset;
+        }
+      }
+    }
+    existingModel.meshes.push_back(std::move(mesh));
+  }
+
+  // Merge skins (update accessor and node indices)
+  for(auto& skin : newModel.skins)
+  {
+    if(skin.inverseBindMatrices >= 0)
+      skin.inverseBindMatrices += accessorOffset;
+    if(skin.skeleton >= 0)
+      skin.skeleton += nodeOffset;
+    for(auto& joint : skin.joints)
+    {
+      if(joint >= 0)
+        joint += nodeOffset;
+    }
+    existingModel.skins.push_back(std::move(skin));
+  }
+
+  // Merge cameras
+  for(auto& camera : newModel.cameras)
+  {
+    existingModel.cameras.push_back(std::move(camera));
+  }
+
+  // Merge nodes (update mesh, skin, camera, and children indices)
+  std::vector<int> newRootNodes;
+  for(size_t i = 0; i < newModel.nodes.size(); i++)
+  {
+    auto& node = newModel.nodes[i];
+    if(node.mesh >= 0)
+      node.mesh += meshOffset;
+    if(node.skin >= 0)
+      node.skin += skinOffset;
+    if(node.camera >= 0)
+      node.camera += cameraOffset;
+    for(auto& child : node.children)
+    {
+      if(child >= 0)
+        child += nodeOffset;
+    }
+    existingModel.nodes.push_back(std::move(node));
+  }
+
+  // Find root nodes from the new model's default scene
+  int newSceneIndex = newModel.defaultScene >= 0 ? newModel.defaultScene : 0;
+  if(newSceneIndex < static_cast<int>(newModel.scenes.size()))
+  {
+    for(int rootNode : newModel.scenes[newSceneIndex].nodes)
+    {
+      newRootNodes.push_back(rootNode + nodeOffset);
+    }
+  }
+
+  // Create a wrapper node for the new model to preserve its hierarchy
+  // This prevents the new model's nodes from being flattened into the existing scene
+  tinygltf::Node wrapperNode;
+  wrapperNode.name = sceneFilename.stem().string();  // Use filename as wrapper name
+  wrapperNode.children = newRootNodes;               // New model's root nodes become children of wrapper
+  int wrapperNodeIndex = static_cast<int>(existingModel.nodes.size());
+  existingModel.nodes.push_back(std::move(wrapperNode));
+
+  // Add only the wrapper node to the existing scene (not individual root nodes)
+  int existingSceneIndex = existingModel.defaultScene >= 0 ? existingModel.defaultScene : 0;
+  if(existingSceneIndex < static_cast<int>(existingModel.scenes.size()))
+  {
+    existingModel.scenes[existingSceneIndex].nodes.push_back(wrapperNodeIndex);
+  }
+
+  // Merge animations (update node and accessor indices)
+  for(auto& anim : newModel.animations)
+  {
+    for(auto& channel : anim.channels)
+    {
+      if(channel.target_node >= 0)
+        channel.target_node += nodeOffset;
+    }
+    for(auto& sampler : anim.samplers)
+    {
+      if(sampler.input >= 0)
+        sampler.input += accessorOffset;
+      if(sampler.output >= 0)
+        sampler.output += accessorOffset;
+    }
+    existingModel.animations.push_back(std::move(anim));
+  }
+
+  LOGI("Merged: +%zu nodes, +%zu meshes, +%zu materials\n",
+       newModel.nodes.size(), newModel.meshes.size(), newModel.materials.size());
+
+  // Re-parse the scene to update render nodes
+  m_resources.scene.setCurrentScene(existingSceneIndex);
+
+  // Destroy existing Vulkan resources and recreate
+  // First wait for all queue operations to complete
+  vkQueueWaitIdle(m_app->getQueue(0).queue);
+  vkDeviceWaitIdle(m_device);
+
+  // Clear the command buffer queue to prevent stale references
+  {
+    std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
+    m_cmdBufferQueue = {};
+  }
+
+  // Release any pending staging operations before destroying scene resources
+  m_resources.staging.releaseStaging(true);
+
+  // Free rasterizer command buffer that may reference old scene
+  m_rasterizer.freeRecordCommandBuffer();
+
+  // Don't call deinit() on sceneVk or sceneRtx - their create functions call destroy() internally
+  // Calling deinit() before create() would cause double-free crashes
+
+  // Recreate Vulkan scene (create functions handle their own cleanup via destroy())
+  createVulkanScene();
+
+  // Update UI
+  m_uiSceneGraph.setModel(&m_resources.scene.getModel());
+  m_uiSceneGraph.setBbox(m_resources.scene.getSceneBounds());
+
+  // Update textures
+  updateTextures();
+
+  LOGI("Scene updated with added content\n");
+}
+
+//--------------------------------------------------------------------------------------------------
 // This function creates the Vulkan scene from the glTF model
 // It builds the bottom-level and top-level acceleration structure
 // The function is called when the scene is loaded
@@ -653,6 +953,16 @@ void GltfRenderer::createVulkanScene()
 // Create and upload QOLDS sampling buffers
 void GltfRenderer::createQoldsBuffers()
 {
+  // Destroy existing QOLDS buffers if they exist (happens when loading a new scene)
+  if(m_resources.bQoldsMatrices.buffer != VK_NULL_HANDLE)
+  {
+    m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
+  }
+  if(m_resources.bQoldsSeeds.buffer != VK_NULL_HANDLE)
+  {
+    m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
+  }
+
   // Initialize QOLDS builder
   m_qoldsBuilder = std::make_unique<QOLDSBuilder>();
 
@@ -985,6 +1295,10 @@ void GltfRenderer::destroyResources()
   m_resources.samplerPool.deinit();
   m_resources.staging.deinit();
   m_rayPicker.deinit();
+
+  // Destroy convergence analyzer before allocator to prevent memory leak
+  m_convergenceAnalyzer.destroy();
+
   m_resources.allocator.deinit();
 }
 
@@ -1129,4 +1443,165 @@ bool GltfRenderer::processQueuedCommandBuffers()
     return true;  // Command buffer was processed
   }
   return false;  // No command buffer was processed
+}
+
+//--------------------------------------------------------------------------------------------------
+// Convergence Testing
+//--------------------------------------------------------------------------------------------------
+
+void GltfRenderer::startConvergenceTest(bool useQOLDS)
+{
+  // Capture reference image first (must be at high sample count)
+  if(m_resources.frameCount < 100)
+  {
+    printf("Warning: Current frame count is %d. Please render to 512+ samples before starting test.\n", m_resources.frameCount);
+    printf("Capturing reference anyway, but results may be inaccurate.\n");
+  }
+
+  // Capture reference from current frame
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+  VkImage  refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+  VkExtent2D size   = m_resources.gBuffers.getSize();
+
+  m_convergenceAnalyzer.captureReference(cmd, refImage, size);
+
+  nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+  // Finalize reference capture after GPU sync
+  m_convergenceAnalyzer.finalizeReferenceCapture();
+
+  // Start convergence session
+  std::string sessionName = useQOLDS ? "qolds_test" : "pcg_test";
+  m_convergenceAnalyzer.startSession(sessionName, useQOLDS);
+
+  // Set test state
+  m_convergenceTestActive          = true;
+  m_convergenceTestUseQOLDS        = useQOLDS;
+  m_convergenceTestCurrentIndex    = 0;
+  m_convergenceTestStartTime       = std::chrono::steady_clock::now();
+  m_convergenceTestLastCaptureTime = m_convergenceTestStartTime;  // Initialize for delta calculation
+
+  // Set QOLDS mode in path tracer (both push constant and checkbox state)
+  if(m_pathTracer.m_pushConst.useQOLDS != (useQOLDS ? 1 : 0))
+  {
+    m_pathTracer.m_pushConst.useQOLDS = useQOLDS ? 1 : 0;
+  }
+  m_pathTracer.m_useQOLDS = useQOLDS;  // Update checkbox state to reflect current sampling method
+
+  // Disable auto SPP and set SPP to 1 for accurate convergence testing
+  m_pathTracer.m_adaptiveSampling    = false;  
+  m_pathTracer.m_pushConst.numSamples = 1;    
+
+  // Reset rendering to start fresh
+  resetFrame();
+
+  printf("Convergence test started: %s (will capture at %zu sample counts)\n",
+         sessionName.c_str(), m_convergenceTestSampleCounts.size());
+}
+
+void GltfRenderer::startCombinedConvergenceTest()
+{
+  // Set flag to run both tests sequentially
+  m_convergenceTestRunBoth = true;
+
+  printf("Starting combined convergence test (QOLDS + PCG)...\n");
+
+  // Start with QOLDS test first
+  startConvergenceTest(true);
+}
+
+void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
+{
+  if(!m_convergenceTestActive)
+    return;
+
+  // Finalize previous capture if pending (by now the GPU has completed the copy)
+  if(m_convergenceTestPendingFinalize)
+  {
+    m_convergenceAnalyzer.finalizeFrameCapture();
+    m_convergenceTestPendingFinalize = false;
+  }
+
+  // Check if we've reached the next sample count milestone
+  if(m_convergenceTestCurrentIndex >= m_convergenceTestSampleCounts.size())
+  {
+    // Current test complete
+    m_convergenceTestActive = false;
+    m_convergenceAnalyzer.endSession();
+
+    // Export results with timestamp to test folder
+    std::string sessionName = m_convergenceTestUseQOLDS ? "qolds_test" : "pcg_test";
+
+    // Generate timestamp string (YYYYMMDD_HHMMSS)
+    auto        now       = std::chrono::system_clock::now();
+    std::time_t nowTime   = std::chrono::system_clock::to_time_t(now);
+    std::tm     localTime = {};
+#ifdef _WIN32
+    localtime_s(&localTime, &nowTime);
+#else
+    localtime_r(&nowTime, &localTime);
+#endif
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &localTime);
+
+    // Create test directory if it doesn't exist
+    std::filesystem::path testDir = "../test";
+    if(!std::filesystem::exists(testDir))
+    {
+      std::filesystem::create_directories(testDir);
+    }
+
+    std::string csvFile = (testDir / (sessionName + "_" + timestamp + ".csv")).string();
+    m_convergenceAnalyzer.exportToCSV(csvFile);
+
+    auto duration = std::chrono::steady_clock::now() - m_convergenceTestStartTime;
+    auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+
+    printf("Convergence test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+
+    // If running combined test and QOLDS just finished, start PCG test
+    if(m_convergenceTestRunBoth && m_convergenceTestUseQOLDS)
+    {
+      printf("Starting PCG test (part 2 of combined test)...\n");
+      startConvergenceTest(false);  // Start PCG test
+    }
+    else
+    {
+      // All tests done
+      m_convergenceTestRunBoth = false;
+    }
+    return;
+  }
+
+  uint32_t targetSamples = m_convergenceTestSampleCounts[m_convergenceTestCurrentIndex];
+
+  // Wait until we've accumulated enough samples
+  if(static_cast<uint32_t>(m_resources.frameCount + 1) >= targetSamples)
+  {
+    // Capture this milestone (records GPU copy command)
+    VkImage    testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+    VkExtent2D size      = m_resources.gBuffers.getSize();
+
+    auto   currentTime  = std::chrono::steady_clock::now();
+    auto   duration     = currentTime - m_convergenceTestStartTime;
+    auto   deltaDuration = currentTime - m_convergenceTestLastCaptureTime;
+    double timeMs       = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    double timeDeltaMs  = std::chrono::duration_cast<std::chrono::milliseconds>(deltaDuration).count();
+
+    m_convergenceAnalyzer.captureFrame(cmd, testImage, targetSamples, timeMs, timeDeltaMs);
+
+    // Update last capture time for next delta calculation
+    m_convergenceTestLastCaptureTime = currentTime;
+
+    // Mark as pending - will finalize on next frame after GPU completes
+    m_convergenceTestPendingFinalize = true;
+
+    // Move to next milestone
+    m_convergenceTestCurrentIndex++;
+
+    printf("Recorded capture %zu/%zu at %u samples (delta: %.0fms)\n", m_convergenceTestCurrentIndex,
+           m_convergenceTestSampleCounts.size(), targetSamples, timeDeltaMs);
+  }
 }

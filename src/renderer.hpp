@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <queue>
 #include <mutex>
+#include <chrono>
 
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
@@ -54,6 +55,7 @@
 #include "ui_busy_window.hpp"
 #include "ui_scene_graph.hpp"
 #include "qolds_builder.hpp"
+#include "convergence_analyzer.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -63,6 +65,7 @@ public:
   ~GltfRenderer() override = default;
 
   void                                        createScene(const std::filesystem::path& sceneFilename);
+  void                                        addToScene(const std::filesystem::path& sceneFilename);
   void                                        createHDR(const std::filesystem::path& hdrFilename);
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
@@ -97,6 +100,12 @@ private:
   void updateHdrImages();
 
   bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
+
+  /////
+  /// Convergence Testing
+  void startConvergenceTest(bool useQOLDS);
+  void startCombinedConvergenceTest();  // Run both QOLDS and PCG tests sequentially
+  void updateConvergenceTest(VkCommandBuffer cmd);
 
   /////
   /// UI
@@ -142,6 +151,19 @@ private:
 
   // QOLDS sampling
   std::unique_ptr<QOLDSBuilder> m_qoldsBuilder;  // QOLDS matrix generator
+
+  // Convergence analysis
+  matforge::ConvergenceAnalyzer m_convergenceAnalyzer;  // Convergence analyzer for QOLDS testing
+
+  // Convergence test state
+  bool                     m_convergenceTestActive{false};
+  bool                     m_convergenceTestUseQOLDS{false};
+  bool                     m_convergenceTestPendingFinalize{false};
+  bool                     m_convergenceTestRunBoth{false};  // Run both QOLDS and PCG tests sequentially
+  std::vector<uint32_t>    m_convergenceTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+  size_t                   m_convergenceTestCurrentIndex{0};
+  std::chrono::steady_clock::time_point m_convergenceTestStartTime;
+  std::chrono::steady_clock::time_point m_convergenceTestLastCaptureTime;  // For time delta calculation
 
   std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 

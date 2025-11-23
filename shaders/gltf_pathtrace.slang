@@ -691,8 +691,9 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
         evalData.xi = float3(rand(seed), rand(seed), rand(seed));
 
         bool useFastMSX = (pushConst.useFastMSX == 1);
+        bool useBoundedVNDF = (pushConst.useBoundedVNDF == 1);
 
-        bsdfEvaluate_msx(evalData, pbrMat, useFastMSX);
+        bsdfEvaluate_msx(evalData, pbrMat, useFastMSX, useBoundedVNDF);
 
         // If the PDF is greater than 0, then we can sample the BSDF
         if(evalData.pdf > 0.0)
@@ -707,13 +708,14 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
         }
       }
 
-
       {
+        bool useFastMSX = (pushConst.useFastMSX == 1);
+        bool useBoundedVNDF = (pushConst.useBoundedVNDF == 1);
         // Sample the BSDF
         BsdfSampleData sampleData;
         sampleData.k1 = -ray.Direction;                              // outgoing direction
         sampleData.xi = float3(rand(seed), rand(seed), rand(seed));  // random number
-        bsdfSample(sampleData, pbrMat);
+        bsdfSample(sampleData, pbrMat, useFastMSX, useBoundedVNDF);
 
         // Update the throughput
         throughput *= sampleData.bsdf_over_pdf;
