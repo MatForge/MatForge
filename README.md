@@ -34,7 +34,7 @@
 │  2. RMIP - Geometry Detail                                  │
 │     └─ Ray-trace displacement maps directly (WIP)           │
 │        ↓                                                    │
-│  3. BOUNDED VNDF - Direction Sampling (Planned)             │
+│  3. BOUNDED VNDF - Direction Sampling                       │
 │     └─ Efficient importance sampling                        │
 │        ↓                                                    │
 │  4. FAST-MSX - BRDF Evaluation                              │
@@ -50,17 +50,21 @@
 
 ## Features
 
-### ✅ Implemented (Milestone 1)
+### ✅ Implemented (Milestone 2)
 
 #### 🎲 Quad-Optimized Low-Discrepancy Sequences (QOLDS)
 
 - **Paper**: "Quad-Optimized Low-Discrepancy Sequences" (SIGGRAPH 2024)
-- **Implementation**: Complete host + device integration
+- **Implementation**: Complete host + device integration + convergence analysis
 - Base-3 Sobol' sequence generator with irreducible polynomials
 - Owen scrambling for randomization
 - 47 dimensions × 243 max points (3^5)
 - Real-time toggle between QOLDS and PCG sampling
-- **Expected Benefits**: 15-30% variance reduction in Monte Carlo rendering
+- **Measured Results** (vs PCG random sampling):
+  - **+2.57 dB PSNR improvement** at 512 samples per pixel
+  - **44.7% MSE reduction** at 512 samples per pixel
+  - **15-33% sample savings** for equivalent visual quality
+  - **<1% performance overhead** (essentially free improvement)
 
 #### ⚡ Fast-MSX (Fast Multiple Scattering Approximation)
 
@@ -72,22 +76,26 @@
 - Real-time toggle for comparison
 - **Expected Benefits**: 100× better energy conservation at high roughness
 
-### 🚧 In Progress (Milestone 2 - Nov 24)
+#### 🎯 Bounded VNDF Sampling
+
+- **Paper**: "Bounded VNDF Sampling for Smith-GGX Reflections" (SIGGRAPH Asia 2023)
+- **Implementation**: Complete integration with GGX importance sampling
+- Tighter spherical cap bounds for importance sampling
+- Modified bound factor: `k = (1 - a²)s² / (s² + a²z²)`
+- Reduces rejected samples for rough surfaces
+- **Expected Benefits**: 15-40% variance reduction for α = 0.6-1.0
+
+### 🚧 In Progress (Milestone 3 - Dec 1)
 
 #### 🏔️ RMIP (Rectangular MinMax Image Pyramid)
 
 - **Paper**: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
-- **Status**: GPU compute pipeline operational, intersection shader in progress
+- **Status**: GPU compute pipeline operational, intersection shader loading functional
 - Hierarchical min-max pyramid for displacement maps
+- Custom intersection shader with KHR_materials_displacement support
+- Test scene (`displaced_plane.gltf`) loading successfully
 - ~5ms build time for 4K textures
 - **Expected Benefits**: 11× faster than tessellation, 3× less memory
-
-#### 🎯 Bounded VNDF (Planned)
-
-- **Paper**: "Bounded VNDF Sampling for Smith-GGX Reflections" (SIGGRAPH Asia 2023)
-- **Status**: Foundation planned
-- Tighter spherical cap bounds for importance sampling
-- **Expected Benefits**: 15-40% fewer rejected samples for rough surfaces
 
 ### 🛠️ Base Framework
 
@@ -161,6 +169,19 @@ Path tracer initialized with PCG (default) sampling
 ```
 Switched to QOLDS sampling (Quad-Optimized Low-Discrepancy Sequences)
 Switched to FastMSX (Fast Multiple Scattering)
+Switched to Bounded VNDF sampling
+```
+
+**Convergence Test Output** (Milestone 2):
+
+```
+[Test] QOLDS vs PCG Convergence Analysis
+[Test] Sample counts: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
+[Test] At 512 SPP:
+  - QOLDS: PSNR = 46.38 dB, MSE = 2.30e-05
+  - PCG:   PSNR = 43.81 dB, MSE = 4.16e-05
+  - Improvement: +2.57 dB, -44.7% MSE
+[Test] Results saved to test/qolds_test_*.csv
 ```
 
 ---
@@ -183,7 +204,9 @@ Switched to FastMSX (Fast Multiple Scattering)
 - Host-side: Generator matrix construction (`src/qolds_builder.cpp/hpp`)
 - Device-side: GPU sampling function (`shaders/qolds_sampling.h.slang`)
 - Integration: Path tracer with dimension tracking
-- **Status**: ✅ Complete (400 LOC)
+- Convergence analysis: Automated testing framework with CSV/plot output
+- **Status**: ✅ Complete + Validated (400 LOC)
+- **Measured**: +2.57 dB PSNR, 44.7% MSE reduction vs PCG at 512 SPP
 
 ---
 
@@ -202,8 +225,10 @@ Switched to FastMSX (Fast Multiple Scattering)
 
 - RMIP data structure builder (`src/rmip_builder.cpp/hpp`)
 - GPU compute shaders (`shaders/rmip_*.compute.slang`)
-- Custom intersection shader (in progress)
-- **Status**: 🚧 In Progress (800 LOC planned)
+- Custom intersection shader (`shaders/rmip_intersection.slang`)
+- Descriptor set management for RMIP/displacement textures
+- KHR_materials_displacement extension support
+- **Status**: 🚧 In Progress - Loading functional, traversal WIP (~800 LOC)
 
 ---
 
@@ -220,8 +245,9 @@ Switched to FastMSX (Fast Multiple Scattering)
 
 **Implementation**:
 
-- Will integrate into `pbr_ggx_microfacet.h.slang`
-- **Status**: 📋 Planned for Milestone 2
+- Integrated into `pbr_ggx_microfacet.h.slang`
+- Modified GGX VNDF sampling with bounded spherical cap
+- **Status**: ✅ Complete (200 LOC)
 
 ---
 
@@ -283,11 +309,11 @@ MatForge/
 **Institution**: University of Pennsylvania
 **Timeline**: November 3 - December 7, 2025 (5 weeks)
 
-| Team Member       | Responsibility          | Implementation                            |
-| ----------------- | ----------------------- | ----------------------------------------- |
-| **Yiding**  | Quad-Optimized LDS      | Sampling foundation (✅ Complete)         |
-| **Cecilia** | RMIP                    | Displacement ray tracing (🚧 In Progress) |
-| **Xiaonan** | Fast-MSX + Bounded VNDF | Material system (⚡ Fast-MSX Complete)    |
+| Team Member       | Responsibility          | Implementation                                        |
+| ----------------- | ----------------------- | ----------------------------------------------------- |
+| **Yiding**  | Quad-Optimized LDS      | Sampling + Convergence Analysis (✅ Complete)         |
+| **Cecilia** | RMIP                    | Displacement ray tracing (🚧 Loading Complete, Traversal WIP) |
+| **Xiaonan** | Fast-MSX + Bounded VNDF | Material system (✅ Both Complete)                    |
 
 ---
 
@@ -303,8 +329,13 @@ MatForge/
 ### Milestone Reports
 
 - [Milestone 1 Report](doc/presentations/Milestone1.md) (Nov 12, 2025)
-- Milestone 2 Report (Nov 24, 2025) - Coming Soon
+- [Milestone 2 Report](doc/presentations/Milestone2.md) (Nov 24, 2025)
 - Final Report (Dec 7, 2025) - Coming Soon
+
+### Technical Analysis
+
+- [QOLDS Convergence Analysis](doc/markdowns/QOLDS_convergence_analysis.md) - Detailed comparison vs PCG
+- [RMIP Loading Fixes](others/RMIP_loading.md) - Vulkan descriptor debugging notes
 
 ### Developer Guide
 
@@ -325,7 +356,8 @@ MatForge/
 
 - ☑️ **Use QOLDS**: Enable Quad-Optimized Low-Discrepancy Sequences
 - ☑️ **Use FastMSX**: Enable Fast Multiple Scattering (default: ON)
-- ☐ **Use RMIP**: Enable displacement ray tracing (coming in Milestone 2)
+- ☑️ **Use Bounded VNDF**: Enable bounded importance sampling for GGX
+- ☐ **Use RMIP**: Enable displacement ray tracing (coming in Milestone 3)
 
 **Quality Settings**:
 
@@ -379,7 +411,31 @@ MatForge/
 
 ## Performance
 
-TBD
+### QOLDS Convergence Benchmarks (RTX 4070)
+
+| Samples | QOLDS PSNR | PCG PSNR | Improvement | MSE Reduction |
+|---------|------------|----------|-------------|---------------|
+| 64      | 37.70 dB   | 37.24 dB | +0.46 dB    | 10.1%         |
+| 128     | 40.67 dB   | 39.80 dB | +0.87 dB    | 18.2%         |
+| 256     | 43.58 dB   | 42.03 dB | +1.55 dB    | 30.0%         |
+| 512     | 46.38 dB   | 43.81 dB | **+2.57 dB**| **44.7%**     |
+
+### Rendering Time (512 SPP)
+
+| Sampler | Time (ms) | Overhead |
+|---------|-----------|----------|
+| PCG     | 25,741    | baseline |
+| QOLDS   | 25,558    | **<1%**  |
+
+**Key Finding**: QOLDS provides significant quality improvements with negligible performance overhead.
+
+### Sample Savings for Equal Quality
+
+| Target Quality | PCG Samples | QOLDS Samples | Savings |
+|----------------|-------------|---------------|---------|
+| 35 dB (preview)| ~40         | ~32           | ~20%    |
+| 40 dB (good)   | ~150        | ~128          | ~15%    |
+| 42 dB (excellent)| ~300      | ~200          | ~33%    |
 
 ## Milestones
 
@@ -397,32 +453,33 @@ TBD
 
 ---
 
-### 🚧 Milestone 2 (Nov 24, 2025) - IN PROGRESS
+### ✅ Milestone 2 (Nov 24, 2025) - COMPLETE
 
-**Goal**: Full pipeline integration + material system
+**Goal**: Full pipeline integration + convergence analysis
 
-**Planned Deliverables**:
+**Deliverables**:
 
-- ⏭️ RMIP custom intersection shader
-- ⏭️ Bounded VNDF implementation
-- ⏭️ Full pipeline test (all 4 techniques)
-- ⏭️ Material library (7+ materials)
-- ⏭️ Performance benchmarks
-- ⏭️ Convergence analysis
+- ✅ **QOLDS Convergence Analysis**: +2.57 dB PSNR, 44.7% MSE reduction at 512 SPP
+- ✅ **Bounded VNDF**: Complete implementation integrated with GGX sampling
+- ✅ **RMIP Loading**: Intersection shader loading functional, descriptor management fixed
+- ✅ **Performance Benchmarks**: QOLDS has <1% overhead (negligible)
+- ✅ **Automated Testing Framework**: CSV export, plot visualization
+- 🚧 **RMIP Traversal**: In progress (texel marching algorithm)
 
 ---
 
-### 📋 Milestone 3 (Dec 1, 2025) - PLANNED
+### 🚧 Milestone 3 (Dec 1, 2025) - IN PROGRESS
 
 **Goal**: Production features + comprehensive analysis
 
 **Planned Deliverables**:
 
-- Material parameter editor (ImGui)
-- Side-by-side comparisons (with/without techniques)
-- Comprehensive analysis (convergence, quality, performance)
-- Demo video
-- Final documentation
+- ⏭️ **RMIP Traversal Complete**: Full texel marching with displaced surface intersection
+- ⏭️ **Material Library**: 7+ materials demonstrating all techniques
+- ⏭️ **Material Parameter Editor**: ImGui-based live editing
+- ⏭️ **Side-by-Side Comparisons**: Visual comparisons with/without each technique
+- ⏭️ **Perceptual Metrics**: SSIM, FLIP analysis
+- ⏭️ **Demo Video**: Showcase all features
 
 ---
 
@@ -506,11 +563,11 @@ error 30047: argument passed to parameter '0' must be l-value
 
 ## Known Limitations
 
-- RMIP intersection shader not yet complete (Milestone 2)
-- Bounded VNDF not yet implemented (Milestone 2)
+- RMIP traversal algorithm not yet complete (Milestone 3)
 - Limited to 47 dimensions for QOLDS (sufficient for path tracing)
 - QOLDS sequence length limited to 243 points (3^5)
 - Fast-MSX works best with roughness > 0.5
+- Bounded VNDF most effective for α = 0.6-1.0
 
 ---
 
@@ -559,6 +616,11 @@ See [LICENSE](LICENSE) for full license text.
 ---
 
 ## Gallery
+
+### QOLDS Convergence Analysis
+
+![Convergence Comparison](test/convergence_comparison_20251122_141202.png)
+*QOLDS vs PCG: +2.57 dB PSNR improvement, 44.7% MSE reduction at 512 SPP*
 
 ### QOLDS Sampling
 
