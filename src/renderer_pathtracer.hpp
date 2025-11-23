@@ -103,6 +103,8 @@ public:
 
   bool m_useFastMSX{true};  // Toggle for fast multi-sample anti-aliasing
 
+  bool m_useBoundedVNDF{true};  // Toggle for bounded VNDF GGX sampling
+
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
   // Adaptive performance targets

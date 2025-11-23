@@ -127,6 +127,7 @@ struct PathtracePushConstant
   int   useDlss               = 0;     // Use DLSS (0: no, 1: yes)
   int   useQOLDS              = 0;     // Use QOLDS sampling (0: default, 1: QOLDS)
   int   useFastMSX			  = 0;     
+  int   useBoundedVNDF		  = 0;     // Use bounded VNDF for GGX sampling (0: no, 1: yes)
   int   renderSelection       = 1;     // Padding to align the structure
   /// Infinite plane
   float2                 jitter;               // Jitter for the DLSS

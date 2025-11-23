@@ -37,9 +37,9 @@ float3 compute_fast_msx(PbrMaterial mat, float3 v, float3 l, float3 n)
     return f_sI;
 }
 
-void bsdfEvaluate_msx(inout BsdfEvaluateData data, PbrMaterial mat, bool useFastMSX)
+void bsdfEvaluate_msx(inout BsdfEvaluateData data, PbrMaterial mat, bool useFastMSX, bool useBoundedVNDF)
 {
-    bsdfEvaluate(data, mat);
+    bsdfEvaluate(data, mat, useBoundedVNDF);
 
     bool isGlossyLobe = (data.bsdf_glossy.x > 0.0 || data.bsdf_glossy.y > 0.0 || data.bsdf_glossy.z > 0.0);
 
