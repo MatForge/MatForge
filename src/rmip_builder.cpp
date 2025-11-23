@@ -214,6 +214,12 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
     // Create staging for ping-pong
     createStagingImage(resolution, numLayers);
 
+    // Transition staging image from UNDEFINED to GENERAL
+    transitionToGeneral(cmd, m_stagingImage.image);
+
+    // Transition RMIP output image from UNDEFINED to GENERAL
+    transitionToGeneral(cmd, rmipOutput);
+
     // Store RMIP output for later use
     if (m_rmipView)
         vkDestroyImageView(m_device, m_rmipView, nullptr);
@@ -232,7 +238,8 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
         params.currentQ = 0;
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_initPipeline);
-        bindResources(cmd, displacementView, rmipOutputView, params);
+        // Displacement map is in SHADER_READ_ONLY_OPTIMAL from scene loading
+        bindResources(cmd, displacementView, rmipOutputView, params, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         uint32_t groupsX = (resolution + 15) / 16;
         uint32_t groupsY = (resolution + 15) / 16;
@@ -265,7 +272,8 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
             params.currentP = p;
             params.currentQ = q;
 
-            bindResources(cmd, currentInputView, currentOutputView, params);
+            // RMIP arrays are in GENERAL layout for compute read/write
+            bindResources(cmd, currentInputView, currentOutputView, params, VK_IMAGE_LAYOUT_GENERAL);
 
             uint32_t width = 1u << p;
             uint32_t height = 1u << q;
@@ -304,7 +312,8 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
 void RmipBuilder::bindResources(VkCommandBuffer       cmd,
     VkImageView           inputView,
     VkImageView           outputView,
-    const RmipBuildParams& params)
+    const RmipBuildParams& params,
+    VkImageLayout         inputLayout)
 {
     // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{
@@ -332,7 +341,7 @@ void RmipBuilder::bindResources(VkCommandBuffer       cmd,
     // Update descriptor set
     VkDescriptorImageInfo inputImageInfo{
         .imageView = inputView,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageLayout = inputLayout,  // Varies: SHADER_READ_ONLY_OPTIMAL for displacement map, GENERAL for RMIP arrays
     };
 
     VkDescriptorImageInfo outputImageInfo{
@@ -379,6 +388,30 @@ void RmipBuilder::addImageBarrier(VkCommandBuffer cmd, VkImage image)
     };
 
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+        0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Transition image from UNDEFINED to GENERAL layout
+//
+void RmipBuilder::transitionToGeneral(VkCommandBuffer cmd, VkImage image)
+{
+    VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .levelCount = VK_REMAINING_MIP_LEVELS,
+                            .layerCount = VK_REMAINING_ARRAY_LAYERS},
+    };
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
         0, nullptr, 0, nullptr, 1, &barrier);
 }

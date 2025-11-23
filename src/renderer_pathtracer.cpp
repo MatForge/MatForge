@@ -80,6 +80,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 #endif
 
   checkForDisplacement(resources);
+
+  // Acquire a sampler for displacement textures
+  resources.samplerPool.acquireSampler(m_displacementSampler);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -117,6 +120,10 @@ void PathTracer::onDetach(Resources& resources)
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
   m_pipelineCache.deinit();
+
+  // Release displacement sampler
+  resources.samplerPool.releaseSampler(m_displacementSampler);
+  m_displacementSampler = VK_NULL_HANDLE;
 
   // Clear displacement info vector
   m_displacementInfo.clear();
@@ -524,7 +531,7 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
           {
               VkDescriptorImageInfo info{};
               info.imageView = dispInfo.rmipView;
-              info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+              info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // RMIP built with compute stays in GENERAL
               info.sampler = VK_NULL_HANDLE;  // Use existing samplers
               rmipImageInfos.push_back(info);
           }
@@ -957,41 +964,105 @@ void PathTracer::checkForDisplacement(Resources& resources)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Write displacement descriptors (RMIP textures) to descriptor sets
+// Write displacement descriptors (RMIP textures, displacement textures, samplers) to descriptor sets
 //--------------------------------------------------------------------------------------------------
 void PathTracer::writeDisplacementDescriptors(VkCommandBuffer cmd, Resources& resources)
 {
     if (!m_hasDisplacement)
         return;
 
-    // Collect RMIP texture views
+    // Array size must match descriptor binding declaration (8 elements each)
+    constexpr uint32_t RMIP_ARRAY_SIZE = 8;
+    constexpr uint32_t DISP_ARRAY_SIZE = 8;
+
+    // Collect RMIP texture views and displacement texture views
     std::vector<VkDescriptorImageInfo> rmipImageInfos;
+    std::vector<VkDescriptorImageInfo> dispImageInfos;
+
+    const auto& sceneTextures = resources.sceneVk.textures();
+
+    VkDescriptorImageInfo firstRmipInfo{};
+    VkDescriptorImageInfo firstDispInfo{};
+    bool hasFirstRmip = false;
+    bool hasFirstDisp = false;
+
     for (const auto& dispInfo : m_displacementInfo)
     {
         if (dispInfo.hasDisplacement && dispInfo.rmipView != VK_NULL_HANDLE)
         {
-            VkDescriptorImageInfo info{};
-            info.imageView = dispInfo.rmipView;
-            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            info.sampler = VK_NULL_HANDLE;  // Sampler will be bound separately
-            rmipImageInfos.push_back(info);
+            // RMIP texture (binding 8)
+            VkDescriptorImageInfo rmipInfo{};
+            rmipInfo.imageView = dispInfo.rmipView;
+            rmipInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // RMIP stays in GENERAL layout
+            rmipInfo.sampler = VK_NULL_HANDLE;
+            rmipImageInfos.push_back(rmipInfo);
+
+            if (!hasFirstRmip)
+            {
+                firstRmipInfo = rmipInfo;
+                hasFirstRmip = true;
+            }
+
+            // Original displacement texture (binding 9)
+            if (dispInfo.displacementTextureIndex < sceneTextures.size())
+            {
+                VkDescriptorImageInfo dispTexInfo{};
+                dispTexInfo.imageView = sceneTextures[dispInfo.displacementTextureIndex].descriptor.imageView;
+                dispTexInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                dispTexInfo.sampler = VK_NULL_HANDLE;
+                dispImageInfos.push_back(dispTexInfo);
+
+                if (!hasFirstDisp)
+                {
+                    firstDispInfo = dispTexInfo;
+                    hasFirstDisp = true;
+                }
+            }
         }
     }
 
-    if (!rmipImageInfos.empty())
-    {
-        // Add RMIP textures to the descriptor update
-        // Assuming binding 8 is reserved for RMIP texture array in your shader layout
-        nvvk::WriteSetContainer write{};
-        VkWriteDescriptorSet rmipWrite = resources.descriptorBinding[1].getWriteSet(8);  // Binding 8 for RMIP
-        rmipWrite.descriptorCount = static_cast<uint32_t>(rmipImageInfos.size());
-        rmipWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        write.append(rmipWrite, rmipImageInfos.data());
+    if (!hasFirstRmip || !hasFirstDisp)
+        return;
 
-        // Push the descriptor update
-        VkPipelineBindPoint bindPoint = (m_renderTechnique == RenderTechnique::RayQuery)
-            ? VK_PIPELINE_BIND_POINT_COMPUTE
-            : VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
-        vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
-    }
+    // Pad arrays to full size - Vulkan requires all array elements to be valid
+    while (rmipImageInfos.size() < RMIP_ARRAY_SIZE)
+        rmipImageInfos.push_back(firstRmipInfo);
+    while (dispImageInfos.size() < DISP_ARRAY_SIZE)
+        dispImageInfos.push_back(firstDispInfo);
+
+    nvvk::WriteSetContainer write{};
+
+    // Binding 8: RMIP textures (full array)
+    VkWriteDescriptorSet rmipWrite = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eRmipTextures);
+    rmipWrite.descriptorCount = RMIP_ARRAY_SIZE;
+    rmipWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.append(rmipWrite, rmipImageInfos.data());
+
+    // Binding 9: Displacement textures (full array)
+    VkWriteDescriptorSet dispWrite = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementTextures);
+    dispWrite.descriptorCount = DISP_ARRAY_SIZE;
+    dispWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.append(dispWrite, dispImageInfos.data());
+
+    // Binding 10 & 11: Samplers - use displacement sampler
+    VkDescriptorImageInfo samplerInfo{};
+    samplerInfo.sampler = m_displacementSampler;
+    samplerInfo.imageView = VK_NULL_HANDLE;
+    samplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkWriteDescriptorSet rmipSamplerWrite = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eRmipSampler);
+    rmipSamplerWrite.descriptorCount = 1;
+    rmipSamplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.append(rmipSamplerWrite, &samplerInfo);
+
+    VkWriteDescriptorSet dispSamplerWrite = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementSampler);
+    dispSamplerWrite.descriptorCount = 1;
+    dispSamplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.append(dispSamplerWrite, &samplerInfo);
+
+    // Push the descriptor update
+    VkPipelineBindPoint bindPoint = (m_renderTechnique == RenderTechnique::RayQuery)
+        ? VK_PIPELINE_BIND_POINT_COMPUTE
+        : VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
+    vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }

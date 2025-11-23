@@ -68,8 +68,10 @@ private:
     void bindResources(VkCommandBuffer       cmd,
         VkImageView           inputView,
         VkImageView           outputView,
-        const RmipBuildParams& params);
+        const RmipBuildParams& params,
+        VkImageLayout         inputLayout);
     void addImageBarrier(VkCommandBuffer cmd, VkImage image);
+    void transitionToGeneral(VkCommandBuffer cmd, VkImage image);
 
     VkDevice                  m_device{};
     nvvk::ResourceAllocator* m_allocator{};
