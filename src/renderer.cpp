@@ -92,6 +92,9 @@
 #include "nvvkgltf/converter.hpp"
 #include "nvvkgltf/tinygltf_utils.hpp"
 
+// For reading image dimensions
+#include "stb/stb_image.h"
+
 extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 
 // The constructor registers the parameters that can be set from the command line
@@ -756,6 +759,18 @@ void GltfRenderer::createDescriptorSets()
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eOutImages, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10,
                                               VK_SHADER_STAGE_ALL);
 
+  // RMIP displacement bindings (8-11)
+  // Note: Keep total push descriptors <= 32 (maxPushDescriptors limit)
+  // Current: 1 (TLAS) + 10 (output images) + 8 (RMIP) + 8 (displacement) + 1 + 1 = 29
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eRmipTextures,
+                                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8, VK_SHADER_STAGE_ALL);  // Array of RMIP textures
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementTextures,
+                                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8, VK_SHADER_STAGE_ALL);  // Displacement textures
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eRmipSampler,
+                                              VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // RMIP sampler
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementSampler,
+                                              VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // Displacement sampler
+
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
   NVVK_DBG_NAME(m_resources.descriptorSetLayout[1]);
@@ -1095,6 +1110,9 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
 
     const tinygltf::Model& model = m_resources.scene.getModel();
 
+    // Resize vector to hold displacement data for all materials
+    m_displacementRMIPs.resize(model.materials.size());
+
     for (size_t matIdx = 0; matIdx < model.materials.size(); matIdx++)
     {
         const tinygltf::Material& material = model.materials[matIdx];
@@ -1126,9 +1144,27 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
         VkImageView displacementView = sceneTextures[textureIdx].descriptor.imageView;
 
         // Get image resolution
+        // Note: tinygltf doesn't populate width/height for external URI images,
+        // so we need to read them from the actual image file
         const tinygltf::Image& image = model.images[imageIdx];
-        uint32_t width = static_cast<uint32_t>(image.width);
-        uint32_t height = static_cast<uint32_t>(image.height);
+        int width = image.width;
+        int height = image.height;
+
+        // If dimensions are not set (external URI), load them from the file
+        if (width <= 0 || height <= 0)
+        {
+            // Construct full path to image file
+            std::filesystem::path basePath = m_resources.scene.getFilename().parent_path();
+            std::filesystem::path imagePath = basePath / image.uri;
+
+            int channels;
+            if (!stbi_info(imagePath.string().c_str(), &width, &height, &channels))
+            {
+                LOGW("Failed to read image info for displacement map: %s\n", imagePath.string().c_str());
+                continue;
+            }
+            LOGI("Loaded image dimensions from file: %s (%dx%d)\n", image.uri.c_str(), width, height);
+        }
 
         // RMIP requires square, power-of-2 textures
         if (width != height)
