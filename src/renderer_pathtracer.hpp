@@ -78,6 +78,9 @@ public:
   float                           m_sceneRadius{1.0f};
   bool                            m_autoFocus{true};  // Enable auto-focus
   VkShaderModule                  m_shaderModule{};   // Shader module for RTX
+  VkShaderModule m_displacementIntersectionModule{ VK_NULL_HANDLE };
+  VkShaderModule m_displacementClosestHitModule{ VK_NULL_HANDLE };
+  VkShaderModule m_displacementAnyHitModule{ VK_NULL_HANDLE };
 
   nvvk::PipelineCacheManager m_pipelineCache{};  // Pipeline cache for faster creation
 

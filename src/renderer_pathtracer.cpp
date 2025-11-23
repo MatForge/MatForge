@@ -651,15 +651,15 @@ void PathTracer::createRtxPipeline(Resources& resources)
   {
       stages[eDisplacementClosestHit].pName = "rchitDisplacement";
       stages[eDisplacementClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-      stages[eDisplacementClosestHit].module = m_shaderModule;  // Or m_displacementClosestHitShader
+      stages[eDisplacementClosestHit].module = m_shaderModule; 
 
       stages[eDisplacementAnyHit].pName = "rahitDisplacement";
       stages[eDisplacementAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-      stages[eDisplacementAnyHit].module = m_shaderModule;  // Or m_displacementAnyHitShader
+      stages[eDisplacementAnyHit].module = m_shaderModule;  
 
       stages[eDisplacementIntersection].pName = "intersectionMain";
       stages[eDisplacementIntersection].stage = VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
-      stages[eDisplacementIntersection].module = m_shaderModule;  // Or m_displacementIntersectionShader
+      stages[eDisplacementIntersection].module = m_displacementIntersectionModule;
   }
 
   // Shader groups
@@ -825,6 +825,16 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &m_shaderModule));
     NVVK_DBG_NAME(m_shaderModule);
   }
+
+  // displacement
+  VkShaderModuleCreateInfo moduleInfo{
+    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    .codeSize = displacement_intersection_slang_sizeInBytes,
+    .pCode = static_cast<const uint32_t*>(displacement_intersection_slang),
+  };
+  NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &m_displacementIntersectionModule));
+  NVVK_DBG_NAME(m_displacementIntersectionModule);
+
 
   // Destroy pipeline since there is a new shader
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
