@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![MatForge Banner](doc/presentations/QOLDS_screenshot.png)
+![MatForge Banner](img/thumb.png)
 
 **A Production-Quality GPU Path Tracer Implementing Four Complementary SIGGRAPH Papers**
 
