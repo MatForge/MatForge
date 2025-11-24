@@ -329,8 +329,7 @@ MatForge/
 ### Milestone Reports
 
 - [Milestone 1 Report](doc/presentations/Milestone1.md) (Nov 12, 2025)
-- [Milestone 2 Report](doc/presentations/Milestone2.md) (Nov 24, 2025)
-- Final Report (Dec 7, 2025) - Coming Soon
+- [Milestone 2 Report](https://docs.google.com/presentation/d/1KfiufcOu-iZWNO3kYZDekGecSDXhlwpd4ZzbTKqC-8c/edit?slide=id.g3a90943984b_1_633#slide=id.g3a90943984b_1_633) (Nov 24, 2025)
 
 ### Technical Analysis
 
