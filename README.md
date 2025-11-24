@@ -331,20 +331,6 @@ MatForge/
 - [Milestone 1 Report](doc/presentations/Milestone1.md) (Nov 12, 2025)
 - [Milestone 2 Report](https://docs.google.com/presentation/d/1KfiufcOu-iZWNO3kYZDekGecSDXhlwpd4ZzbTKqC-8c/edit?slide=id.g3a90943984b_1_633#slide=id.g3a90943984b_1_633) (Nov 24, 2025)
 
-### Technical Analysis
-
-- [QOLDS Convergence Analysis](doc/markdowns/QOLDS_convergence_analysis.md) - Detailed comparison vs PCG
-- [RMIP Loading Fixes](others/RMIP_loading.md) - Vulkan descriptor debugging notes
-
-### Developer Guide
-
-- [CLAUDE.md](CLAUDE.md) - Comprehensive developer guide with codebase architecture
-
-### Technical Reports
-
-- [QOLDS Integration Report](doc/markdowns/QOLDS_report.md)
-- [QOLDS GPU Implementation](doc/markdowns/QOLDS_gpu_implementation.md)
-
 ---
 
 ## Usage
