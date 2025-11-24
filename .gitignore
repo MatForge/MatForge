@@ -13,7 +13,8 @@ _bin/
 _install/             
 build/                
 spv/
-others/           
+others/
+san-miguel/           
 
 # =============================================================================
 # Project-Specific Exclusions
