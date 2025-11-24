@@ -509,43 +509,6 @@ cmake --build build -- -j$(nproc)
 
 ---
 
-## Troubleshooting
-
-### Common Issues
-
-**"QOLDS initialization file not found"**
-
-```
-Error: Could not open initialization file: resources/initIrreducibleGF3.dat
-```
-
-**Solution**: Ensure `resources/` directory is in the same location as the executable, or run from the project root.
-
-**"Vulkan validation errors"**
-
-```
-Validation Error: vkCreateGraphicsPipelines: (...)
-```
-
-**Solution**: Update graphics drivers to the latest version. NVIDIA RTX 20-series or newer required.
-
-**"Slang compilation failed"**
-
-```
-error 30047: argument passed to parameter '0' must be l-value
-```
-
-**Solution**: Press F5 to reload shaders. This issue should not occur in the current build.
-
-**"Low FPS / Stuttering"**
-
-- Reduce samples per pixel (try 1-4 for real-time preview)
-- Lower max ray depth
-- Disable DLSS if enabled
-- Check GPU utilization in Task Manager
-
----
-
 ## Known Limitations
 
 - RMIP traversal algorithm not yet complete (Milestone 3)
