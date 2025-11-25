@@ -35,6 +35,10 @@
 #include "dlss_denoiser.hpp"
 #endif
 
+// RMIP
+//#if defined(USE_RMIP)
+#include "rmip_builder.hpp"
+//#endif
 
 class PathTracer : public BaseRenderer
 {
@@ -74,6 +78,9 @@ public:
   float                           m_sceneRadius{1.0f};
   bool                            m_autoFocus{true};  // Enable auto-focus
   VkShaderModule                  m_shaderModule{};   // Shader module for RTX
+  VkShaderModule m_displacementIntersectionModule{ VK_NULL_HANDLE };
+  VkShaderModule m_displacementClosestHitModule{ VK_NULL_HANDLE };
+  VkShaderModule m_displacementAnyHitModule{ VK_NULL_HANDLE };
 
   nvvk::PipelineCacheManager m_pipelineCache{};  // Pipeline cache for faster creation
 
@@ -150,4 +157,43 @@ public:
 #if defined(USE_DLSS)
   std::unique_ptr<DlssDenoiser> m_dlss;
 #endif
+
+//#if defined(USE_RMIP)
+// Structure to hold displacement information per render primitive
+  struct DisplacementInfo
+  {
+      bool        hasDisplacement{ false };
+      VkImageView rmipView{ VK_NULL_HANDLE };
+      uint32_t    rmipTextureIndex{ UINT32_MAX };
+      uint32_t    displacementTextureIndex{ UINT32_MAX };
+      float       maxDisplacement{ 0.0f };
+  };
+
+  // Set displacement data from external RMIP builder (called from renderer.cpp)
+  void setDisplacementData(const std::vector<DisplacementInfo>& displacementInfo);
+
+  // Check if any primitives have displacement
+  bool hasDisplacementPrimitives() const { return m_hasDisplacement; }
+
+  // Get displacement info for a specific primitive
+  const DisplacementInfo& getDisplacementInfo(uint32_t primIndex) const;
+
+private:
+    // Displacement-related members
+    std::vector<DisplacementInfo> m_displacementInfo;
+    bool                          m_hasDisplacement{ false };
+    VkSampler                     m_displacementSampler{};  // Sampler for RMIP and displacement textures
+
+    // Additional shader modules for displacement (if using separate shaders)
+    VkShaderModule m_displacementIntersectionShader{};
+    VkShaderModule m_displacementClosestHitShader{};
+    VkShaderModule m_displacementAnyHitShader{};
+
+    // Check materials for displacement and update m_hasDisplacement flag
+    void checkForDisplacement(Resources& resources);
+
+    // Write RMIP textures to descriptor sets
+    void writeDisplacementDescriptors(VkCommandBuffer cmd, Resources& resources);
+
+//#endif
 };

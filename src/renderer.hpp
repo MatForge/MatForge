@@ -56,6 +56,7 @@
 #include "ui_scene_graph.hpp"
 #include "qolds_builder.hpp"
 #include "convergence_analyzer.hpp"
+#include "rmip_builder.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -141,6 +142,7 @@ private:
   bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
 
   Resources  m_resources;
+  RmipBuilder m_rmipBuilder;
   PathTracer m_pathTracer;  // Path tracer renderer
   Rasterizer m_rasterizer;  // Rasterizer renderer
 
@@ -179,4 +181,21 @@ private:
   glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
 
   VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
+
+  struct RmipData
+  {
+      nvvk::Image image;
+      VkImageView view{ VK_NULL_HANDLE };
+      float       displacementFactor = 1.0f;
+      int         texCoord = 0;
+      uint32_t    displacementTextureIndex = UINT32_MAX;  
+      float       maxDisplacement = 0.0f;                
+      bool        hasDisplacement = false;               
+  };
+
+  std::vector<RmipData> m_displacementRMIPs;
+  void buildDisplacementRMIPs(VkCommandBuffer cmd);
+  void cleanupDisplacementRMIPs();
+  void passRMIPToPathTracer();
+  bool checkMaterialHasDisplacement(int materialIndex);
 };
