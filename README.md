@@ -145,12 +145,11 @@ cmake --build build -- -j$(nproc)
 ### First Run
 
 1. The application will load the default shader ball scene
-2. Press **F5** to reload shaders (hot-reload)
-3. Use the GUI to toggle between rendering techniques:
+2. Use the GUI to toggle between rendering techniques:
    - **Use QOLDS**: Switch between QOLDS and PCG sampling
    - **Use FastMSX**: Toggle Fast-MSX multi-scatter evaluation
-4. Load custom models: File → Open Scene (supports .gltf/.glb)
-5. Load HDR environments: File → Open HDR
+3. Load custom models: File → Open Scene (supports .gltf/.glb)
+4. Load HDR environments: File → Open HDR
 
 ### Console Output
 
@@ -584,49 +583,6 @@ See [LICENSE](LICENSE) for full license text.
 
 ![RMIP Structure](doc/presentations/RMIP_structure.png)
 *Hierarchical min-max pyramid for displacement maps*
-
----
-
-## Citations
-
-If you use this work in your research, please cite:
-
-```bibtex
-@misc{matforge2025,
-  title={MatForge: Advanced Material Rendering System},
-  author={Yiding, Cecilia, Xiaonan},
-  year={2025},
-  institution={University of Pennsylvania, CIS 5650},
-  url={https://github.com/MatForge/MatForge}
-}
-```
-
-**Papers Implemented**:
-
-```bibtex
-@inproceedings{ostromoukhov2024quad,
-  title={Quad-Optimized Low-Discrepancy Sequences},
-  author={Ostromoukhov, Victor and others},
-  booktitle={ACM SIGGRAPH 2024},
-  year={2024}
-}
-
-@inproceedings{thonat2023rmip,
-  title={RMIP: Displacement ray-tracing via inversion and oblong bounding},
-  author={Thonat, Théo and Georgiev, Iliyan and Beaune, François and Boubekeur, Tamy},
-  booktitle={ACM SIGGRAPH Asia 2023},
-  year={2023},
-  doi={10.1145/3610548.3618182}
-}
-
-@inproceedings{eto2023bounded,
-  title={Bounded VNDF Sampling for Smith-GGX Reflections},
-  author={Eto, Kenta and Tokuyoshi, Yusuke},
-  booktitle={ACM SIGGRAPH Asia 2023},
-  year={2023},
-  doi={10.1145/3610543.3626163}
-}
-```
 
 ---
 
