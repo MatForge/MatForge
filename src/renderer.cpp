@@ -912,8 +912,22 @@ void GltfRenderer::createVulkanScene()
     }
   }
 
+  // Prepare displacement information for BLAS creation (AABB geometry)
+  std::vector<nvvkgltf::DisplacementInfo> displacementInfo(m_resources.scene.getModel().materials.size());
+  for(size_t matIdx = 0; matIdx < m_displacementRMIPs.size() && matIdx < displacementInfo.size(); matIdx++)
+  {
+    const auto& rmipData = m_displacementRMIPs[matIdx];
+    if(rmipData.hasDisplacement)
+    {
+      displacementInfo[matIdx].hasDisplacement = true;
+      displacementInfo[matIdx].minDisplacement = 0.0f;  // Assuming normalized height map
+      displacementInfo[matIdx].maxDisplacement = rmipData.displacementFactor;  // Scale factor
+    }
+  }
+
   // Create the bottom-level acceleration structure descriptors (no building yet)
-  m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags);
+  // Use the new overload that supports AABB geometry for displaced primitives
+  m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags, displacementInfo);
 
   // Build the bottom-level acceleration structure
   // Memory-conscious approach: build within a fixed memory budget using multiple command buffers if needed
