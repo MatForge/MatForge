@@ -94,4 +94,7 @@ private:
     // Output RMIP
     nvvk::Image m_rmipImage{};
     VkImageView m_rmipView{};
+
+    // Params buffer (reused for all dispatches to avoid leaks)
+    nvvk::Buffer m_paramsBuffer{};
 };

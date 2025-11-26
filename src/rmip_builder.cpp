@@ -35,6 +35,15 @@ void RmipBuilder::init(nvvk::ResourceAllocator& allocator, VkCommandPool command
     };
     NVVK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool));
     NVVK_DBG_NAME(m_descriptorPool);
+
+    // Create reusable params buffer (to avoid creating/leaking one per dispatch)
+    NVVK_CHECK(m_allocator->createBuffer(
+        m_paramsBuffer,
+        sizeof(RmipBuildParams),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU,
+        VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT));
+    NVVK_DBG_NAME(m_paramsBuffer.buffer);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -42,25 +51,56 @@ void RmipBuilder::init(nvvk::ResourceAllocator& allocator, VkCommandPool command
 //
 void RmipBuilder::deinit()
 {
-    if (m_stagingView)
+    // Early exit if not initialized
+    if (m_device == VK_NULL_HANDLE || m_allocator == nullptr)
+        return;
+
+    // Destroy staging image view (owned by RmipBuilder)
+    if (m_stagingView != VK_NULL_HANDLE)
         vkDestroyImageView(m_device, m_stagingView, nullptr);
-    if (m_rmipView)
-        vkDestroyImageView(m_device, m_rmipView, nullptr);
 
-    m_allocator->destroyImage(m_stagingImage);
-    m_allocator->destroyImage(m_rmipImage);
+    // NOTE: m_rmipView is NOT destroyed here - it's an external view provided by the caller!
+    // The caller is responsible for destroying it.
 
-    vkDestroyPipeline(m_device, m_initPipeline, nullptr);
-    vkDestroyPipeline(m_device, m_expandPipeline, nullptr);
-    vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-    vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
-    vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
+    // Destroy staging image (owned by RmipBuilder)
+    if (m_stagingImage.image != VK_NULL_HANDLE)
+        m_allocator->destroyImage(m_stagingImage);
+
+    // Destroy params buffer (owned by RmipBuilder)
+    if (m_paramsBuffer.buffer != VK_NULL_HANDLE)
+        m_allocator->destroyBuffer(m_paramsBuffer);
+
+    // NOTE: m_rmipImage is NOT destroyed here - it's an external image provided by the caller!
+    // At line 251 of buildRMIP(), we assign: m_rmipImage.image = rmipOutput (external)
+    // The caller is responsible for destroying it.
+
+    // Destroy pipelines and layouts
+    if (m_initPipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(m_device, m_initPipeline, nullptr);
+    if (m_expandPipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(m_device, m_expandPipeline, nullptr);
+    if (m_pipelineLayout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+    if (m_descriptorSetLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
+    if (m_descriptorPool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
 
     m_bindings.clear();
+
+    // Reset all handles
     m_device = VK_NULL_HANDLE;
     m_allocator = nullptr;
     m_stagingView = VK_NULL_HANDLE;
-    m_rmipView = VK_NULL_HANDLE;
+    m_rmipView = VK_NULL_HANDLE;  // External, don't destroy
+    m_stagingImage = {};
+    m_rmipImage = {};  // External, don't destroy
+    m_paramsBuffer = {};
+    m_initPipeline = VK_NULL_HANDLE;
+    m_expandPipeline = VK_NULL_HANDLE;
+    m_pipelineLayout = VK_NULL_HANDLE;
+    m_descriptorSetLayout = VK_NULL_HANDLE;
+    m_descriptorPool = VK_NULL_HANDLE;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -220,11 +260,9 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
     // Transition RMIP output image from UNDEFINED to GENERAL
     transitionToGeneral(cmd, rmipOutput);
 
-    // Store RMIP output for later use
-    if (m_rmipView)
-        vkDestroyImageView(m_device, m_rmipView, nullptr);
-    m_allocator->destroyImage(m_rmipImage);
-
+    // Store RMIP output for later use (these are external resources, don't destroy old ones)
+    // NOTE: m_rmipImage and m_rmipView are external - provided by caller
+    // We just store references to them, we don't own them
     m_rmipImage.image = rmipOutput;
     m_rmipView = rmipOutputView;
 
@@ -326,17 +364,8 @@ void RmipBuilder::bindResources(VkCommandBuffer       cmd,
     VkDescriptorSet descriptorSet;
     NVVK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet));
 
-    // Create uniform buffer for parameters
-    nvvk::Buffer paramsBuffer;
-    NVVK_CHECK(m_allocator->createBuffer(
-        paramsBuffer,
-        sizeof(RmipBuildParams),
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU,
-        VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT));
-
-    // Copy data using the mapped pointer from VMA
-    memcpy(paramsBuffer.mapping, &params, sizeof(RmipBuildParams));
+    // Update the reusable params buffer with new data
+    memcpy(m_paramsBuffer.mapping, &params, sizeof(RmipBuildParams));
 
     // Update descriptor set
     VkDescriptorImageInfo inputImageInfo{
@@ -350,7 +379,7 @@ void RmipBuilder::bindResources(VkCommandBuffer       cmd,
     };
 
     VkDescriptorBufferInfo bufferInfo{
-        .buffer = paramsBuffer.buffer,
+        .buffer = m_paramsBuffer.buffer,
         .offset = 0,
         .range = sizeof(RmipBuildParams),
     };

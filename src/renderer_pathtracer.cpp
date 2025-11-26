@@ -120,6 +120,15 @@ void PathTracer::onDetach(Resources& resources)
   vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
   //vkDestroyShaderEXT(m_device, m_shader, nullptr);
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
+
+  // Destroy displacement shader modules
+  if (m_displacementIntersectionModule != VK_NULL_HANDLE)
+    vkDestroyShaderModule(m_device, m_displacementIntersectionModule, nullptr);
+  if (m_displacementClosestHitModule != VK_NULL_HANDLE)
+    vkDestroyShaderModule(m_device, m_displacementClosestHitModule, nullptr);
+  if (m_displacementAnyHitModule != VK_NULL_HANDLE)
+    vkDestroyShaderModule(m_device, m_displacementAnyHitModule, nullptr);
+
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
   m_pipelineCache.deinit();

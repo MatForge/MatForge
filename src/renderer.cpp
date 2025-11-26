@@ -1329,16 +1329,21 @@ void GltfRenderer::destroyResources()
   // Destroy convergence analyzer before allocator to prevent memory leak
   m_convergenceAnalyzer.destroy();
 
-  m_resources.allocator.deinit();
-
+  // Clean up RMIP resources BEFORE destroying allocator
   for (auto& rmipData : m_displacementRMIPs)
   {
-      vkDestroyImageView(m_device, rmipData.view, nullptr);
-      m_resources.allocator.destroyImage(rmipData.image);
+      if (rmipData.view != VK_NULL_HANDLE)
+          vkDestroyImageView(m_device, rmipData.view, nullptr);
+      if (rmipData.image.image != VK_NULL_HANDLE)
+          m_resources.allocator.destroyImage(rmipData.image);
   }
   m_displacementRMIPs.clear();
 
+  // Deinit RMIP builder BEFORE destroying allocator (it has internal buffers)
   m_rmipBuilder.deinit();
+
+  // NOW it's safe to destroy the allocator
+  m_resources.allocator.deinit();
 }
 
 
