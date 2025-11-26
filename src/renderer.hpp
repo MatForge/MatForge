@@ -57,6 +57,7 @@
 #include "qolds_builder.hpp"
 #include "convergence_analyzer.hpp"
 #include "rmip_builder.hpp"
+#include "aabb_computer.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -143,6 +144,7 @@ private:
 
   Resources  m_resources;
   RmipBuilder m_rmipBuilder;
+  AabbComputer m_aabbComputer;  // AABB computer for displacement mapping
   PathTracer m_pathTracer;  // Path tracer renderer
   Rasterizer m_rasterizer;  // Rasterizer renderer
 

@@ -238,6 +238,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Initialize RMIP builder
   m_rmipBuilder.init(m_resources.allocator, m_transientCmdPool);
 
+  // Initialize AABB computer for displacement mapping
+  m_aabbComputer.init(m_device, &m_resources.allocator);
+
   // ===== Renderer Initialization =====
 
   // Create resources
@@ -929,6 +932,76 @@ void GltfRenderer::createVulkanScene()
   // Use the new overload that supports AABB geometry for displaced primitives
   m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags, displacementInfo);
 
+  // Compute AABBs for displaced primitives before building BLAS
+  {
+    const auto& renderPrimitives = m_resources.scene.getRenderPrimitives();
+    const auto& vertexBuffers = m_resources.sceneVk.vertexBuffers();
+    const auto& indices = m_resources.sceneVk.indices();
+
+    // Check if we have any displaced primitives
+    bool hasAnyDisplacement = false;
+    for(const auto& info : displacementInfo)
+    {
+      if(info.hasDisplacement)
+      {
+        hasAnyDisplacement = true;
+        break;
+      }
+    }
+
+    if(hasAnyDisplacement)
+    {
+      VkCommandBuffer cmd{};
+      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+      // For each displaced primitive, compute its AABBs
+      VkDeviceSize aabbOffset = 0;
+      for(uint32_t p_idx = 0; p_idx < renderPrimitives.size(); p_idx++)
+      {
+        const auto& prim = renderPrimitives[p_idx];
+
+        // Check if this primitive has displacement
+        bool hasDisplacement = false;
+        nvvkgltf::DisplacementInfo dispInfo;
+        if(prim.pPrimitive && prim.pPrimitive->material >= 0 &&
+           prim.pPrimitive->material < static_cast<int>(displacementInfo.size()))
+        {
+          dispInfo = displacementInfo[prim.pPrimitive->material];
+          hasDisplacement = dispInfo.hasDisplacement;
+        }
+
+        if(hasDisplacement)
+        {
+          // Prepare AABB compute parameters
+          AabbComputeParams params;
+          params.numTriangles = prim.indexCount / 3;
+          params.minDisplacement = dispInfo.minDisplacement;
+          params.maxDisplacement = dispInfo.maxDisplacement;
+          params.padding = 0;
+
+          // Create sub-buffer view for this primitive's AABBs
+          const nvvk::Buffer& aabbBuffer = m_resources.sceneRtx.getAabbBuffer();
+          nvvk::Buffer aabbSubBuffer;
+          aabbSubBuffer.buffer = aabbBuffer.buffer;
+          aabbSubBuffer.address = aabbBuffer.address + aabbOffset;
+
+          // Compute AABBs for this primitive
+          m_aabbComputer.computeAABBs(cmd,
+                                      vertexBuffers[p_idx].position,
+                                      vertexBuffers[p_idx].normal,
+                                      indices[p_idx],
+                                      aabbSubBuffer,
+                                      params);
+
+          aabbOffset += params.numTriangles * sizeof(VkAabbPositionsKHR);
+        }
+      }
+
+      // Submit and wait (AABBs must be ready before BLAS build)
+      nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+    }
+  }
+
   // Build the bottom-level acceleration structure
   // Memory-conscious approach: build within a fixed memory budget using multiple command buffers if needed
   // Each build command is queued separately and followed by compaction to optimize memory usage
@@ -1353,8 +1426,9 @@ void GltfRenderer::destroyResources()
   }
   m_displacementRMIPs.clear();
 
-  // Deinit RMIP builder BEFORE destroying allocator (it has internal buffers)
+  // Deinit RMIP builder and AABB computer BEFORE destroying allocator (they have internal buffers)
   m_rmipBuilder.deinit();
+  m_aabbComputer.deinit();
 
   // NOW it's safe to destroy the allocator
   m_resources.allocator.deinit();
