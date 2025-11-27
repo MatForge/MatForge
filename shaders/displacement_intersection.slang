@@ -414,87 +414,13 @@ uint packUV(float2 uv)
 [shader("intersection")]
 void intersectionMain()
 {
-    // DEBUG VERSION 2: Test ray-triangle intersection (no displacement)
-    // This will render a flat plane to verify intersection shader works
+    // RMIP traversal with fallback to flat intersection for debugging
 
     // Get ray information
     float3 rayOrigin = ObjectRayOrigin();
     float3 rayDir = ObjectRayDirection();
     float rayTMin = RayTMin();
     float rayTMax = RayTCurrent();
-
-    // Get primitive information
-    uint triangleIndex = PrimitiveIndex();
-    uint instanceID = InstanceIndex();
-    uint renderPrimID = InstanceID();
-
-    // Access scene data
-    GltfRenderNode* renderNodes = pushConst.gltfScene->renderNodes;
-    GltfRenderPrimitive* renderPrimitives = pushConst.gltfScene->renderPrimitives;
-    GltfRenderPrimitive renderPrim = renderPrimitives[renderPrimID];
-
-    // Get triangle indices
-    uint3 indices = getTriangleIndices(renderPrim, triangleIndex);
-
-    // Fetch vertex positions (object space)
-    float3 v0 = getVertexPosition(renderPrim, indices.x);
-    float3 v1 = getVertexPosition(renderPrim, indices.y);
-    float3 v2 = getVertexPosition(renderPrim, indices.z);
-
-    // Fetch UVs
-    float2 uv0 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(1, 0, 0));
-    float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0, 1, 0));
-    float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0, 0, 1));
-
-    // Compute triangle normal
-    float3 edge1 = v1 - v0;
-    float3 edge2 = v2 - v0;
-    float3 triNormal = cross(edge1, edge2);
-
-    // Ray-plane intersection (Möller-Trumbore algorithm simplified)
-    float3 h = cross(rayDir, edge2);
-    float a = dot(edge1, h);
-
-    // Check if ray is parallel to triangle
-    if (abs(a) < 0.00001)
-        return; // No intersection
-
-    float f = 1.0 / a;
-    float3 s = rayOrigin - v0;
-    float u = f * dot(s, h);
-
-    if (u < 0.0 || u > 1.0)
-        return;
-
-    float3 q = cross(s, edge1);
-    float v = f * dot(rayDir, q);
-
-    if (v < 0.0 || u + v > 1.0)
-        return;
-
-    float t = f * dot(edge2, q);
-
-    // Check if intersection is within ray bounds
-    if (t < rayTMin || t > rayTMax)
-        return;
-
-    // Compute barycentric coordinates
-    float w = 1.0 - u - v;
-
-    // Interpolate UV
-    float2 hitUV = w * uv0 + u * uv1 + v * uv2;
-
-    // Pack UV and report hit
-    uint packedUV = packUV(hitUV);
-    float2 hitAttribs = float2(asfloat(packedUV), 0.0);
-    ReportHit(t, 0, hitAttribs);
-    return;
-
-    // ORIGINAL CODE BELOW (DISABLED FOR TESTING):
-    /*
-    // Get ray information
-    float3 rayOrigin = ObjectRayOrigin();
-    float3 rayDir = ObjectRayDirection();
 
     // Get primitive information
     uint triangleIndex = PrimitiveIndex();    // Which triangle in the BLAS
@@ -518,15 +444,15 @@ void intersectionMain()
     uint rmipNumLevels;
     rmipTextures[materialIndex].GetDimensions(0, rmipTexSize.x, rmipTexSize.y, rmipArraySize, rmipNumLevels);
     uint maxLevel = uint(log2(float(rmipTexSize.x))); // Assuming square texture
-    
+
     // Get triangle indices from index buffer
     uint3 indices = getTriangleIndices(renderPrim, triangleIndex);
-    
+
     // Fetch vertex positions
     float3 v0 = getVertexPosition(renderPrim, indices.x);
     float3 v1 = getVertexPosition(renderPrim, indices.y);
     float3 v2 = getVertexPosition(renderPrim, indices.z);
-    
+
     // Fetch vertex normals
     float3 n0, n1, n2;
     if(hasVertexNormal(renderPrim))
@@ -546,131 +472,45 @@ void intersectionMain()
     float2 uv0 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(1.0, 0.0, 0.0));
     float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 1.0, 0.0));
     float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 0.0, 1.0));
-    
-    // Initialize with bounding prism intersection
-    float prismTMin, prismTMax;
-    if(!intersectPrism(rayOrigin, rayDir, v0, v1, v2, n0, n1, n2, maxLevel, materialIndex, prismTMin, prismTMax))
-        return; // No intersection with bounding prism
-    
-    // Project ray-prism intersection to texture space
-    float3 entryPoint = rayOrigin + prismTMin * rayDir;
-    float3 exitPoint = rayOrigin + prismTMax * rayDir;
-    
-    float2 entryUV = invertDisplacement(entryPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
-    float2 exitUV = invertDisplacement(exitPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
-    
-    // Initialize traversal stack
-    RayBound2D boundsStack[32];
-    int stackSize = 0;
-    
-    // Push initial bound
-    boundsStack[stackSize++] = RayBound2D(
-        min(entryUV, exitUV),
-        max(entryUV, exitUV),
-        prismTMin,
-        prismTMax
-    );
-    
-    // RMIP traversal loop
-    float closestT = 1e30;
-    float2 closestUV;
-    bool foundHit = false;
-    
-    int iterations = 0;
-    while(stackSize > 0 && iterations < MAX_TRAVERSAL_STEPS)
-    {
-        iterations++;
-        
-        // Pop bound from stack
-        RayBound2D bound = boundsStack[--stackSize];
-        
-        // Check if we should switch to texel marching
-        if(bound.isSmallEnough(TEXEL_MARCHING_SCALE))
-        {
-            float hitT;
-            float2 hitUV;
-            if(texelMarch(rayOrigin, rayDir, bound, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2, materialIndex, hitT, hitUV))
-            {
-                if(hitT < closestT)
-                {
-                    closestT = hitT;
-                    closestUV = hitUV;
-                    foundHit = true;
-                }
-            }
-            continue;
-        }
-        
-        // Compute 3D surface bounds for this 2D region
-        float3 boxMin, boxMax;
-        computeSurfaceBounds(bound, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2,
-                           maxLevel, materialIndex, boxMin, boxMax);
-        
-        // Test ray against 3D bounds
-        float boxTMin, boxTMax;
-        if(!intersectAABB(rayOrigin, rayDir, boxMin, boxMax, boxTMin, boxTMax))
-            continue; // No intersection with this region
-        
-        // Tighten the bound using the ray intersection
-        float3 newEntryPoint = rayOrigin + boxTMin * rayDir;
-        float3 newExitPoint = rayOrigin + boxTMax * rayDir;
-        
-        float2 newEntryUV = invertDisplacement(newEntryPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
-        float2 newExitUV = invertDisplacement(newExitPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
-        
-        RayBound2D tightenedBound = RayBound2D(
-            max(bound.minUV, min(newEntryUV, newExitUV)),
-            min(bound.maxUV, max(newEntryUV, newExitUV)),
-            boxTMin,
-            boxTMax
-        );
-        
-        // Subdivide the bound
-        float2 center = tightenedBound.getCenter();
-        float2 size = tightenedBound.getSize();
-        
-        if(size.x > size.y)
-        {
-            // Split horizontally
-            boundsStack[stackSize++] = RayBound2D(
-                tightenedBound.minUV,
-                float2(center.x, tightenedBound.maxUV.y),
-                tightenedBound.tMin,
-                tightenedBound.tMax
-            );
-            boundsStack[stackSize++] = RayBound2D(
-                float2(center.x, tightenedBound.minUV.y),
-                tightenedBound.maxUV,
-                tightenedBound.tMin,
-                tightenedBound.tMax
-            );
-        }
-        else
-        {
-            // Split vertically
-            boundsStack[stackSize++] = RayBound2D(
-                tightenedBound.minUV,
-                float2(tightenedBound.maxUV.x, center.y),
-                tightenedBound.tMin,
-                tightenedBound.tMax
-            );
-            boundsStack[stackSize++] = RayBound2D(
-                float2(tightenedBound.minUV.x, center.y),
-                tightenedBound.maxUV,
-                tightenedBound.tMin,
-                tightenedBound.tMax
-            );
-        }
-    }
-    
-    // Report hit if found
-    if(foundHit && closestT < RayTCurrent())
-    {
-        // Set hit attributes (UV coordinates)
-        float2 hitAttribs = closestUV;
-        ReportHit(closestT, 0, hitAttribs);
-    }
-    */
+
+    // DEBUG: For now, just use simple flat intersection
+    // We'll add displacement marching once this works
+
+    // Simple ray-triangle intersection (Möller-Trumbore)
+    float3 edge1 = v1 - v0;
+    float3 edge2 = v2 - v0;
+    float3 h = cross(rayDir, edge2);
+    float a = dot(edge1, h);
+
+    if (abs(a) < 0.00001)
+        return; // Ray parallel to triangle
+
+    float f = 1.0 / a;
+    float3 s = rayOrigin - v0;
+    float u = f * dot(s, h);
+
+    if (u < 0.0 || u > 1.0)
+        return;
+
+    float3 q = cross(s, edge1);
+    float v = f * dot(rayDir, q);
+
+    if (v < 0.0 || u + v > 1.0)
+        return;
+
+    float t = f * dot(edge2, q);
+
+    if (t < rayTMin || t > rayTMax)
+        return;
+
+    // Interpolate UV
+    float w = 1.0 - u - v;
+    float2 hitUV = w * uv0 + u * uv1 + v * uv2;
+
+    // Pack UV and report hit
+    uint packedUV = packUV(hitUV);
+    float2 hitAttribs = float2(asfloat(packedUV), 0.0);
+    ReportHit(t, 0, hitAttribs);
 }  // END DEBUG: Commented out original code
 
 //-----------------------------------------------------------------------
@@ -683,25 +523,23 @@ bool intersectPrism(float3 rayOrigin, float3 rayDir,
                    uint materialIndex,
                    out float tMin, out float tMax)
 {
-    // Compute prism planes
-    // The prism is formed by the base triangle and displaced triangle
-
-    // Base triangle normal
-    float3 triNormal = normalize(cross(v1 - v0, v2 - v0));
-
-    // Get max displacement from RMIP (query entire texture)
+    // Get displacement bounds from RMIP (query entire texture)
     float2 globalDispBounds = queryRMIP(float2(0, 0), float2(1, 1), maxLevel, materialIndex);
+    float minDisp = globalDispBounds.x;
     float maxDisp = globalDispBounds.y;
-    
-    // Compute prism faces
-    float3 prismMin = min(min(v0, v1), v2);
-    float3 prismMax = max(max(v0, v1), v2);
-    
-    // Expand by maximum displacement along normals
-    float3 avgNormal = normalize((n0 + n1 + n2) / 3.0);
-    prismMin -= abs(maxDisp) * abs(avgNormal);
-    prismMax += abs(maxDisp) * abs(avgNormal);
-    
-    // Simple AABB test for prism
+
+    // Compute displaced vertex positions (both min and max displacement)
+    float3 v0_min = v0 + n0 * minDisp;
+    float3 v0_max = v0 + n0 * maxDisp;
+    float3 v1_min = v1 + n1 * minDisp;
+    float3 v1_max = v1 + n1 * maxDisp;
+    float3 v2_min = v2 + n2 * minDisp;
+    float3 v2_max = v2 + n2 * maxDisp;
+
+    // Compute AABB that contains all displaced vertices
+    float3 prismMin = min(min(min(min(min(v0_min, v0_max), v1_min), v1_max), v2_min), v2_max);
+    float3 prismMax = max(max(max(max(max(v0_max, v0_min), v1_max), v1_min), v2_max), v2_min);
+
+    // Intersect ray with prism AABB
     return intersectAABB(rayOrigin, rayDir, prismMin, prismMax, tMin, tMax);
 }
