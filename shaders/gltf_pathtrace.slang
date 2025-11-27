@@ -599,30 +599,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
         //return sampleResult;
       }
 
-      // DEBUG: Visualize RMIP texture data for displaced geometry
-      if(firstRay && payload.isDisplacedHit)
-      {
-        // Get material index
-        GltfRenderNode* renderNodes = pushConst.gltfScene->renderNodes;
-        GltfRenderNode renderNode = renderNodes[payload.rnodeID];
-        int materialID = max(0, renderNode.materialID);
-        uint materialIndex = min(uint(materialID), 7u);
-
-        // Query RMIP texture dimensions
-        uint2 rmipTexSize;
-        uint rmipArraySize;
-        uint rmipNumLevels;
-        rmipTextures[materialIndex].GetDimensions(0, rmipTexSize.x, rmipTexSize.y, rmipArraySize, rmipNumLevels);
-
-        // Sample RMIP at level 0 (full texture bounds)
-        float2 dispBounds = rmipTextures[materialIndex].Load(uint4(0, 0, 0, 0));
-
-        // Color code: Red = abs(min), Green = abs(max)
-        // If both are 0, RMIP texture is not initialized
-        radiance = float3(abs(dispBounds.x), abs(dispBounds.y), 0.0);
-        solid = true;
-        break;
-      }
+      // DEBUG visualization removed - now rendering normally
 
       PbrMaterial       pbrMat;
       GltfShadeMaterial material;

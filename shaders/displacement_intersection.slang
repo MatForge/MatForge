@@ -24,7 +24,7 @@
 // Constants for RMIP traversal
 static const float TEXEL_MARCHING_SCALE = 2.0; // Threshold to switch to texel marching
 static const int MAX_TRAVERSAL_STEPS = 64;
-static const float DISPLACEMENT_SCALE = 1.0;
+static const float DISPLACEMENT_SCALE = 10.0;  // DEBUG: Increased to make displacement obvious
 
 // Displacement parameters (could be in push constant or material)
 struct DisplacementParams
@@ -409,6 +409,134 @@ uint packUV(float2 uv)
 }
 
 //-----------------------------------------------------------------------
+// Implicit form ψ(u,v) = det(P(u,v) - O, N(u,v), D) from Equation (3)
+// This represents the ray's projection in texture space
+//-----------------------------------------------------------------------
+float evaluateImplicitForm(float2 uv,
+                          float3 rayOrigin, float3 rayDir,
+                          float3 v0, float3 v1, float3 v2,
+                          float2 uv0, float2 uv1, float2 uv2,
+                          float3 n0, float3 n1, float3 n2)
+{
+    // Interpolate base position P(u,v)
+    float3 P = interpolateTriangle(uv, v0, v1, v2, uv0, uv1, uv2);
+
+    // Interpolate normal N(u,v)
+    float3 N = interpolateTriangle(uv, n0, n1, n2, uv0, uv1, uv2);
+
+    // Compute ψ(u,v) = det(P - O, N, D)
+    float3 PminusO = P - rayOrigin;
+
+    // Determinant is the scalar triple product
+    return dot(cross(PminusO, N), rayDir);
+}
+
+//-----------------------------------------------------------------------
+// Simplified Ray Marching in 3D space with displacement testing
+// Marches along the ray and tests for displacement intersection
+//-----------------------------------------------------------------------
+bool rayMarchDisplacement(float3 rayOrigin, float3 rayDir,
+                         float tMin, float tMax,
+                         float3 v0, float3 v1, float3 v2,
+                         float2 uv0, float2 uv1, float2 uv2,
+                         float3 n0, float3 n1, float3 n2,
+                         uint materialIndex,
+                         out float hitT, out float2 hitUV)
+{
+    // Get displacement texture dimensions for step size
+    uint2 texSize;
+    uint numLevels;
+    displacementMaps[materialIndex].GetDimensions(0, texSize.x, texSize.y, numLevels);
+
+    // Compute step size based on texture resolution
+    // We want to take enough steps to sample each texel
+    float rayLength = tMax - tMin;
+    int numSteps = int(max(texSize.x, texSize.y) * 2.0); // 2x oversampling
+    numSteps = min(numSteps, 512); // Cap at 512 steps
+    float stepSize = rayLength / float(numSteps);
+
+    float t = tMin;
+
+    for (int step = 0; step < numSteps; step++)
+    {
+        // Current point along the ray
+        float3 rayPoint = rayOrigin + rayDir * t;
+
+        // Invert to texture space
+        float2 uv = invertDisplacement(rayPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
+
+        // Check if UV is within valid range
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        {
+            t += stepSize;
+            continue;
+        }
+
+        // Get base surface position and normal at this UV
+        float3 basePos = interpolateTriangle(uv, v0, v1, v2, uv0, uv1, uv2);
+        float3 normal = normalize(interpolateTriangle(uv, n0, n1, n2, uv0, uv1, uv2));
+
+        // Sample displacement at this UV
+        float displacement = displacementMaps[materialIndex].SampleLevel(displacementSampler, uv, 0).r * DISPLACEMENT_SCALE;
+
+        // Compute displaced surface position
+        float3 displacedPos = basePos + normal * displacement;
+
+        // Compute signed distance from ray point to displaced surface
+        // Negative means we're below the surface (hit)
+        float signedDist = dot(rayPoint - displacedPos, normal);
+
+        // Check for intersection
+        if (signedDist < 0.0)
+        {
+            // We've gone past the surface, refine the hit point
+            // Linear interpolation to find more accurate t
+            if (step > 0)
+            {
+                float prevT = t - stepSize;
+                float3 prevPoint = rayOrigin + rayDir * prevT;
+                float2 prevUV = invertDisplacement(prevPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
+
+                if (prevUV.x >= 0.0 && prevUV.x <= 1.0 && prevUV.y >= 0.0 && prevUV.y <= 1.0)
+                {
+                    float3 prevBasePos = interpolateTriangle(prevUV, v0, v1, v2, uv0, uv1, uv2);
+                    float3 prevNormal = normalize(interpolateTriangle(prevUV, n0, n1, n2, uv0, uv1, uv2));
+                    float prevDisp = displacementMaps[materialIndex].SampleLevel(displacementSampler, prevUV, 0).r * DISPLACEMENT_SCALE;
+                    float3 prevDisplacedPos = prevBasePos + prevNormal * prevDisp;
+                    float prevSignedDist = dot(prevPoint - prevDisplacedPos, prevNormal);
+
+                    // Linear interpolation between prev and current
+                    float alpha = prevSignedDist / (prevSignedDist - signedDist);
+                    hitT = lerp(prevT, t, alpha);
+                    hitUV = lerp(prevUV, uv, alpha);
+                }
+                else
+                {
+                    hitT = t;
+                    hitUV = uv;
+                }
+            }
+            else
+            {
+                hitT = t;
+                hitUV = uv;
+            }
+
+            return true;
+        }
+
+        t += stepSize;
+        if (t > tMax)
+            break;
+    }
+
+    // No hit found
+    hitT = 0.0;
+    hitUV = float2(0.0);
+    return false;
+}
+
+//-----------------------------------------------------------------------
 // Main RMIP Traversal Algorithm
 //-----------------------------------------------------------------------
 [shader("intersection")]
@@ -473,10 +601,7 @@ void intersectionMain()
     float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 1.0, 0.0));
     float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 0.0, 1.0));
 
-    // DEBUG: For now, just use simple flat intersection
-    // We'll add displacement marching once this works
-
-    // Simple ray-triangle intersection (Möller-Trumbore)
+    // Step 1: Intersect ray with base triangle (Möller-Trumbore)
     float3 edge1 = v1 - v0;
     float3 edge2 = v2 - v0;
     float3 h = cross(rayDir, edge2);
@@ -498,20 +623,42 @@ void intersectionMain()
     if (v < 0.0 || u + v > 1.0)
         return;
 
-    float t = f * dot(edge2, q);
+    float tBase = f * dot(edge2, q);
 
-    if (t < rayTMin || t > rayTMax)
+    if (tBase < rayTMin || tBase > rayTMax)
         return;
 
-    // Interpolate UV
+    // Step 2: Compute barycentric coordinates and UV
     float w = 1.0 - u - v;
     float2 hitUV = w * uv0 + u * uv1 + v * uv2;
 
-    // Pack UV and report hit
-    uint packedUV = packUV(hitUV);
-    float2 hitAttribs = float2(asfloat(packedUV), 0.0);
-    ReportHit(t, 0, hitAttribs);
-}  // END DEBUG: Commented out original code
+    // Step 3: Get interpolated normal at hit point
+    float3 hitNormal = normalize(w * n0 + u * n1 + v * n2);
+
+    // Step 4: Sample displacement at this UV
+    float displacement = displacementMaps[materialIndex].SampleLevel(displacementSampler, hitUV, 0).r * DISPLACEMENT_SCALE;
+
+    // Step 5: Compute base hit position
+    float3 baseHitPos = rayOrigin + rayDir * tBase;
+
+    // Step 6: Compute displaced surface position
+    float3 displacedHitPos = baseHitPos + hitNormal * displacement;
+
+    // Step 7: Compute corrected t value for displaced surface
+    // Project the displacement onto the ray direction
+    float3 displacementVec = displacedHitPos - baseHitPos;
+    float tDisplacementOffset = dot(displacementVec, rayDir);
+    float tFinal = tBase + tDisplacementOffset;
+
+    // Step 8: Verify the corrected t is within valid range
+    if (tFinal >= rayTMin && tFinal <= rayTMax)
+    {
+        // Pack UV and report hit
+        uint packedUV = packUV(hitUV);
+        float2 hitAttribs = float2(asfloat(packedUV), 0.0);
+        ReportHit(tFinal, 0, hitAttribs);
+    }
+}
 
 //-----------------------------------------------------------------------
 // Helper: Intersect ray with bounding prism
