@@ -42,6 +42,7 @@ struct HitPayload
   int      rnodeID = -1;
   int      rprimID = -1;
   HitState hitState;
+  bool     isDisplacedHit = false;  // DEBUG: Flag to indicate custom intersection hit
 };
 
 // Shadow payload for the path tracer
@@ -172,6 +173,13 @@ struct TraditionalRaytracer : IRaytracer
   void Trace(RayDesc ray, inout HitPayload payload, inout uint seed)
   {
     payload.seed = seed;
+
+    // DEBUG: Force traditional path to ensure closest hit shaders are called
+    // SER path (USE_SER == 1) doesn't work with procedural geometry (AABB + custom intersection)
+    // Always use traditional TraceRay which properly invokes hit shaders
+    TraceRay(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
+
+    /* ORIGINAL SER PATH - DISABLED FOR DEBUGGING
     if(USE_SER == 1)
     {
       HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
@@ -217,6 +225,7 @@ struct TraditionalRaytracer : IRaytracer
     {
       TraceRay(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
     }
+    */
     seed = payload.seed;
   }
 

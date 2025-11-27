@@ -598,6 +598,10 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
         //return sampleResult;
       }
 
+      // DEBUG bypass removed - now testing normal material evaluation
+      // The isDisplacedHit flag is working correctly:
+      // - Regular geometry: isDisplacedHit = false
+      // - Displaced geometry: isDisplacedHit = true
 
       PbrMaterial       pbrMat;
       GltfShadeMaterial material;
@@ -1050,6 +1054,9 @@ void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
 [shader("closesthit")]
 void rchitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+    // DEBUG: Mark this as a displaced hit for path tracer debug
+    payload.isDisplacedHit = true;
+
     // Unpack UV from intersection shader
     // The intersection shader packed the UV coordinates into attr.barycentrics.x
     uint packedUV = asuint(attr.barycentrics.x);
@@ -1172,6 +1179,12 @@ void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
 [shader("anyhit")]
 void rahitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+    // DEBUG: Disable opacity testing - accept all hits
+    // This should make displaced geometry always visible
+    return;  // Early return - don't call IgnoreHit()
+
+    // ORIGINAL CODE (DISABLED):
+    /*
     // Unpack UV from intersection shader
     uint packedUV = asuint(attr.barycentrics.x);
     float2 hitUV = unpackUV(packedUV);
@@ -1199,4 +1212,5 @@ void rahitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionA
     {
         IgnoreHit();
     }
+    */
 }

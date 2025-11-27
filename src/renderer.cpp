@@ -909,11 +909,20 @@ void GltfRenderer::createVulkanScene()
 
     m_resources.sceneVk.create(cmd, m_resources.staging, m_resources.scene, false);  // Creating the scene in Vulkan buffers
     m_resources.staging.cmdUploadAppended(cmd);
-    {
-      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-      m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
-    }
+
+    // CRITICAL: Execute vertex upload IMMEDIATELY (not queued)
+    // The AABB compute shader needs vertex data to be available BEFORE it runs
+    nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+    LOGI("[Renderer] Vertex data uploaded immediately (synchronous)\n");
   }
+  // Build RMIPs FIRST, before creating BLAS (needed for displacement info)
+  {
+    VkCommandBuffer cmd{};
+    nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+    buildDisplacementRMIPs(cmd);
+    nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+  }
+
 
   // Prepare displacement information for BLAS creation (AABB geometry)
   std::vector<nvvkgltf::DisplacementInfo> displacementInfo(m_resources.scene.getModel().materials.size());
@@ -949,6 +958,11 @@ void GltfRenderer::createVulkanScene()
       }
     }
 
+    LOGI("[AABB] hasAnyDisplacement=%d, displacementInfo.size()=%zu, renderPrimitives.size()=%zu\n",
+         hasAnyDisplacement, displacementInfo.size(), renderPrimitives.size());
+    LOGI("[AABB] vertexBuffers.size()=%zu, indices.size()=%zu\n",
+         vertexBuffers.size(), indices.size());
+
     if(hasAnyDisplacement)
     {
       VkCommandBuffer cmd{};
@@ -956,6 +970,7 @@ void GltfRenderer::createVulkanScene()
 
       // For each displaced primitive, compute its AABBs
       VkDeviceSize aabbOffset = 0;
+      uint32_t numDisplacedPrims = 0;
       for(uint32_t p_idx = 0; p_idx < renderPrimitives.size(); p_idx++)
       {
         const auto& prim = renderPrimitives[p_idx];
@@ -968,8 +983,12 @@ void GltfRenderer::createVulkanScene()
         {
           dispInfo = displacementInfo[prim.pPrimitive->material];
           hasDisplacement = dispInfo.hasDisplacement;
+          LOGI("[AABB]   Prim %u: material=%d, hasDisp=%d\n", p_idx, prim.pPrimitive->material, hasDisplacement);
         }
-
+        else
+        {
+          LOGI("[AABB]   Prim %u: NO MATERIAL\n", p_idx);
+        }
         if(hasDisplacement)
         {
           // Prepare AABB compute parameters
@@ -985,6 +1004,40 @@ void GltfRenderer::createVulkanScene()
           aabbSubBuffer.buffer = aabbBuffer.buffer;
           aabbSubBuffer.address = aabbBuffer.address + aabbOffset;
 
+          LOGI("[AABB]     Computing %u AABBs: minDisp=%.3f, maxDisp=%.3f, buffer addr=0x%llx\n",
+               params.numTriangles, params.minDisplacement, params.maxDisplacement, aabbSubBuffer.address);
+          LOGI("[AABB]     Vertex buffer addr=0x%llx, Index buffer addr=0x%llx\n",
+               vertexBuffers[p_idx].position.address, indices[p_idx].address);
+          LOGI("[AABB]     Prim indexCount=%u, vertexCount=%u\n", prim.indexCount, prim.vertexCount);
+
+          // DEBUG: Read back vertex buffer to verify contents
+          const nvvk::Buffer& vtxBuf = vertexBuffers[p_idx].position;
+          if(vtxBuf.mapping != nullptr)
+          {
+            glm::vec3* vertices = reinterpret_cast<glm::vec3*>(vtxBuf.mapping);
+            LOGI("[AABB]     First 4 vertices from CPU-side mapping:\n");
+            uint32_t numVertsToShow = (prim.vertexCount < 4) ? prim.vertexCount : 4;
+            for(uint32_t v = 0; v < numVertsToShow; v++)
+            {
+              LOGI("[AABB]       v[%u] = (%.3f, %.3f, %.3f)\n", v, vertices[v].x, vertices[v].y, vertices[v].z);
+            }
+          }
+          else
+          {
+            LOGI("[AABB]     WARNING: Vertex buffer not mapped, cannot verify contents!\n");
+          }
+
+          // DEBUG: Read back index buffer
+          const nvvk::Buffer& idxBuf = indices[p_idx];
+          if(idxBuf.mapping != nullptr)
+          {
+            uint32_t* idxData = reinterpret_cast<uint32_t*>(idxBuf.mapping);
+            LOGI("[AABB]     First 6 indices: %u %u %u %u %u %u\n",
+                 idxData[0], idxData[1], idxData[2], idxData[3], idxData[4], idxData[5]);
+          }
+
+          numDisplacedPrims++;
+
           // Compute AABBs for this primitive
           m_aabbComputer.computeAABBs(cmd,
                                       vertexBuffers[p_idx].position,
@@ -996,9 +1049,30 @@ void GltfRenderer::createVulkanScene()
           aabbOffset += params.numTriangles * sizeof(VkAabbPositionsKHR);
         }
       }
+      LOGI("[AABB] Computed for %u primitives\n", numDisplacedPrims);
 
       // Submit and wait (AABBs must be ready before BLAS build)
       nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+      // DEBUG: Read back first AABB to verify correctness
+      if(numDisplacedPrims > 0)
+      {
+        const nvvk::Buffer& aabbBuffer = m_resources.sceneRtx.getAabbBuffer();
+        if(aabbBuffer.mapping != nullptr)
+        {
+          struct VkAabbPositionsKHR {
+            float minX, minY, minZ, maxX, maxY, maxZ;
+          };
+          VkAabbPositionsKHR* aabbs = reinterpret_cast<VkAabbPositionsKHR*>(aabbBuffer.mapping);
+          LOGI("[AABB] First AABB: min=(%.3f, %.3f, %.3f), max=(%.3f, %.3f, %.3f)\n",
+               aabbs[0].minX, aabbs[0].minY, aabbs[0].minZ,
+               aabbs[0].maxX, aabbs[0].maxY, aabbs[0].maxZ);
+        }
+        else
+        {
+          LOGI("[AABB] WARNING: AABB buffer not mapped!\n");
+        }
+      }
     }
   }
 
@@ -1024,27 +1098,20 @@ void GltfRenderer::createVulkanScene()
 
     // Queue TLAS building for after all BLAS work completes
     // TLAS is the top-level structure referencing all bottom-level acceleration structures
+    // IMPORTANT: This must be queued and executed AFTER BLAS build completes
+    // The queue processing ensures correct ordering: BLAS first, then TLAS
     {
       VkCommandBuffer cmd{};
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, m_resources.scene);
+      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, m_resources.scene, displacementInfo);
       m_resources.staging.cmdUploadAppended(cmd);
       {
         std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
         m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
       }
+      LOGI("[Renderer] TLAS build queued (will execute after BLAS build)\n");
     }
 
-    // Build RMIPs for displacement maps
-    {
-        VkCommandBuffer cmd{};
-        nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-
-        buildDisplacementRMIPs(cmd);
-
-        std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-        m_cmdBufferQueue.push({ cmd, false });
-    }
   }
 
   // Build mapping for faster node lookups

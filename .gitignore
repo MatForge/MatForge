@@ -31,3 +31,9 @@ _downloaded_resources/
 .claude/
 CLAUDE.md
 
+nul
+*.bak
+*.orig
+*.patch
+build_output.txt
+build_log.txt

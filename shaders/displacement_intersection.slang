@@ -13,10 +13,10 @@
 // RMIP Data Structure binding - matches the builder output
 // The RMIP is stored as a 2D array texture with (maxLevel+1)^2 layers
 // Each layer stores minmax bounds for a specific (p,q) query size
-[[vk::binding(8, 1)]] Texture2DArray<float2> rmipTexture;     // RMIP minmax bounds
-[[vk::binding(9, 1)]] Texture2D<float> displacementMap;       // Displacement texture
-[[vk::binding(10, 1)]] SamplerState rmipSampler;              // Sampler for RMIP texture
-[[vk::binding(11, 1)]] SamplerState displacementSampler;      // Sampler for displacement map
+[[vk::binding(8, 1)]] Texture2DArray<float2> rmipTextures[8];     // Array of RMIP minmax bounds (one per material)
+[[vk::binding(9, 1)]] Texture2D<float> displacementMaps[8];       // Array of displacement textures
+[[vk::binding(10, 1)]] SamplerState rmipSampler;                  // Sampler for RMIP texture
+[[vk::binding(11, 1)]] SamplerState displacementSampler;          // Sampler for displacement map
 
 // Push constant for accessing scene data
 [[vk::push_constant]] ConstantBuffer<PathtracePushConstant> pushConst;
@@ -182,24 +182,25 @@ float3 uvToBarycentric(float2 uv, float2 uv0, float2 uv1, float2 uv2)
 float2x3 computeJacobian(float2 uv,
                          float3 v0, float3 v1, float3 v2,
                          float2 uv0, float2 uv1, float2 uv2,
-                         float3 n0, float3 n1, float3 n2)
+                         float3 n0, float3 n1, float3 n2,
+                         uint materialIndex)
 {
     const float h = 0.001; // Small step for finite differences
-    
+
     float2 uvPlusU = uv + float2(h, 0);
     float2 uvPlusV = uv + float2(0, h);
-    
+
     float3 pos = interpolateTriangle(uv, v0, v1, v2, uv0, uv1, uv2);
     float3 posPlusU = interpolateTriangle(uvPlusU, v0, v1, v2, uv0, uv1, uv2);
     float3 posPlusV = interpolateTriangle(uvPlusV, v0, v1, v2, uv0, uv1, uv2);
-    
+
     float3 normal = normalize(interpolateTriangle(uv, n0, n1, n2, uv0, uv1, uv2));
     float3 normalPlusU = normalize(interpolateTriangle(uvPlusU, n0, n1, n2, uv0, uv1, uv2));
     float3 normalPlusV = normalize(interpolateTriangle(uvPlusV, n0, n1, n2, uv0, uv1, uv2));
-    
-    float disp = displacementMap.SampleLevel(rmipSampler, uv, 0).r * DISPLACEMENT_SCALE;
-    float dispPlusU = displacementMap.SampleLevel(rmipSampler, uvPlusU, 0).r * DISPLACEMENT_SCALE;
-    float dispPlusV = displacementMap.SampleLevel(rmipSampler, uvPlusV, 0).r * DISPLACEMENT_SCALE;
+
+    float disp = displacementMaps[materialIndex].SampleLevel(rmipSampler, uv, 0).r * DISPLACEMENT_SCALE;
+    float dispPlusU = displacementMaps[materialIndex].SampleLevel(rmipSampler, uvPlusU, 0).r * DISPLACEMENT_SCALE;
+    float dispPlusV = displacementMaps[materialIndex].SampleLevel(rmipSampler, uvPlusV, 0).r * DISPLACEMENT_SCALE;
     
     float3 dPdU = ((posPlusU - pos) + (dispPlusU * normalPlusU - disp * normal)) / h;
     float3 dPdV = ((posPlusV - pos) + (dispPlusV * normalPlusV - disp * normal)) / h;
@@ -216,13 +217,13 @@ float2x3 computeJacobian(float2 uv,
 // Based on the RMIP structure: layer = p * (maxLevel + 1) + q
 // where 2^p is width and 2^q is height of the query rectangle
 //-----------------------------------------------------------------------
-float2 queryRMIP(float2 uvMin, float2 uvMax, uint maxLevel)
+float2 queryRMIP(float2 uvMin, float2 uvMax, uint maxLevel, uint materialIndex)
 {
     // Calculate query size in texels
     uint2 texSize;
     uint arraySize;
     uint numberOfLevels;
-    rmipTexture.GetDimensions(0, texSize.x, texSize.y, arraySize, numberOfLevels);
+    rmipTextures[materialIndex].GetDimensions(0, texSize.x, texSize.y, arraySize, numberOfLevels);
     
     // Convert UV coordinates to texel coordinates
     float2 queryMin = uvMin * float2(texSize);
@@ -259,7 +260,7 @@ float2 queryRMIP(float2 uvMin, float2 uvMax, uint maxLevel)
         uv = clamp(uv, 0.0, 1.0);
         
         // Sample the RMIP texture at this layer
-        float2 sampledMinMax = rmipTexture.SampleLevel(rmipSampler, float3(uv, float(layer)), 0).xy;
+        float2 sampledMinMax = rmipTextures[materialIndex].SampleLevel(rmipSampler, float3(uv, float(layer)), 0).xy;
         
         // Combine bounds
         minmaxBounds.x = min(minmaxBounds.x, sampledMinMax.x);
@@ -277,10 +278,11 @@ void computeSurfaceBounds(RayBound2D bound2D,
                          float2 uv0, float2 uv1, float2 uv2,
                          float3 n0, float3 n1, float3 n2,
                          uint maxLevel,
+                         uint materialIndex,
                          out float3 boxMin, out float3 boxMax)
 {
     // Query displacement bounds for this rectangle using RMIP
-    float2 dispBounds = queryRMIPFull(rmipTexture, rmipSampler, 
+    float2 dispBounds = queryRMIPFull(rmipTextures[materialIndex], rmipSampler,
                                       bound2D.minUV, bound2D.maxUV, maxLevel);
     
     // Sample corners and center of the UV rectangle for tighter bounds
@@ -348,11 +350,12 @@ bool texelMarch(float3 rayOrigin, float3 rayDir,
                 float3 v0, float3 v1, float3 v2,
                 float2 uv0, float2 uv1, float2 uv2,
                 float3 n0, float3 n1, float3 n2,
+                uint materialIndex,
                 out float hitT, out float2 hitUV)
 {
     uint2 texSize;
     uint numLevels;
-    displacementMap.GetDimensions(0, texSize.x, texSize.y, numLevels);
+    displacementMaps[materialIndex].GetDimensions(0, texSize.x, texSize.y, numLevels);
 
     hitT = -1.0; 
     hitUV = float2(0.0, 0.0);
@@ -373,7 +376,7 @@ bool texelMarch(float3 rayOrigin, float3 rayDir,
         // Get displaced surface at this UV
         float3 pos = interpolateTriangle(uv, v0, v1, v2, uv0, uv1, uv2);
         float3 normal = normalize(interpolateTriangle(uv, n0, n1, n2, uv0, uv1, uv2));
-        float disp = displacementMap.SampleLevel(rmipSampler, uv, 0).r * DISPLACEMENT_SCALE;
+        float disp = displacementMaps[materialIndex].SampleLevel(rmipSampler, uv, 0).r * DISPLACEMENT_SCALE;
         
         float3 displacedPos = pos + disp * normal;
         
@@ -396,29 +399,125 @@ bool texelMarch(float3 rayOrigin, float3 rayDir,
 }
 
 //-----------------------------------------------------------------------
+// Helper: Pack UV coordinates into a uint for passing to closest hit
+//-----------------------------------------------------------------------
+uint packUV(float2 uv)
+{
+    uint x = uint(clamp(uv.x, 0.0, 1.0) * 65535.0);
+    uint y = uint(clamp(uv.y, 0.0, 1.0) * 65535.0);
+    return (x << 16) | y;
+}
+
+//-----------------------------------------------------------------------
 // Main RMIP Traversal Algorithm
 //-----------------------------------------------------------------------
 [shader("intersection")]
 void intersectionMain()
 {
+    // DEBUG VERSION 2: Test ray-triangle intersection (no displacement)
+    // This will render a flat plane to verify intersection shader works
+
     // Get ray information
     float3 rayOrigin = ObjectRayOrigin();
     float3 rayDir = ObjectRayDirection();
-    
+    float rayTMin = RayTMin();
+    float rayTMax = RayTCurrent();
+
+    // Get primitive information
+    uint triangleIndex = PrimitiveIndex();
+    uint instanceID = InstanceIndex();
+    uint renderPrimID = InstanceID();
+
+    // Access scene data
+    GltfRenderNode* renderNodes = pushConst.gltfScene->renderNodes;
+    GltfRenderPrimitive* renderPrimitives = pushConst.gltfScene->renderPrimitives;
+    GltfRenderPrimitive renderPrim = renderPrimitives[renderPrimID];
+
+    // Get triangle indices
+    uint3 indices = getTriangleIndices(renderPrim, triangleIndex);
+
+    // Fetch vertex positions (object space)
+    float3 v0 = getVertexPosition(renderPrim, indices.x);
+    float3 v1 = getVertexPosition(renderPrim, indices.y);
+    float3 v2 = getVertexPosition(renderPrim, indices.z);
+
+    // Fetch UVs
+    float2 uv0 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(1, 0, 0));
+    float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0, 1, 0));
+    float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0, 0, 1));
+
+    // Compute triangle normal
+    float3 edge1 = v1 - v0;
+    float3 edge2 = v2 - v0;
+    float3 triNormal = cross(edge1, edge2);
+
+    // Ray-plane intersection (Möller-Trumbore algorithm simplified)
+    float3 h = cross(rayDir, edge2);
+    float a = dot(edge1, h);
+
+    // Check if ray is parallel to triangle
+    if (abs(a) < 0.00001)
+        return; // No intersection
+
+    float f = 1.0 / a;
+    float3 s = rayOrigin - v0;
+    float u = f * dot(s, h);
+
+    if (u < 0.0 || u > 1.0)
+        return;
+
+    float3 q = cross(s, edge1);
+    float v = f * dot(rayDir, q);
+
+    if (v < 0.0 || u + v > 1.0)
+        return;
+
+    float t = f * dot(edge2, q);
+
+    // Check if intersection is within ray bounds
+    if (t < rayTMin || t > rayTMax)
+        return;
+
+    // Compute barycentric coordinates
+    float w = 1.0 - u - v;
+
+    // Interpolate UV
+    float2 hitUV = w * uv0 + u * uv1 + v * uv2;
+
+    // Pack UV and report hit
+    uint packedUV = packUV(hitUV);
+    float2 hitAttribs = float2(asfloat(packedUV), 0.0);
+    ReportHit(t, 0, hitAttribs);
+    return;
+
+    // ORIGINAL CODE BELOW (DISABLED FOR TESTING):
+    /*
+    // Get ray information
+    float3 rayOrigin = ObjectRayOrigin();
+    float3 rayDir = ObjectRayDirection();
+
+    // Get primitive information
+    uint triangleIndex = PrimitiveIndex();    // Which triangle in the BLAS
+    uint instanceID = InstanceIndex();        // Which instance in TLAS (also node ID)
+    uint renderPrimID = InstanceID();         // Custom primitive ID
+
+    // Access GLTF scene data buffers
+    GltfRenderNode* renderNodes = pushConst.gltfScene->renderNodes;
+    GltfRenderPrimitive* renderPrimitives = pushConst.gltfScene->renderPrimitives;
+
+    GltfRenderNode renderNode = renderNodes[instanceID];
+    GltfRenderPrimitive renderPrim = renderPrimitives[renderPrimID];
+
+    // Get material index to select correct RMIP/displacement texture
+    int materialID = max(0, renderNode.materialID);
+    uint materialIndex = min(uint(materialID), 7u);  // Clamp to array size
+
     // Get RMIP texture dimensions and compute maxLevel once
     uint2 rmipTexSize;
     uint rmipArraySize;
     uint rmipNumLevels;
-    rmipTexture.GetDimensions(0, rmipTexSize.x, rmipTexSize.y, rmipArraySize, rmipNumLevels);
+    rmipTextures[materialIndex].GetDimensions(0, rmipTexSize.x, rmipTexSize.y, rmipArraySize, rmipNumLevels);
     uint maxLevel = uint(log2(float(rmipTexSize.x))); // Assuming square texture
-    
-    // Get primitive information
-    uint triangleIndex = PrimitiveIndex();    // Which triangle in the BLAS
-    uint instanceID = InstanceIndex();        // Which instance in TLAS
-    uint renderPrimID = InstanceID();         // Custom primitive ID
-    
-    // Access GLTF scene data buffers
-    GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
     
     // Get triangle indices from index buffer
     uint3 indices = getTriangleIndices(renderPrim, triangleIndex);
@@ -450,7 +549,7 @@ void intersectionMain()
     
     // Initialize with bounding prism intersection
     float prismTMin, prismTMax;
-    if(!intersectPrism(rayOrigin, rayDir, v0, v1, v2, n0, n1, n2, maxLevel, prismTMin, prismTMax))
+    if(!intersectPrism(rayOrigin, rayDir, v0, v1, v2, n0, n1, n2, maxLevel, materialIndex, prismTMin, prismTMax))
         return; // No intersection with bounding prism
     
     // Project ray-prism intersection to texture space
@@ -490,7 +589,7 @@ void intersectionMain()
         {
             float hitT;
             float2 hitUV;
-            if(texelMarch(rayOrigin, rayDir, bound, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2, hitT, hitUV))
+            if(texelMarch(rayOrigin, rayDir, bound, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2, materialIndex, hitT, hitUV))
             {
                 if(hitT < closestT)
                 {
@@ -504,8 +603,8 @@ void intersectionMain()
         
         // Compute 3D surface bounds for this 2D region
         float3 boxMin, boxMax;
-        computeSurfaceBounds(bound, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2, 
-                           maxLevel, boxMin, boxMax);
+        computeSurfaceBounds(bound, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2,
+                           maxLevel, materialIndex, boxMin, boxMax);
         
         // Test ray against 3D bounds
         float boxTMin, boxTMax;
@@ -571,7 +670,8 @@ void intersectionMain()
         float2 hitAttribs = closestUV;
         ReportHit(closestT, 0, hitAttribs);
     }
-}
+    */
+}  // END DEBUG: Commented out original code
 
 //-----------------------------------------------------------------------
 // Helper: Intersect ray with bounding prism
@@ -580,16 +680,17 @@ bool intersectPrism(float3 rayOrigin, float3 rayDir,
                    float3 v0, float3 v1, float3 v2,
                    float3 n0, float3 n1, float3 n2,
                    uint maxLevel,
+                   uint materialIndex,
                    out float tMin, out float tMax)
 {
     // Compute prism planes
     // The prism is formed by the base triangle and displaced triangle
-    
+
     // Base triangle normal
     float3 triNormal = normalize(cross(v1 - v0, v2 - v0));
-    
+
     // Get max displacement from RMIP (query entire texture)
-    float2 globalDispBounds = queryRMIP(float2(0, 0), float2(1, 1), maxLevel);
+    float2 globalDispBounds = queryRMIP(float2(0, 0), float2(1, 1), maxLevel, materialIndex);
     float maxDisp = globalDispBounds.y;
     
     // Compute prism faces

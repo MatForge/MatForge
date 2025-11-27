@@ -1,7 +1,7 @@
 {
   "asset": {
     "version": "2.0",
-    "generator": "MatForge Test Generator"
+    "generator": "MatForge Vertical Test Generator"
   },
   "extensionsUsed": [
     "KHR_materials_displacement"
@@ -17,12 +17,12 @@
   "nodes": [
     {
       "mesh": 0,
-      "name": "DisplacedPlane"
+      "name": "VerticalDisplacedPlane"
     }
   ],
   "meshes": [
     {
-      "name": "Plane",
+      "name": "VerticalPlane",
       "primitives": [
         {
           "attributes": {
@@ -38,12 +38,12 @@
   ],
   "materials": [
     {
-      "name": "DisplacedMaterial",
+      "name": "VerticalDisplacedMaterial",
       "pbrMetallicRoughness": {
         "baseColorFactor": [
-          0.8,
-          0.8,
-          0.8,
+          1.0,
+          1.0,
+          1.0,
           1.0
         ],
         "metallicFactor": 0.0,
@@ -55,7 +55,7 @@
             "index": 0,
             "texCoord": 0
           },
-          "displacementGeometryFactor": 0.1,
+          "displacementGeometryFactor": 0.2,
           "displacementGeometryOffset": 0.0
         }
       }
@@ -68,7 +68,7 @@
   ],
   "images": [
     {
-      "uri": "displacement_512.png",
+      "uri": "displacement_vertical_512.png",
       "mimeType": "image/png"
     }
   ],
@@ -80,13 +80,13 @@
       "type": "VEC3",
       "min": [
         -1,
-        0,
-        -1
+        -1,
+        -3.0
       ],
       "max": [
         1,
-        0,
-        1
+        1,
+        -3.0
       ]
     },
     {
@@ -133,7 +133,7 @@
   "buffers": [
     {
       "byteLength": 140,
-      "uri": "data:application/octet-stream;base64,AACAvwAAAAAAAIC/AACAPwAAAAAAAIC/AACAPwAAAAAAAIA/AACAvwAAAAAAAIA/AAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAgD8AAAEAAgAAAAIAAwA="
+      "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAEDAAACAPwAAgL8AAEDAAACAPwAAgD8AAEDAAACAvwAAgD8AAEDAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAgD8AAAEAAgAAAAIAAwA="
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "asset": {
     "version": "2.0",
-    "generator": "MatForge Test Generator"
+    "generator": "MatForge Simple Test"
   },
   "extensionsUsed": [
     "KHR_materials_displacement"
@@ -17,12 +17,12 @@
   "nodes": [
     {
       "mesh": 0,
-      "name": "DisplacedPlane"
+      "name": "SimpleDisplacedPlane"
     }
   ],
   "meshes": [
     {
-      "name": "Plane",
+      "name": "SimplePlane",
       "primitives": [
         {
           "attributes": {
@@ -38,16 +38,16 @@
   ],
   "materials": [
     {
-      "name": "DisplacedMaterial",
+      "name": "SimpleDisplacedMaterial",
       "pbrMetallicRoughness": {
         "baseColorFactor": [
-          0.8,
-          0.8,
-          0.8,
+          0.0,
+          1.0,
+          0.0,
           1.0
         ],
         "metallicFactor": 0.0,
-        "roughnessFactor": 0.5
+        "roughnessFactor": 0.8
       },
       "extensions": {
         "KHR_materials_displacement": {
@@ -55,7 +55,7 @@
             "index": 0,
             "texCoord": 0
           },
-          "displacementGeometryFactor": 0.1,
+          "displacementGeometryFactor": 0.5,
           "displacementGeometryOffset": 0.0
         }
       }
@@ -68,7 +68,7 @@
   ],
   "images": [
     {
-      "uri": "displacement_512.png",
+      "uri": "displacement_simple_128.png",
       "mimeType": "image/png"
     }
   ],
@@ -79,14 +79,14 @@
       "count": 4,
       "type": "VEC3",
       "min": [
-        -1,
-        0,
-        -1
+        -2,
+        -2,
+        -5.0
       ],
       "max": [
-        1,
-        0,
-        1
+        2,
+        2,
+        -5.0
       ]
     },
     {
@@ -133,7 +133,7 @@
   "buffers": [
     {
       "byteLength": 140,
-      "uri": "data:application/octet-stream;base64,AACAvwAAAAAAAIC/AACAPwAAAAAAAIC/AACAPwAAAAAAAIA/AACAvwAAAAAAAIA/AAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAgD8AAAEAAgAAAAIAAwA="
+      "uri": "data:application/octet-stream;base64,AAAAwAAAAMAAAKDAAAAAQAAAAMAAAKDAAAAAQAAAAEAAAKDAAAAAwAAAAEAAAKDAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAgD8AAAEAAgAAAAIAAwA="
     }
   ]
 }
