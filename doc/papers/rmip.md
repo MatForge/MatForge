@@ -207,6 +207,8 @@ den of accelerating the ray tracing of highly detailed geometry has
 
 SA Conference Papers ’23, December 12–15, 2023, Sydney, NSW, Australia
 
+![1764373133659](image/rmip/1764373133659.png)
+
 Figure 2: Overview of our method. (a) The input is a triangle mesh and a displacement map. (b) We first pre-process the map
 into our novel RMIP data structure that stores minmax displacement bounds over rectangular regions in texture space. (c) Once
 the displacement is mapped onto the triangle mesh according to the displacement parameters, a tight bounding prism for the
@@ -295,6 +297,26 @@ Algorithm 1: Pseudo-code of our displacement intersection
 algorithm which iteratively tightens ray bounds in both 2D
 texture space and 3D object space, using our RMIP structure.
 
+1: function IntersectRMIP(𝑟𝑎𝑦, 𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒, 𝑝𝑟𝑖𝑠𝑚, 𝑟𝑚𝑖𝑝)
+2: 𝑝𝑜𝑖𝑛𝑡𝑠 = sort(intersect(𝑟𝑎𝑦, 𝑝𝑟𝑖𝑠𝑚) )
+3: 𝑏𝑜𝑢𝑛𝑑𝑠 = inverse displacement(𝑝𝑜𝑖𝑛𝑡𝑠, 𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒 ) ← Section 4.1
+4: 𝑡𝑢𝑟𝑛𝑖𝑛𝑔 𝑝𝑜𝑖𝑛𝑡𝑠 = zero 𝑢𝑣 derivative(𝑟𝑎𝑦, 𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒 ) ← Section 4.2
+5: 𝑏𝑜𝑢𝑛𝑑𝑠 = split(𝑏𝑜𝑢𝑛𝑑𝑠, 𝑡𝑢𝑟𝑛𝑖𝑛𝑔 𝑝𝑜𝑖𝑛𝑡𝑠 ) ← Section 4.2
+6: while 𝑏𝑜𝑢𝑛𝑑𝑠 is not empty do ← Stack of 2D ray bounds
+7: 𝑏𝑜𝑢𝑛𝑑 = 𝑏𝑜𝑢𝑛𝑑𝑠.pop( )
+8: if 𝑏𝑜𝑢𝑛𝑑 is smaller than𝑚𝑎𝑟𝑐ℎ𝑖𝑛𝑔 𝑠𝑐𝑎𝑙𝑒 then
+9: for 𝑡𝑒𝑥𝑒𝑙 in texel marching(𝑏𝑜𝑢𝑛𝑑) do ← Section 4.3
+10: if ℎ𝑖𝑡 = displaced surface intersect(𝑟𝑎𝑦, 𝑡𝑒𝑥𝑒𝑙 ) then
+11: return ℎ𝑖𝑡 ← Front-to-back traversal, terminate on first hit
+12: 𝑏𝑜𝑥 = surface bounds(𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒,𝑏𝑜𝑢𝑛𝑑, 𝑟𝑚𝑖𝑝) ← Section 5
+13: if not ℎ𝑖𝑡𝑠 = intersect(𝑟𝑎𝑦,𝑏𝑜𝑥 ) then
+14: continue
+15: 𝑏𝑜𝑢𝑛𝑑 = reduce(𝑏𝑜𝑢𝑛𝑑,ℎ𝑖𝑡𝑠 ) ← Section 4.3
+16: for 𝑓 𝑟𝑜𝑛𝑡,𝑏𝑎𝑐𝑘 in split(𝑏𝑜𝑢𝑛𝑑) do ← Section 4.3
+17: 𝑏𝑜𝑢𝑛𝑑𝑠.push(𝑏𝑎𝑐𝑘, 𝑓 𝑟𝑜𝑛𝑡 ) ← Back first so front is pop earlier
+
+![1764373156186](image/rmip/1764373156186.png)
+
 Figure 3: Overview of our traversal algorithm which ping-
 pongs between 2D and 3D to iteratively tighten the ray inter-
 val of potential intersection. (a) For a given initial bound (1)
@@ -345,55 +367,6 @@ the 3D ray-intersection intervals and subdividing the rectangles
 that bound them (Fig. 3b). When the current 2D bound becomes
 small enough, we switch to marching along the displacement texels
 it spans, locally reconstructing the displaced 3D surface for each
-
-𝑝𝑜𝑖𝑛𝑡𝑠 = sort(intersect(𝑟𝑎𝑦, 𝑝𝑟𝑖𝑠𝑚) )
-𝑏𝑜𝑢𝑛𝑑𝑠 = inverse displacement(𝑝𝑜𝑖𝑛𝑡𝑠, 𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒 ) ← Section 4.1
-𝑡𝑢𝑟𝑛𝑖𝑛𝑔 𝑝𝑜𝑖𝑛𝑡𝑠 = zero 𝑢𝑣 derivative(𝑟𝑎𝑦, 𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒 ) ← Section 4.2
-𝑏𝑜𝑢𝑛𝑑𝑠 = split(𝑏𝑜𝑢𝑛𝑑𝑠, 𝑡𝑢𝑟𝑛𝑖𝑛𝑔 𝑝𝑜𝑖𝑛𝑡𝑠 )
-← Section 4.2
-while 𝑏𝑜𝑢𝑛𝑑𝑠 is not empty do
-← Stack of 2D ray bounds
-𝑏𝑜𝑢𝑛𝑑 = 𝑏𝑜𝑢𝑛𝑑𝑠.pop()
-if 𝑏𝑜𝑢𝑛𝑑 is smaller than 𝑚𝑎𝑟𝑐ℎ𝑖𝑛𝑔 𝑠𝑐𝑎𝑙𝑒 then
-for 𝑡𝑒𝑥𝑒𝑙 in texel marching(𝑏𝑜𝑢𝑛𝑑) do
-
-1: function IntersectRMIP(𝑟𝑎𝑦, 𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒, 𝑝𝑟𝑖𝑠𝑚, 𝑟𝑚𝑖𝑝)
-2:
-3:
-4:
-5:
-6:
-7:
-8:
-9:
-10:
-11:
-12:
-13:
-14:
-15:
-16:
-17:
-
-← Section 4.3
-← Section 4.3
-𝑏𝑜𝑢𝑛𝑑𝑠.push(𝑏𝑎𝑐𝑘, 𝑓 𝑟𝑜𝑛𝑡 ) ← Back first so front is pop earlier
-
-return ℎ𝑖𝑡 ← Front-to-back traversal, terminate on first hit
-← Section 5
-
-𝑏𝑜𝑥 = surface bounds(𝑡𝑟𝑖𝑎𝑛𝑔𝑙𝑒, 𝑏𝑜𝑢𝑛𝑑, 𝑟𝑚𝑖𝑝 )
-if not ℎ𝑖𝑡𝑠 = intersect(𝑟𝑎𝑦, 𝑏𝑜𝑥 ) then
-
-𝑏𝑜𝑢𝑛𝑑 = reduce(𝑏𝑜𝑢𝑛𝑑, ℎ𝑖𝑡𝑠 )
-for 𝑓 𝑟𝑜𝑛𝑡, 𝑏𝑎𝑐𝑘 in split(𝑏𝑜𝑢𝑛𝑑 ) do
-
-if ℎ𝑖𝑡 = displaced surface intersect(𝑟𝑎𝑦, 𝑡𝑒𝑥𝑒𝑙) then
-
-← Section 4.3
-
-continue
-
 texel and testing it for intersections. Unlike TFDM [Thonat et al.
 2021], thanks to traversing in a front-to-back manner along the ray,
 we can terminate as soon as we find an intersection.
@@ -434,6 +407,8 @@ crossed by the ray.
 
 SA Conference Papers ’23, December 12–15, 2023, Sydney, NSW, Australia
 
+![1764373226575](image/rmip/1764373226575.png)
+
 Figure 4: Number of steps required for projecting 3D points
 onto a base triangle by numerically inverting Eq. (2) (lower
 is better), visualized here in false color for 3D locations on
@@ -446,21 +421,15 @@ are guaranteed to fall inside the triangle (see Section 4.1).
 A triangle with linearly interpolated positions P(𝑢, 𝑣) and normals
 N(𝑢, 𝑣) at texture coordinates 𝑢𝑣 maps texture space to a 3D surface
 
-S(𝑢, 𝑣) = P(𝑢, 𝑣) + ℎ(𝑢, 𝑣)
-
-N(𝑢, 𝑣)
-∥N(𝑢, 𝑣)∥
-
-(1)
+![1764373248355](image/rmip/1764373248355.png)
 
 which is a result of displacing P by an amount ℎ in the direction N.
 The displacement lines are depicted in Fig. 3a. Projecting a point
 O + 𝑡D at distance 𝑡 along a ray with origin O and direction D into
 texture space requires inverting this mapping. That is, we look for
 the 𝑢𝑣 coordinates whose displacement line intersects the point:
-(P(𝑢, 𝑣) − (O + 𝑡D)) × N(𝑢, 𝑣) = 0.
 
-(2)
+(P(𝑢, 𝑣) − (O + 𝑡D)) × N(𝑢, 𝑣) = 0.   (2)
 
 Note that this is a vector equation. In the context of shell mapping,
 Jeschke et al. [2007] provided an analytic inverse of it, as a (scalar)
@@ -488,9 +457,9 @@ a simple implicit form, allowing us to retrieve those points using
 closed-form computations. That form is derived by transforming
 Eq. (2) to remove its dependency on the ray parameter 𝑡:
 
-𝜓 (𝑢, 𝑣) = det (P(𝑢, 𝑣) − O, N(𝑢, 𝑣), D) = 0.
+𝜓 (𝑢, 𝑣) = det (P(𝑢, 𝑣) − O, N(𝑢, 𝑣), D) = 0. (3)
 
-(3)
+![1764373292221](image/rmip/1764373292221.png)
 
 Figure 5: Our traversal narrows down the search along the
 ray by tightening its 2D bound in two ways. (a) Projecting the
@@ -504,20 +473,8 @@ it is faster, culls half the bound area, yields a more balanced
 traversal, and bounds the number of traversal steps.
 
 This is a quadric in texture space with partial derivatives
-(cid:21)
-(cid:20)det (P𝑢, N(𝑢, 𝑣), D) + det (P(𝑢, 𝑣) − O, N𝑢, D)
-det (P𝑣, N(𝑢, 𝑣), D) + det (P(𝑢, 𝑣) − O, N𝑣, D)
 
-(cid:20)𝜓𝑢
-𝜓𝑣
-
-=
-
-(cid:21)
-
-,
-
-(4)
+![1764373303872](image/rmip/1764373303872.png)
 
 where P𝑢 , P𝑣, N𝑢 , and N𝑣, are the partial derivatives of the interpo-
 lated base position and normal—all constant inside a base triangle.
@@ -528,6 +485,8 @@ those two lines, which boils down to solving
 two quadratic equations. This yields at most
 four such points, meaning at most four subdivisions of the initial
 interval. In practice we never end up subdividing more than once.
+
+![1764373315170](image/rmip/1764373315170.png)
 
 4.3 Ray-bound tightening
 The goal of the traversal is to tighten the ray bound until it is small
@@ -578,6 +537,8 @@ corner indicates from which edge the
 ray leaves the texel, as illustrated in
 the inline figure on the right.
 
+![1764373332482](image/rmip/1764373332482.png)
+
 We identify two reasons why switching to direct intersection
 earlier is more efficient. Firstly, our 2D bounds are arbitrary rectan-
 gles that are not aligned with the texels of the displacement map.
@@ -615,6 +576,8 @@ are known [Yuan and Atallah 2010], but the amount of intermedi-
 ate data structures and indirections required for a query make the
 practicality of an implementation unclear for real time rendering.
 
+![1764373345721](image/rmip/1764373345721.png)
+
 Figure 6: Layout of our RMIP structure as a 2D texture with
 multiple layers (columns) and mip levels (rows). Each pixel
 of every sub-texture represents the top-left corner of a query
@@ -640,34 +603,13 @@ by 𝐻 𝑝,𝑞
 𝑥,𝑦 the precomputed minmax query with size (2𝑝, 2𝑞) and
 position (𝑥, 𝑦). The query for a rectangle with arbitrary size (𝑤, ℎ)
 and top-left position (𝑥, 𝑦) is the minmax of four 𝐻 values:
-(cid:17)
-(cid:16)
-𝑥,𝑦, 𝐻 𝑝,𝑞
-𝐻 𝑝,𝑞
 
-𝑅𝑀𝑄 (𝑥, 𝑦, 𝑤, ℎ) = minmax
-
-𝑚𝑥 ,𝑦, 𝐻 𝑝,𝑞
-
-, 𝐻 𝑝,𝑞
-𝑥,𝑚𝑦
-
-𝑚𝑥 ,𝑚𝑦
-
-(5)
-
-,
+![1764373359771](image/rmip/1764373359771.png)
 
 where
 
-(𝑝, 𝑞) = ⌊log2 (𝑤, ℎ)⌋,
-(𝑚𝑥 , 𝑚𝑦) = (𝑥, 𝑦) + (𝑤, ℎ) − (2
+![1764373383240](image/rmip/1764373383240.png)
 
-𝑝, 2
-
-𝑞).
-
-𝑁 )2 possible query
 We have (1 + log2
 sizes, and for each we have 𝑁 2 possible
 𝑁 )2
@@ -695,40 +637,17 @@ structure, for a given 𝑢𝑣 rectangle and a (possibly fractional)
 level of detail (LoD) 𝜆.
 
 1: function RMIP_RMQ(𝑢𝑣min, 𝑢𝑣max, 𝜆, 𝑟𝑚𝑖𝑝)
-2:
-3:
-4:
-5:
-6:
-7:
-8:
-9:
-10:
-11:
-12:
-
-𝑟 = textureSize(𝑟𝑚𝑖𝑝, 0)
-𝑝min = ⌊𝑢𝑣min · 𝑟 ⌋, 𝑝max = ⌈𝑢𝑣max · 𝑟 ⌉
-𝑠 = ⌊log2 (𝑝max − 𝑝min ) ⌋
-𝑖 = 𝑠.𝑥 + 𝑠.𝑦 · rmip array stride
-𝑢𝑣min = (𝑝min + 0.5) / 𝑟
-𝑢𝑣mid = (𝑝max + 0.5 − 2𝑠 ) / 𝑟
-𝑏1 = textureLoD(𝑟𝑚𝑖𝑝, 𝑢min, 𝑣min, 𝑖, 𝜆)
-𝑏2 = textureLoD(𝑟𝑚𝑖𝑝, 𝑢mid, 𝑣min, 𝑖, 𝜆)
-𝑏3 = textureLoD(𝑟𝑚𝑖𝑝, 𝑢min, 𝑣mid, 𝑖, 𝜆)
-𝑏4 = textureLoD(𝑟𝑚𝑖𝑝, 𝑢mid, 𝑣mid, 𝑖, 𝜆)
-return minmax(𝑏1, 𝑏2, 𝑏3, 𝑏4 )
-
-← RMIP resolution at LoD 0
-← Query pixel corners
-← Query log size in pixels
-← RMIP texture array layer index
-← Adjust to pixel center
-← Bottom-left sub-query’s top right
-← Top-left sub-query
-← Top-right sub-query
-← Bottom-left sub-query
-← Bottom-right sub-query
+2: 𝑟 = textureSize(𝑟𝑚𝑖𝑝, 0) ← RMIP resolution at LoD 0
+3: 𝑝min = ⌊𝑢𝑣min · 𝑟 ⌋, 𝑝max = ⌈𝑢𝑣max · 𝑟 ⌉ ← Query pixel corners
+4: 𝑠 = ⌊log2 (𝑝max − 𝑝min ) ⌋ ← Query log size in pixels
+5: 𝑖 = 𝑠.𝑥 + 𝑠.𝑦 · rmip array stride ← RMIP texture array layer index
+6: 𝑢𝑣min = (𝑝min + 0.5) / 𝑟 ← Adjust to pixel center
+7: 𝑢𝑣mid = (𝑝max + 0.5 − 2𝑠 ) / 𝑟 ← Bottom-left sub-query’s top right
+8: 𝑏1 = textureLoD(𝑟𝑚𝑖𝑝,𝑢min, 𝑣min, 𝑖, 𝜆) ← Top-left sub-query
+9: 𝑏2 = textureLoD(𝑟𝑚𝑖𝑝,𝑢mid, 𝑣min, 𝑖, 𝜆) ← Top-right sub-query
+10: 𝑏3 = textureLoD(𝑟𝑚𝑖𝑝,𝑢min, 𝑣mid, 𝑖, 𝜆) ← Bottom-left sub-query
+11: 𝑏4 = textureLoD(𝑟𝑚𝑖𝑝,𝑢mid, 𝑣mid, 𝑖, 𝜆) ← Bottom-right sub-query
+12: return minmax(𝑏1,𝑏2,𝑏3,𝑏4 )
 
 For micro-structure rendering, Wang et al. [2020] proposed a
 similar data structure, also based on that of Amir et al. [2007]. Our
