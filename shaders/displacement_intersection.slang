@@ -97,25 +97,64 @@ struct RayBound2D
 // This is a simplified version that uses barycentric interpolation
 // For more accuracy, Newton iteration could be used
 //-----------------------------------------------------------------------
-float2 invertDisplacement(float3 worldPoint, 
+// Displacement Inversion (Equation 2 from RMIP paper)
+// Solves: (P(u,v) - worldPoint) × N(u,v) = 0
+// This finds the UV coordinates that project to the given world point
+//-----------------------------------------------------------------------
+float2 invertDisplacement(float3 worldPoint,
                           float3 v0, float3 v1, float3 v2,  // Triangle vertices
                           float2 uv0, float2 uv1, float2 uv2, // Triangle UVs
-                          float3 n0, float3 n1, float3 n2)    // Vertex normals
+                          float3 n0, float3 n1, float3 n2,    // Vertex normals
+                          uint materialIndex = 0,
+                          bool useDisplacement = false)
 {
-    
     // Start with barycentric coordinates of the point projected onto base triangle
     float3 bary = computeBarycentrics(worldPoint, v0, v1, v2);
-    
+
     // Clamp to valid barycentric range
     bary = max(float3(0), min(float3(1), bary));
     float sum = bary.x + bary.y + bary.z;
     if(sum > 0.001)
         bary /= sum;
-    
+
     // Convert barycentric to UV
     float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
-    
-    return clamp(uv, 0.0, 1.0);
+    uv = clamp(uv, 0.0, 1.0);
+
+    // If not using displacement, return the base projection
+    if (!useDisplacement)
+        return uv;
+
+    // Iterative refinement using Newton-Raphson (3-5 iterations typically enough)
+    const int MAX_ITERATIONS = 5;
+    for (int iter = 0; iter < MAX_ITERATIONS; iter++)
+    {
+        // Get current displaced surface position at UV
+        float3 baryUV = uvToBarycentric(uv, uv0, uv1, uv2);
+        float3 basePos = baryUV.x * v0 + baryUV.y * v1 + baryUV.z * v2;
+        float3 normal = normalize(baryUV.x * n0 + baryUV.y * n1 + baryUV.z * n2);
+
+        float displacement = displacementMaps[materialIndex].SampleLevel(displacementSampler, uv, 0).r * DISPLACEMENT_SCALE;
+        float3 displacedPos = basePos + normal * displacement;
+
+        // Compute error: how far are we from the target?
+        float3 error = displacedPos - worldPoint;
+
+        // If error is small enough, we're done
+        if (length(error) < 0.0001)
+            break;
+
+        // Project error back to UV space and adjust
+        // This is a simplified update - full Newton would compute Jacobian
+        float3 errorProj = error - dot(error, normal) * normal;  // Project to tangent plane
+        float2 uvDelta = float2(dot(errorProj, v1 - v0), dot(errorProj, v2 - v0));
+        uvDelta *= 0.1;  // Damping factor for stability
+
+        uv -= uvDelta;
+        uv = clamp(uv, 0.0, 1.0);
+    }
+
+    return uv;
 }
 
 //-----------------------------------------------------------------------
@@ -411,24 +450,33 @@ uint packUV(float2 uv)
 //-----------------------------------------------------------------------
 // Implicit form ψ(u,v) = det(P(u,v) - O, N(u,v), D) from Equation (3)
 // This represents the ray's projection in texture space
+// P(u,v) is the DISPLACED surface position, N(u,v) is the surface normal
 //-----------------------------------------------------------------------
 float evaluateImplicitForm(float2 uv,
                           float3 rayOrigin, float3 rayDir,
                           float3 v0, float3 v1, float3 v2,
                           float2 uv0, float2 uv1, float2 uv2,
-                          float3 n0, float3 n1, float3 n2)
+                          float3 n0, float3 n1, float3 n2,
+                          uint materialIndex)
 {
-    // Interpolate base position P(u,v)
-    float3 P = interpolateTriangle(uv, v0, v1, v2, uv0, uv1, uv2);
+    // Get barycentric coordinates for this UV
+    float3 bary = uvToBarycentric(uv, uv0, uv1, uv2);
 
-    // Interpolate normal N(u,v)
-    float3 N = interpolateTriangle(uv, n0, n1, n2, uv0, uv1, uv2);
+    // Interpolate base position and normal
+    float3 basePos = bary.x * v0 + bary.y * v1 + bary.z * v2;
+    float3 normal = normalize(bary.x * n0 + bary.y * n1 + bary.z * n2);
+
+    // Sample displacement and compute displaced position
+    float displacement = displacementMaps[materialIndex].SampleLevel(displacementSampler, uv, 0).r * DISPLACEMENT_SCALE;
+    float3 P = basePos + normal * displacement;  // DISPLACED position
 
     // Compute ψ(u,v) = det(P - O, N, D)
+    // For heightfield displacement, we use the base normal as approximation
+    // (Full RMIP would compute gradient of displacement for true surface normal)
     float3 PminusO = P - rayOrigin;
 
-    // Determinant is the scalar triple product
-    return dot(cross(PminusO, N), rayDir);
+    // Determinant is the scalar triple product: (P-O) · (N × D)
+    return dot(cross(PminusO, normal), rayDir);
 }
 
 //-----------------------------------------------------------------------
@@ -462,8 +510,8 @@ bool rayMarchDisplacement(float3 rayOrigin, float3 rayDir,
         // Current point along the ray
         float3 rayPoint = rayOrigin + rayDir * t;
 
-        // Invert to texture space
-        float2 uv = invertDisplacement(rayPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
+        // Invert to texture space (with displacement-aware inversion)
+        float2 uv = invertDisplacement(rayPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2, materialIndex, true);
 
         // Check if UV is within valid range
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
@@ -495,7 +543,7 @@ bool rayMarchDisplacement(float3 rayOrigin, float3 rayDir,
             {
                 float prevT = t - stepSize;
                 float3 prevPoint = rayOrigin + rayDir * prevT;
-                float2 prevUV = invertDisplacement(prevPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2);
+                float2 prevUV = invertDisplacement(prevPoint, v0, v1, v2, uv0, uv1, uv2, n0, n1, n2, materialIndex, true);
 
                 if (prevUV.x >= 0.0 && prevUV.x <= 1.0 && prevUV.y >= 0.0 && prevUV.y <= 1.0)
                 {
@@ -601,14 +649,18 @@ void intersectionMain()
     float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 1.0, 0.0));
     float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0.0, 0.0, 1.0));
 
-    // Step 1: Intersect ray with base triangle (Möller-Trumbore)
+    // DEBUG: Simplified approach to verify the pipeline works
+    // Just do ray-triangle intersection on base triangle
+
+    // Ray-triangle intersection using Möller–Trumbore algorithm
     float3 edge1 = v1 - v0;
     float3 edge2 = v2 - v0;
     float3 h = cross(rayDir, edge2);
     float a = dot(edge1, h);
 
-    if (abs(a) < 0.00001)
-        return; // Ray parallel to triangle
+    // Check if ray is parallel to triangle
+    if (abs(a) < 1e-8)
+        return;
 
     float f = 1.0 / a;
     float3 s = rayOrigin - v0;
@@ -623,41 +675,41 @@ void intersectionMain()
     if (v < 0.0 || u + v > 1.0)
         return;
 
-    float tBase = f * dot(edge2, q);
+    float t = f * dot(edge2, q);
 
-    if (tBase < rayTMin || tBase > rayTMax)
+    if (t < rayTMin || t > rayTMax)
         return;
 
-    // Step 2: Compute barycentric coordinates and UV
+    // We hit the base triangle at barycentric coords (1-u-v, u, v)
     float w = 1.0 - u - v;
+
+    // Get UV coordinates at hit point
     float2 hitUV = w * uv0 + u * uv1 + v * uv2;
 
-    // Step 3: Get interpolated normal at hit point
+    // Get normal at hit point
     float3 hitNormal = normalize(w * n0 + u * n1 + v * n2);
 
-    // Step 4: Sample displacement at this UV
-    float displacement = displacementMaps[materialIndex].SampleLevel(displacementSampler, hitUV, 0).r * DISPLACEMENT_SCALE;
+    // Sample displacement
+    float disp = displacementMaps[materialIndex].SampleLevel(displacementSampler, hitUV, 0).r;
+    disp *= DISPLACEMENT_SCALE;
 
-    // Step 5: Compute base hit position
-    float3 baseHitPos = rayOrigin + rayDir * tBase;
+    // Adjust hit distance along normal direction
+    // The displaced surface moves along the normal, so we need to recompute t
+    float3 baseHitPos = rayOrigin + rayDir * t;
+    float3 displacedHitPos = baseHitPos + hitNormal * disp;
 
-    // Step 6: Compute displaced surface position
-    float3 displacedHitPos = baseHitPos + hitNormal * displacement;
+    // Recompute t for displaced position
+    // Project displaced position back onto ray
+    float3 toDisplaced = displacedHitPos - rayOrigin;
+    float newT = dot(toDisplaced, rayDir);
 
-    // Step 7: Compute corrected t value for displaced surface
-    // Project the displacement onto the ray direction
-    float3 displacementVec = displacedHitPos - baseHitPos;
-    float tDisplacementOffset = dot(displacementVec, rayDir);
-    float tFinal = tBase + tDisplacementOffset;
-
-    // Step 8: Verify the corrected t is within valid range
-    if (tFinal >= rayTMin && tFinal <= rayTMax)
+    if (newT >= rayTMin && newT <= rayTMax)
     {
-        // Pack UV and report hit
         uint packedUV = packUV(hitUV);
         float2 hitAttribs = float2(asfloat(packedUV), 0.0);
-        ReportHit(tFinal, 0, hitAttribs);
+        ReportHit(newT, 0, hitAttribs);
     }
+
 }
 
 //-----------------------------------------------------------------------
