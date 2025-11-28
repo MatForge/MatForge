@@ -1,17 +1,8 @@
 /*
- * RMIP Displacement Mapping - CORRECT NORMAL VERSION
+ * RMIP Displacement Mapping - ENTRY-ONLY FIX
  * 
- * BUG FOUND: The geometric normal from cross(v1-v0, v2-v0) can point
- * in the OPPOSITE direction from the vertex normals!
- * 
- * For the test plane:
- * - Vertex normals: (0, 1, 0) pointing UP
- * - Geometric normal from cross: (0, -1, 0) pointing DOWN
- * 
- * This inverts all height calculations!
- * 
- * FIX: Use the average of vertex normals as the reference direction,
- * not the cross product.
+ * Only accepts hits where the ray crosses from ABOVE the surface to BELOW.
+ * This ensures we're hitting the TOP of the displaced surface, not the bottom.
  */
 
 #include "shaderio.h"
@@ -20,12 +11,10 @@
 #include "nvshaders/constants.h.slang"
 #include "rmip_common.h.slang"
 
-// Configuration
 static const float DISPLACEMENT_SCALE = 0.5;
 static const int NUM_MARCH_STEPS = 64;
 static const int BISECTION_STEPS = 6;
 
-// Bindings
 [[vk::binding(8, 1)]] Texture2DArray<float2> rmipTextures[8];
 [[vk::binding(9, 1)]] Texture2D<float> displacementMaps[8];
 [[vk::binding(10, 1)]] SamplerState rmipSampler;
@@ -37,30 +26,6 @@ uint packUV(float2 uv)
     uint x = uint(saturate(uv.x) * 65535.0);
     uint y = uint(saturate(uv.y) * 65535.0);
     return (x << 16) | y;
-}
-
-float3 projectToBasePlane(float3 P, float3 v0, float3 v1, float3 v2, float3 planeNormal, float planeD)
-{
-    float3 e0 = v1 - v0;
-    float3 e1 = v2 - v0;
-    
-    float h = dot(P, planeNormal) - planeD;
-    float3 projP = P - planeNormal * h;
-    
-    float3 e2 = projP - v0;
-    float d00 = dot(e0, e0);
-    float d01 = dot(e0, e1);
-    float d11 = dot(e1, e1);
-    float d20 = dot(e2, e0);
-    float d21 = dot(e2, e1);
-    
-    float denom = d00 * d11 - d01 * d01;
-    if (abs(denom) < 1e-10)
-        return float3(-1, -1, -1);
-    
-    float v = (d11 * d20 - d01 * d21) / denom;
-    float w = (d00 * d21 - d01 * d20) / denom;
-    return float3(1.0 - v - w, v, w);
 }
 
 float3 clampBary(float3 bary)
@@ -83,6 +48,89 @@ bool rayAABBHit(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax,
     tFar = min(min(tMax.x, tMax.y), tMax.z);
     
     return tNear <= tFar && tFar > 0;
+}
+
+// Sample the displaced surface at a point and return signed distance
+// Positive = point is above surface (on normal side)
+// Negative = point is below surface
+float sampleSurface(
+    float3 P,
+    float3 v0, float3 v1, float3 v2,
+    float3 n0, float3 n1, float3 n2,
+    float2 uv0, float2 uv1, float2 uv2,
+    uint matIdx,
+    out float2 outUV,
+    out float3 outSurfacePos,
+    out bool valid)
+{
+    // Project P onto base triangle plane using edge vectors
+    float3 e0 = v1 - v0;
+    float3 e1 = v2 - v0;
+    float3 triNormal = normalize(cross(e0, e1));
+    
+    // Average vertex normal (this is the "up" direction for displacement)
+    float3 avgNormal = normalize(n0 + n1 + n2);
+    
+    // If geometric and vertex normals point opposite ways, flip geometric
+    if (dot(triNormal, avgNormal) < 0)
+        triNormal = -triNormal;
+    
+    // Project P to base plane
+    float3 centroid = (v0 + v1 + v2) / 3.0;
+    float heightAbovePlane = dot(P - centroid, triNormal);
+    float3 projP = P - triNormal * heightAbovePlane;
+    
+    // Compute barycentric coordinates
+    float3 e2 = projP - v0;
+    float d00 = dot(e0, e0);
+    float d01 = dot(e0, e1);
+    float d11 = dot(e1, e1);
+    float d20 = dot(e2, e0);
+    float d21 = dot(e2, e1);
+    
+    float denom = d00 * d11 - d01 * d01;
+    if (abs(denom) < 1e-10)
+    {
+        valid = false;
+        outUV = float2(0);
+        outSurfacePos = float3(0);
+        return 0;
+    }
+    
+    float bv = (d11 * d20 - d01 * d21) / denom;
+    float bw = (d00 * d21 - d01 * d20) / denom;
+    float bu = 1.0 - bv - bw;
+    float3 bary = float3(bu, bv, bw);
+    
+    // Check bounds
+    if (bary.x < -0.2 || bary.y < -0.2 || bary.z < -0.2)
+    {
+        valid = false;
+        outUV = float2(0);
+        outSurfacePos = float3(0);
+        return 0;
+    }
+    
+    bary = clampBary(bary);
+    
+    // Interpolate UV
+    outUV = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+    outUV = saturate(outUV);
+    
+    // Sample displacement
+    float disp = displacementMaps[matIdx].SampleLevel(displacementSampler, outUV, 0).r;
+    disp *= DISPLACEMENT_SCALE;
+    
+    // Compute displaced surface position
+    float3 basePos = bary.x * v0 + bary.y * v1 + bary.z * v2;
+    float3 normal = normalize(bary.x * n0 + bary.y * n1 + bary.z * n2);
+    outSurfacePos = basePos + normal * disp;
+    
+    // Signed distance: positive = P is above surface
+    float signedDist = dot(P - outSurfacePos, normal);
+    
+    valid = true;
+    return signedDist;
 }
 
 [shader("intersection")]
@@ -128,19 +176,6 @@ void intersectionMain()
     float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0, 1, 0));
     float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, indices, float3(0, 0, 1));
 
-    // =========================================================================
-    // KEY FIX: Use VERTEX NORMALS to define the "up" direction for the plane
-    // The geometric normal from cross product may point the wrong way!
-    // =========================================================================
-    float3 avgVertexNormal = normalize(n0 + n1 + n2);
-    
-    // Use this as the plane normal (displacement goes in this direction)
-    float3 planeNormal = avgVertexNormal;
-    
-    // Compute plane D using centroid
-    float3 centroid = (v0 + v1 + v2) / 3.0;
-    float planeD = dot(centroid, planeNormal);
-
     // Build AABB
     float3 v0d = v0 + n0 * DISPLACEMENT_SCALE;
     float3 v1d = v1 + n1 * DISPLACEMENT_SCALE;
@@ -160,36 +195,18 @@ void intersectionMain()
     tFar = min(tFar, rayTMax);
     if (tNear >= tFar) return;
 
-    // =========================================================================
-    // March along ray
-    // diff = heightP - disp
-    //   heightP = distance from P to base plane in normal direction
-    //   disp = sampled displacement value
-    //   diff > 0: P is above displaced surface
-    //   diff < 0: P is below displaced surface
-    // =========================================================================
-    
+    // March
     float stepSize = (tFar - tNear) / float(NUM_MARCH_STEPS);
     
-    float prevDiff = 0;
+    float prevDist = 0;
     float prevT = tNear;
     bool prevValid = false;
     
-    // First sample
     {
         float3 P = rayOrigin + rayDir * tNear;
-        float heightP = dot(P, planeNormal) - planeD;
-        
-        float3 bary = projectToBasePlane(P, v0, v1, v2, planeNormal, planeD);
-        if (bary.x >= -0.3 && bary.y >= -0.3 && bary.z >= -0.3)
-        {
-            bary = clampBary(bary);
-            float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
-            uv = saturate(uv);
-            float disp = displacementMaps[matIdx].SampleLevel(displacementSampler, uv, 0).r * DISPLACEMENT_SCALE;
-            prevDiff = heightP - disp;
-            prevValid = true;
-        }
+        float2 uv;
+        float3 surfPos;
+        prevDist = sampleSurface(P, v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, matIdx, uv, surfPos, prevValid);
     }
     
     for (int i = 1; i <= NUM_MARCH_STEPS; i++)
@@ -198,25 +215,21 @@ void intersectionMain()
         if (t > tFar) break;
         
         float3 P = rayOrigin + rayDir * t;
-        float heightP = dot(P, planeNormal) - planeD;
+        float2 currUV;
+        float3 currSurfPos;
+        bool currValid;
+        float currDist = sampleSurface(P, v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, matIdx, currUV, currSurfPos, currValid);
         
-        float3 bary = projectToBasePlane(P, v0, v1, v2, planeNormal, planeD);
-        
-        if (bary.x < -0.3 || bary.y < -0.3 || bary.z < -0.3)
+        if (!currValid)
         {
             prevT = t;
             prevValid = false;
             continue;
         }
         
-        bary = clampBary(bary);
-        float2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
-        uv = saturate(uv);
-        float disp = displacementMaps[matIdx].SampleLevel(displacementSampler, uv, 0).r * DISPLACEMENT_SCALE;
-        float currDiff = heightP - disp;
-        
-        // Check for ANY sign change (entry or exit)
-        if (prevValid && prevDiff * currDiff < 0)
+        // ENTRY HIT ONLY: must go from POSITIVE (above) to NEGATIVE (below)
+        // Also accept zero crossings from positive side
+        if (prevValid && prevDist > 0 && currDist <= 0)
         {
             // Bisection refinement
             float tA = prevT;
@@ -226,48 +239,35 @@ void intersectionMain()
             {
                 float tMid = (tA + tB) * 0.5;
                 float3 PMid = rayOrigin + rayDir * tMid;
-                float heightMid = dot(PMid, planeNormal) - planeD;
+                float2 uvMid;
+                float3 surfMid;
+                bool validMid;
+                float distMid = sampleSurface(PMid, v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, matIdx, uvMid, surfMid, validMid);
                 
-                float3 baryMid = projectToBasePlane(PMid, v0, v1, v2, planeNormal, planeD);
-                baryMid = clampBary(baryMid);
-                float2 uvMid = baryMid.x * uv0 + baryMid.y * uv1 + baryMid.z * uv2;
-                uvMid = saturate(uvMid);
-                float dispMid = displacementMaps[matIdx].SampleLevel(displacementSampler, uvMid, 0).r * DISPLACEMENT_SCALE;
-                float diffMid = heightMid - dispMid;
-                
-                if (diffMid * prevDiff > 0)
+                if (distMid > 0)
                     tA = tMid;
                 else
                     tB = tMid;
             }
             
-            // Final hit
             float hitT = (tA + tB) * 0.5;
             float3 PHit = rayOrigin + rayDir * hitT;
+            float2 hitUV;
+            float3 hitSurfPos;
+            bool hitValid;
+            sampleSurface(PHit, v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, matIdx, hitUV, hitSurfPos, hitValid);
             
-            float3 baryHit = projectToBasePlane(PHit, v0, v1, v2, planeNormal, planeD);
-            baryHit = clampBary(baryHit);
-            
-            float2 hitUV = baryHit.x * uv0 + baryHit.y * uv1 + baryHit.z * uv2;
-            hitUV = saturate(hitUV);
-            
-            // Compute actual surface position
-            float3 basePos = baryHit.x * v0 + baryHit.y * v1 + baryHit.z * v2;
-            float3 normal = normalize(baryHit.x * n0 + baryHit.y * n1 + baryHit.z * n2);
-            float dispHit = displacementMaps[matIdx].SampleLevel(displacementSampler, hitUV, 0).r * DISPLACEMENT_SCALE;
-            float3 surfacePos = basePos + normal * dispHit;
-            
-            float finalT = dot(surfacePos - rayOrigin, rayDir);
+            float finalT = dot(hitSurfPos - rayOrigin, rayDir);
             
             if (finalT >= rayTMin && finalT <= rayTMax)
             {
                 ReportHit(finalT, 0, float2(asfloat(packUV(hitUV)), 0.0));
-                return;  // First hit only
+                return;
             }
         }
         
-        prevDiff = currDiff;
+        prevDist = currDist;
         prevT = t;
-        prevValid = true;
+        prevValid = currValid;
     }
 }
