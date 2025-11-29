@@ -286,6 +286,83 @@ float2 psiGrad(Tri tri, float2 bary, float3 rayO, float3 rayD)
 }
 
 //=============================================================================
+// V8: Find turning points of ray projection curve in a barycentric region
+// Turning points are where ψ_u = 0 or ψ_v = 0 (curve changes direction)
+// These are critical for properly bounding the ray projection
+//=============================================================================
+void findTurningPointsInRegion(Tri tri, float2 baryMin, float2 baryMax,
+                                float3 rayO, float3 rayD,
+                                out float2 turningPts[4], out int numTurning)
+{
+    numTurning = 0;
+
+    // ψ_u and ψ_v are LINEAR functions in barycentric space
+    // Compute coefficients: ψ_u(u,v) = a_u + b_u*u + c_u*v
+    float2 grad00 = psiGrad(tri, float2(0, 0), rayO, rayD);
+    float2 grad10 = psiGrad(tri, float2(1, 0), rayO, rayD);
+    float2 grad01 = psiGrad(tri, float2(0, 1), rayO, rayD);
+
+    // Coefficients for ψ_u = a_u + b_u*u + c_u*v = 0
+    float a_u = grad00.x;
+    float b_u = grad10.x - grad00.x;
+    float c_u = grad01.x - grad00.x;
+
+    // Coefficients for ψ_v = a_v + b_v*u + c_v*v = 0
+    float a_v = grad00.y;
+    float b_v = grad10.y - grad00.y;
+    float c_v = grad01.y - grad00.y;
+
+    // Find where ψ_u = 0 line intersects the bounding region edges
+    // Line: a_u + b_u*u + c_u*v = 0, or v = -(a_u + b_u*u) / c_u
+    if (abs(c_u) > 1e-8)
+    {
+        // Check left edge (u = baryMin.x)
+        float v = -(a_u + b_u * baryMin.x) / c_u;
+        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
+            turningPts[numTurning++] = float2(baryMin.x, v);
+
+        // Check right edge (u = baryMax.x)
+        v = -(a_u + b_u * baryMax.x) / c_u;
+        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
+            turningPts[numTurning++] = float2(baryMax.x, v);
+    }
+    if (abs(b_u) > 1e-8)
+    {
+        // Check bottom edge (v = baryMin.y)
+        float u = -(a_u + c_u * baryMin.y) / b_u;
+        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
+            turningPts[numTurning++] = float2(u, baryMin.y);
+
+        // Check top edge (v = baryMax.y)
+        u = -(a_u + c_u * baryMax.y) / b_u;
+        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
+            turningPts[numTurning++] = float2(u, baryMax.y);
+    }
+
+    // Same for ψ_v = 0
+    if (abs(c_v) > 1e-8)
+    {
+        float v = -(a_v + b_v * baryMin.x) / c_v;
+        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
+            turningPts[numTurning++] = float2(baryMin.x, v);
+
+        v = -(a_v + b_v * baryMax.x) / c_v;
+        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
+            turningPts[numTurning++] = float2(baryMax.x, v);
+    }
+    if (abs(b_v) > 1e-8)
+    {
+        float u = -(a_v + c_v * baryMin.y) / b_v;
+        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
+            turningPts[numTurning++] = float2(u, baryMin.y);
+
+        u = -(a_v + c_v * baryMax.y) / b_v;
+        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
+            turningPts[numTurning++] = float2(u, baryMax.y);
+    }
+}
+
+//=============================================================================
 // Find ray parameter t for a point at barycentric coords with displacement h
 // Uses: Q = O + t*D, and Q lies on displacement line through (u,v)
 //=============================================================================
@@ -997,9 +1074,135 @@ bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// Main intersection shader - V7: Bound Reduction via Inverse Displacement
-// Implements Algorithm 1 with the key "ping-pong" feature (line 15)
-// After ray-AABB intersection, project hits back to 2D UV to tighten bounds
+// V9: Find global turning points on the ray projection curve within the triangle
+// These are points where ψ_u = 0 or ψ_v = 0 AND the point is ON the ray curve (ψ ≈ 0)
+// Returns UV coordinates of turning points for splitting initial bounds
+//=============================================================================
+void findGlobalTurningPoints(Tri tri, float3 rayO, float3 rayD,
+                              out float2 turningUVs[4], out int numTurning)
+{
+    numTurning = 0;
+
+    // ψ_u and ψ_v are LINEAR in barycentric space
+    // Compute coefficients at triangle corners
+    float2 grad00 = psiGrad(tri, float2(0, 0), rayO, rayD);
+    float2 grad10 = psiGrad(tri, float2(1, 0), rayO, rayD);
+    float2 grad01 = psiGrad(tri, float2(0, 1), rayO, rayD);
+
+    // ψ_u(u,v) = a_u + b_u*u + c_u*v = 0 defines a line
+    float a_u = grad00.x;
+    float b_u = grad10.x - grad00.x;
+    float c_u = grad01.x - grad00.x;
+
+    // ψ_v(u,v) = a_v + b_v*u + c_v*v = 0 defines another line
+    float a_v = grad00.y;
+    float b_v = grad10.y - grad00.y;
+    float c_v = grad01.y - grad00.y;
+
+    // Find where ψ_u = 0 line intersects the TRIANGLE edges (not just a rectangle)
+    // Triangle edges: u=0 (v∈[0,1]), v=0 (u∈[0,1]), u+v=1
+
+    // Edge 1: u = 0, v ∈ [0, 1]
+    if (abs(c_u) > 1e-8)
+    {
+        float v = -a_u / c_u;
+        if (v >= 0 && v <= 1)
+        {
+            float2 bary = float2(0, v);
+            float psiVal = psi(tri, bary, rayO, rayD);
+            if (abs(psiVal) < 0.05 && numTurning < 4)  // On the ray curve
+            {
+                turningUVs[numTurning++] = baryToTex(tri, bary);
+            }
+        }
+    }
+
+    // Edge 2: v = 0, u ∈ [0, 1]
+    if (abs(b_u) > 1e-8)
+    {
+        float u = -a_u / b_u;
+        if (u >= 0 && u <= 1)
+        {
+            float2 bary = float2(u, 0);
+            float psiVal = psi(tri, bary, rayO, rayD);
+            if (abs(psiVal) < 0.05 && numTurning < 4)
+            {
+                turningUVs[numTurning++] = baryToTex(tri, bary);
+            }
+        }
+    }
+
+    // Edge 3: u + v = 1, parameterize as u ∈ [0, 1], v = 1 - u
+    // ψ_u = a_u + b_u*u + c_u*(1-u) = (a_u + c_u) + (b_u - c_u)*u = 0
+    float edge3_a = a_u + c_u;
+    float edge3_b = b_u - c_u;
+    if (abs(edge3_b) > 1e-8)
+    {
+        float u = -edge3_a / edge3_b;
+        if (u >= 0 && u <= 1)
+        {
+            float2 bary = float2(u, 1 - u);
+            float psiVal = psi(tri, bary, rayO, rayD);
+            if (abs(psiVal) < 0.05 && numTurning < 4)
+            {
+                turningUVs[numTurning++] = baryToTex(tri, bary);
+            }
+        }
+    }
+
+    // Same for ψ_v = 0 line
+    // Edge 1: u = 0
+    if (abs(c_v) > 1e-8)
+    {
+        float v = -a_v / c_v;
+        if (v >= 0 && v <= 1)
+        {
+            float2 bary = float2(0, v);
+            float psiVal = psi(tri, bary, rayO, rayD);
+            if (abs(psiVal) < 0.05 && numTurning < 4)
+            {
+                turningUVs[numTurning++] = baryToTex(tri, bary);
+            }
+        }
+    }
+
+    // Edge 2: v = 0
+    if (abs(b_v) > 1e-8)
+    {
+        float u = -a_v / b_v;
+        if (u >= 0 && u <= 1)
+        {
+            float2 bary = float2(u, 0);
+            float psiVal = psi(tri, bary, rayO, rayD);
+            if (abs(psiVal) < 0.05 && numTurning < 4)
+            {
+                turningUVs[numTurning++] = baryToTex(tri, bary);
+            }
+        }
+    }
+
+    // Edge 3: u + v = 1
+    float edge3_av = a_v + c_v;
+    float edge3_bv = b_v - c_v;
+    if (abs(edge3_bv) > 1e-8)
+    {
+        float u = -edge3_av / edge3_bv;
+        if (u >= 0 && u <= 1)
+        {
+            float2 bary = float2(u, 1 - u);
+            float psiVal = psi(tri, bary, rayO, rayD);
+            if (abs(psiVal) < 0.05 && numTurning < 4)
+            {
+                turningUVs[numTurning++] = baryToTex(tri, bary);
+            }
+        }
+    }
+}
+
+//=============================================================================
+// Main intersection shader - V9: Initial Turning Point Splitting
+// Implements Algorithm 1 with INITIAL bound splitting at turning points (lines 4-5)
+// This ensures each initial segment has monotonic ray projection
 //=============================================================================
 [shader("intersection")]
 void intersectionMain()
@@ -1077,10 +1280,96 @@ void intersectionMain()
     UVBound stack[MAX_STACK_SIZE];
     int stackPtr = 0;
 
-    // Push initial UV bound
-    stack[stackPtr].uvMin = triUVMin;
-    stack[stackPtr].uvMax = triUVMax;
-    stackPtr++;
+    //=========================================================================
+    // V9: Find global turning points and split initial bounds (Paper lines 4-5)
+    // This ensures each initial segment has monotonic ray projection
+    //=========================================================================
+    float2 turningUVs[4];
+    int numTurning;
+    findGlobalTurningPoints(tri, rayOrigin, rayDir, turningUVs, numTurning);
+
+    if (numTurning == 0)
+    {
+        // No turning points - push single initial bound
+        stack[stackPtr].uvMin = triUVMin;
+        stack[stackPtr].uvMax = triUVMax;
+        stackPtr++;
+    }
+    else
+    {
+        // Sort turning points by U coordinate for splitting
+        // Simple bubble sort (at most 4 elements)
+        for (int i = 0; i < numTurning - 1; i++)
+        {
+            for (int j = i + 1; j < numTurning; j++)
+            {
+                if (turningUVs[j].x < turningUVs[i].x)
+                {
+                    float2 temp = turningUVs[i];
+                    turningUVs[i] = turningUVs[j];
+                    turningUVs[j] = temp;
+                }
+            }
+        }
+
+        // Split initial U range at turning point U coordinates
+        // This creates segments with monotonic ray projection
+        float prevU = triUVMin.x;
+        for (int i = 0; i < numTurning && stackPtr < MAX_STACK_SIZE - 1; i++)
+        {
+            float splitU = turningUVs[i].x;
+            // Only split if turning point U is inside the range
+            if (splitU > prevU + 0.001 && splitU < triUVMax.x - 0.001)
+            {
+                // Push segment [prevU, splitU]
+                stack[stackPtr].uvMin = float2(prevU, triUVMin.y);
+                stack[stackPtr].uvMax = float2(splitU, triUVMax.y);
+                stackPtr++;
+                prevU = splitU;
+            }
+        }
+
+        // Push final segment [prevU, triUVMax.x]
+        if (stackPtr < MAX_STACK_SIZE)
+        {
+            stack[stackPtr].uvMin = float2(prevU, triUVMin.y);
+            stack[stackPtr].uvMax = triUVMax;
+            stackPtr++;
+        }
+
+        // Also split by V coordinate (secondary split)
+        // For each existing segment, check if any turning point V splits it
+        int originalStackPtr = stackPtr;
+        for (int seg = 0; seg < originalStackPtr && stackPtr < MAX_STACK_SIZE - 1; seg++)
+        {
+            UVBound bound = stack[seg];
+            bool wasSplit = false;
+
+            for (int i = 0; i < numTurning; i++)
+            {
+                float splitV = turningUVs[i].y;
+                // Check if this turning point is within this segment's U range
+                if (turningUVs[i].x >= bound.uvMin.x && turningUVs[i].x <= bound.uvMax.x)
+                {
+                    // Check if V splits this segment
+                    if (splitV > bound.uvMin.y + 0.001 && splitV < bound.uvMax.y - 0.001)
+                    {
+                        // Replace original with lower half
+                        stack[seg].uvMax.y = splitV;
+                        // Push upper half
+                        if (stackPtr < MAX_STACK_SIZE)
+                        {
+                            stack[stackPtr].uvMin = float2(bound.uvMin.x, splitV);
+                            stack[stackPtr].uvMax = bound.uvMax;
+                            stackPtr++;
+                        }
+                        wasSplit = true;
+                        break;  // Only one V split per segment
+                    }
+                }
+            }
+        }
+    }
 
     float bestT = rayTMax + 1.0;
     float2 bestBary = float2(0, 0);
@@ -1152,9 +1441,9 @@ void intersectionMain()
             continue;
 
         //=====================================================================
-        // V7: Bound reduction via inverse displacement (Paper's line 15)
-        // Project ray-AABB intersection points back to 2D UV to tighten bounds
-        // This is the "ping-pong" that makes the paper's method efficient
+        // V8: Bound reduction with turning point detection (Paper lines 4-5, 15)
+        // The ray projects to a CURVE in UV space, not just two points
+        // Must include turning points (where curve changes direction) in bounds
         //=====================================================================
         float3 Q_entry = rayOrigin + regionTEntry * rayDir;
         float3 Q_exit = rayOrigin + regionTExit * rayDir;
@@ -1169,22 +1458,63 @@ void intersectionMain()
             float2 uvEntry = baryToTex(tri, baryEntry);
             float2 uvExit = baryToTex(tri, baryExit);
 
-            // Compute new tighter UV bounds from projected points
+            // Start with bounds from entry/exit
             float2 projUVMin = min(uvEntry, uvExit);
             float2 projUVMax = max(uvEntry, uvExit);
 
-            // Add small padding for numerical safety
-            float2 uvPadding = (bound.uvMax - bound.uvMin) * 0.05;
+            // V8: Also check turning points in the barycentric region
+            // Turning points are where the ray curve has extrema in u or v
+            float2 baryMin = min(baryEntry, baryExit);
+            float2 baryMax = max(baryEntry, baryExit);
+
+            // Expand slightly to catch nearby turning points
+            float2 baryPad = (baryMax - baryMin) * 0.1 + float2(0.01, 0.01);
+            baryMin -= baryPad;
+            baryMax += baryPad;
+
+            // Find turning points in this region
+            float2 turningPts[4];
+            int numTurning;
+            findTurningPointsInRegion(tri, baryMin, baryMax, rayOrigin, rayDir, turningPts, numTurning);
+
+            // Include turning points in bounds if they're on the ray (ψ ≈ 0)
+            for (int tp = 0; tp < numTurning; tp++)
+            {
+                float2 tpBary = turningPts[tp];
+                // Check if this point is actually on the ray projection curve
+                float psiVal = psi(tri, tpBary, rayOrigin, rayDir);
+                if (abs(psiVal) < 0.1)  // Near the curve
+                {
+                    // Check if inside triangle
+                    if (baryInTriangle(tpBary, 0.02))
+                    {
+                        float2 tpUV = baryToTex(tri, tpBary);
+                        projUVMin = min(projUVMin, tpUV);
+                        projUVMax = max(projUVMax, tpUV);
+                    }
+                }
+            }
+
+            // Add padding for numerical safety
+            float2 uvPadding = (bound.uvMax - bound.uvMin) * 0.05 + float2(0.001, 0.001);
             projUVMin -= uvPadding;
             projUVMax += uvPadding;
 
-            // Intersect with current bounds (can only shrink, never expand)
-            bound.uvMin = max(bound.uvMin, projUVMin);
-            bound.uvMax = min(bound.uvMax, projUVMax);
+            // Only apply reduction if projected bounds are WITHIN current bounds
+            // This prevents bad inverse displacement results from causing tearing
+            bool entryInBounds = all(uvEntry >= bound.uvMin - 0.01) && all(uvEntry <= bound.uvMax + 0.01);
+            bool exitInBounds = all(uvExit >= bound.uvMin - 0.01) && all(uvExit <= bound.uvMax + 0.01);
 
-            // If bounds became degenerate, skip this region
-            if (any(bound.uvMin >= bound.uvMax))
-                continue;
+            if (entryInBounds && exitInBounds)
+            {
+                // Intersect with current bounds (can only shrink, never expand)
+                bound.uvMin = max(bound.uvMin, projUVMin);
+                bound.uvMax = min(bound.uvMax, projUVMax);
+
+                // If bounds became degenerate, skip this region
+                if (any(bound.uvMin >= bound.uvMax))
+                    continue;
+            }
         }
 
         // Subdivide UV region along longer dimension
