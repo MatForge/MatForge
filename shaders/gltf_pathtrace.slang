@@ -984,6 +984,26 @@ float3 uvToBarycentric(float2 hitUV, float2 uv0, float2 uv1, float2 uv2)
     return float3(1.0 - baryV - baryW, baryV, baryW);
 }
 
+// Octahedron decoding for normals (unpack uint to float3)
+float3 octDecode(float2 oct)
+{
+    oct = oct * 2.0 - 1.0;
+    float3 n = float3(oct.x, oct.y, 1.0 - abs(oct.x) - abs(oct.y));
+    if (n.z < 0)
+    {
+        float2 wrapped = (1.0 - abs(n.yx)) * float2(n.x >= 0 ? 1.0 : -1.0, n.y >= 0 ? 1.0 : -1.0);
+        n.xy = wrapped;
+    }
+    return normalize(n);
+}
+
+float3 unpackNormal(uint packed)
+{
+    float x = float((packed >> 16) & 0xFFFF) / 65535.0;
+    float y = float(packed & 0xFFFF) / 65535.0;
+    return octDecode(float2(x, y));
+}
+
 // Helper function to get hit state from UV for displaced geometry
 HitState getHitStateFromUV(GltfRenderPrimitive renderPrim, 
                            float2 hitUV,
@@ -1055,10 +1075,13 @@ void rchitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionA
     // DEBUG: Mark this as a displaced hit for path tracer debug
     payload.isDisplacedHit = true;
 
-    // Unpack UV from intersection shader
-    // The intersection shader packed the UV coordinates into attr.barycentrics.x
+    // Unpack UV from intersection shader (packed in attr.barycentrics.x)
     uint packedUV = asuint(attr.barycentrics.x);
     float2 hitUV = unpackUV(packedUV);
+
+    // Unpack geometric normal from intersection shader (packed in attr.barycentrics.y)
+    uint packedNormal = asuint(attr.barycentrics.y);
+    float3 objectGeoNormal = unpackNormal(packedNormal);
 
     int instanceID = InstanceIndex();
     int renderPrimID = InstanceID();
@@ -1075,6 +1098,16 @@ void rchitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionA
 
     // Get hit state using UV instead of hardware barycentrics
     HitState hit = getHitStateFromUV(renderPrim, hitUV, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
+
+    // Override geometric normal with the one computed from displaced micro-triangle
+    // Transform object-space geometric normal to world space
+    // Note: For normals, we use worldToObject (inverse) for correct transformation under non-uniform scale
+    float3 worldGeoNormal = normalize(float3(mul(worldToObject, objectGeoNormal).xyz));
+
+    // Use geometric normal for both shading and geometric normal
+    // This ensures proper lighting on displaced surfaces
+    hit.geonrm = worldGeoNormal;
+    hit.nrm = worldGeoNormal;  // Use geometric normal for shading (can be improved with normal maps later)
 
     // Fill payload exactly the same way as regular hit shader
     payload.hitT = hitT;

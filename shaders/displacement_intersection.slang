@@ -30,6 +30,34 @@ uint packUV(float2 uv)
 }
 
 //=============================================================================
+// Custom hit attributes for displacement - includes geometric normal
+//=============================================================================
+struct DisplacementHitAttributes
+{
+    float2 data;  // x = packed UV, y = packed normal
+};
+
+// Octahedron encoding for normals (pack float3 into float)
+float2 octEncode(float3 n)
+{
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0)
+    {
+        float2 wrapped = (1.0 - abs(n.yx)) * float2(n.x >= 0 ? 1.0 : -1.0, n.y >= 0 ? 1.0 : -1.0);
+        n.xy = wrapped;
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
+uint packNormal(float3 n)
+{
+    float2 oct = octEncode(normalize(n));
+    uint x = uint(saturate(oct.x) * 65535.0);
+    uint y = uint(saturate(oct.y) * 65535.0);
+    return (x << 16) | y;
+}
+
+//=============================================================================
 // Triangle data structure with precomputed derivatives
 // Barycentric coords: point = v0 + u*(v1-v0) + v*(v2-v0)
 //=============================================================================
@@ -240,13 +268,15 @@ float3 getDisplacedPositionBary(Tri tri, float2 bary, uint matIdx)
 
 //=============================================================================
 // Test ray against a single micro-triangle
+// Returns the geometric normal of the displaced micro-triangle
 //=============================================================================
 bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
                             uint matIdx, float3 rayO, float3 rayD, float tMin, float tMax,
-                            out float hitT, out float2 hitBary)
+                            out float hitT, out float2 hitBary, out float3 hitGeoNormal)
 {
     hitT = tMax + 1.0;
     hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
 
     // Get displaced positions
     float3 p0 = getDisplacedPositionBary(tri, b0, matIdx);
@@ -262,6 +292,16 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
             hitT = t;
             float w = 1.0 - triB.x - triB.y;
             hitBary = w * b0 + triB.x * b1 + triB.y * b2;
+
+            // Compute geometric normal from the micro-triangle
+            float3 e1 = p1 - p0;
+            float3 e2 = p2 - p0;
+            hitGeoNormal = normalize(cross(e1, e2));
+
+            // Ensure normal faces the ray (flip if back-facing)
+            if (dot(hitGeoNormal, rayD) > 0)
+                hitGeoNormal = -hitGeoNormal;
+
             return true;
         }
     }
@@ -352,6 +392,8 @@ void intersectionMain()
 
     float step = 1.0 / float(resolution);
 
+    float3 bestGeoNormal = float3(0, 1, 0);
+
     // Iterate through barycentric grid using triangular tessellation
     // Each grid cell is split into 2 triangles (except at the diagonal edge)
     for (int iu = 0; iu < resolution; iu++)
@@ -380,16 +422,18 @@ void intersectionMain()
 
             float hitT;
             float2 hitBary;
+            float3 hitGeoNormal;
 
             // Triangle 1: b00, b10, b01 (always valid)
             if (intersectMicroTriangle(tri, b00, b10, b01,
                                        matIdx, rayOrigin, rayDir, rayTMin, min(rayTMax, bestT),
-                                       hitT, hitBary))
+                                       hitT, hitBary, hitGeoNormal))
             {
                 if (hitT < bestT)
                 {
                     bestT = hitT;
                     bestBary = hitBary;
+                    bestGeoNormal = hitGeoNormal;
                     foundHit = true;
                 }
             }
@@ -406,12 +450,13 @@ void intersectionMain()
                 {
                     if (intersectMicroTriangle(tri, b10, b11, b01,
                                                matIdx, rayOrigin, rayDir, rayTMin, min(rayTMax, bestT),
-                                               hitT, hitBary))
+                                               hitT, hitBary, hitGeoNormal))
                     {
                         if (hitT < bestT)
                         {
                             bestT = hitT;
                             bestBary = hitBary;
+                            bestGeoNormal = hitGeoNormal;
                             foundHit = true;
                         }
                     }
@@ -421,12 +466,18 @@ void intersectionMain()
     }
 
     //=========================================================================
-    // Report best hit
+    // Report best hit with UV and geometric normal
     //=========================================================================
     if (foundHit && bestT >= rayTMin && bestT <= rayTMax)
     {
         // Convert barycentric to texture UV for the hit
         float2 hitTexUV = getT(tri, bestBary);
-        ReportHit(bestT, 0, float2(asfloat(packUV(hitTexUV)), 0.0));
+
+        // Pack UV and geometric normal into hit attributes
+        DisplacementHitAttributes attr;
+        attr.data.x = asfloat(packUV(hitTexUV));
+        attr.data.y = asfloat(packNormal(bestGeoNormal));
+
+        ReportHit(bestT, 0, attr.data);
     }
 }
