@@ -1811,6 +1811,9 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
 
     cleanupDisplacementRMIPs();
 
+    // Reset descriptor pool to free all previously allocated descriptor sets
+    m_rmipBuilder.resetDescriptorPool();
+
     const tinygltf::Model& model = m_resources.scene.getModel();
 
     // Resize vector to hold displacement data for all materials

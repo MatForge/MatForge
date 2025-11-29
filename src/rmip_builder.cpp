@@ -104,6 +104,19 @@ void RmipBuilder::deinit()
 }
 
 //--------------------------------------------------------------------------------------------------
+// Reset descriptor pool - call before building RMIPs for a new scene
+// This frees all allocated descriptor sets, allowing the pool to be reused
+//
+void RmipBuilder::resetDescriptorPool()
+{
+    if (m_device == VK_NULL_HANDLE || m_descriptorPool == VK_NULL_HANDLE)
+        return;
+
+    // Reset the descriptor pool, freeing all allocated descriptor sets
+    vkResetDescriptorPool(m_device, m_descriptorPool, 0);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Create descriptor set layout for RMIP building
 //
 void RmipBuilder::createDescriptorSetLayout()

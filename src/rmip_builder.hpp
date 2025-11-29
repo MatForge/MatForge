@@ -48,6 +48,9 @@ public:
     // Cleanup resources
     void deinit();
 
+    // Reset descriptor pool (call before building RMIPs for a new scene)
+    void resetDescriptorPool();
+
     // Build RMIP structure from a displacement map
     // This queues multiple compute dispatches that will be executed asynchronously
     void buildRMIP(VkCommandBuffer            cmd,
