@@ -15,7 +15,6 @@
 #include "rmip_common.h.slang"
 
 static const float DISPLACEMENT_SCALE = 0.5;
-static const int MAX_MARCH_STEPS = 256;
 static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
 
@@ -67,15 +66,20 @@ float3 getN(Tri tri, float2 bary) { return tri.n0 + bary.x * tri.dNdu + bary.y *
 float2 getT(Tri tri, float2 bary) { return tri.t0 + bary.x * tri.dTdu + bary.y * tri.dTdv; }
 
 // Texture coord to barycentric (inverse of getT)
-float2 texToBary(Tri tri, float2 tex)
+bool texToBary(Tri tri, float2 tex, out float2 bary)
 {
     float2 d = tex - tri.t0;
     float det = tri.dTdu.x * tri.dTdv.y - tri.dTdu.y * tri.dTdv.x;
-    if (abs(det) < 1e-10) return float2(0.33, 0.33);
-    return float2(
+    if (abs(det) < 1e-10)
+    {
+        bary = float2(0.33, 0.33);
+        return false;
+    }
+    bary = float2(
         (d.x * tri.dTdv.y - d.y * tri.dTdv.x) / det,
         (tri.dTdu.x * d.y - tri.dTdu.y * d.x) / det
     );
+    return true;
 }
 
 // Check if barycentric coords are inside triangle (with tolerance)
@@ -83,78 +87,6 @@ bool baryInTriangle(float2 bary, float eps)
 {
     float w = 1.0 - bary.x - bary.y;
     return bary.x >= -eps && bary.y >= -eps && w >= -eps;
-}
-
-//=============================================================================
-// Section 4.1: Displacement Inversion (Equation 2)
-// Given 3D point Q, find barycentric (u,v) such that Q lies on the
-// displacement line through (u,v): solve (P(u,v) - Q) × N(u,v) = 0
-//=============================================================================
-bool invertDisplacement(Tri tri, float3 Q, out float2 baryOut)
-{
-    // Initial guess: project Q onto base triangle plane
-    float3 triN = normalize(cross(tri.dPdu, tri.dPdv));
-    float dist = dot(Q - tri.v0, triN);
-    float3 proj = Q - dist * triN;
-
-    // Compute barycentric of projection using Cramer's rule
-    float3 v0p = proj - tri.v0;
-    float d00 = dot(tri.dPdu, tri.dPdu);
-    float d01 = dot(tri.dPdu, tri.dPdv);
-    float d11 = dot(tri.dPdv, tri.dPdv);
-    float d20 = dot(v0p, tri.dPdu);
-    float d21 = dot(v0p, tri.dPdv);
-    float denom = d00 * d11 - d01 * d01;
-
-    float2 bary;
-    if (abs(denom) < 1e-10)
-        bary = float2(0.33, 0.33);
-    else
-        bary = float2((d11 * d20 - d01 * d21) / denom, (d00 * d21 - d01 * d20) / denom);
-
-    // Newton iteration to solve (P(u,v) - Q) × N(u,v) = 0
-    for (int i = 0; i < MAX_NEWTON_ITERS; i++)
-    {
-        float3 P = getP(tri, bary);
-        float3 N = getN(tri, bary);
-        float3 diff = P - Q;
-        float3 F = cross(diff, N);  // Residual (should be zero)
-
-        float residual = dot(F, F);
-        if (residual < NEWTON_EPS * NEWTON_EPS) break;
-
-        // Jacobian: dF/du = dP/du × N + diff × dN/du
-        float3 dFdu = cross(tri.dPdu, N) + cross(diff, tri.dNdu);
-        float3 dFdv = cross(tri.dPdv, N) + cross(diff, tri.dNdv);
-
-        // Solve 2x2 normal equations: J^T J delta = -J^T F
-        float a = dot(dFdu, dFdu);
-        float b = dot(dFdu, dFdv);
-        float c = dot(dFdv, dFdv);
-        float rhs_u = -dot(dFdu, F);
-        float rhs_v = -dot(dFdv, F);
-
-        float det = a * c - b * b;
-        if (abs(det) < 1e-12) break;
-
-        bary.x += (c * rhs_u - b * rhs_v) / det;
-        bary.y += (a * rhs_v - b * rhs_u) / det;
-    }
-
-    baryOut = bary;
-    return baryInTriangle(bary, 0.1);
-}
-
-//=============================================================================
-// Section 4.2: Implicit ray projection (Equation 3)
-// ψ(u,v) = det(P - O, N, D) = (P - O) · (N × D)
-// The curve ψ = 0 is the ray's projection in texture space
-//=============================================================================
-float psi(Tri tri, float2 bary, float3 O, float3 D)
-{
-    float3 P = getP(tri, bary);
-    float3 N = getN(tri, bary);
-    return dot(P - O, cross(N, D));
 }
 
 //=============================================================================
@@ -180,7 +112,7 @@ bool rayTriangleIntersect(float3 v0, float3 v1, float3 v2,
     float3 s = rayO - v0;
     float u = f * dot(s, h);
 
-    if (u < 0.0 || u > 1.0)
+    if (u < -0.001 || u > 1.001)
     {
         t = 0;
         bary = float2(0, 0);
@@ -190,7 +122,7 @@ bool rayTriangleIntersect(float3 v0, float3 v1, float3 v2,
     float3 q = cross(s, e1);
     float v = f * dot(rayD, q);
 
-    if (v < 0.0 || u + v > 1.0)
+    if (v < -0.001 || u + v > 1.001)
     {
         t = 0;
         bary = float2(0, 0);
@@ -250,148 +182,90 @@ bool rayAABBIntersect(float3 rayO, float3 rayD, float3 aabbMin, float3 aabbMax,
 }
 
 //=============================================================================
-// Per-texel displaced surface intersection
-// Creates a bilinear patch from the 4 texel corners and tests ray against it
+// Get displaced position at a texture coordinate
+// Returns false if texcoord is outside triangle
 //=============================================================================
-bool intersectTexelMicroGeometry(Tri tri, int2 texel, int2 texSize, uint matIdx,
-                                  float3 rayO, float3 rayD, float tMin, float tMax,
-                                  out float hitT, out float2 hitTexUV)
+bool getDisplacedPosition(Tri tri, float2 texUV, uint matIdx, out float3 pos)
 {
-    hitT = tMax + 1.0;
-    hitTexUV = float2(0, 0);
-
-    // Get the 4 corners of the texel in texture space
-    float2 texCorners[4];
-    texCorners[0] = float2(texel) / float2(texSize);           // Bottom-left
-    texCorners[1] = float2(texel + int2(1, 0)) / float2(texSize); // Bottom-right
-    texCorners[2] = float2(texel + int2(0, 1)) / float2(texSize); // Top-left
-    texCorners[3] = float2(texel + int2(1, 1)) / float2(texSize); // Top-right
-
-    // Convert to barycentric and get displaced positions
-    float3 displaced[4];
-    bool allValid = true;
-
-    for (int i = 0; i < 4; i++)
+    float2 bary;
+    if (!texToBary(tri, texUV, bary))
     {
-        float2 bary = texToBary(tri, texCorners[i]);
-
-        // Check if corner is reasonably inside triangle
-        if (!baryInTriangle(bary, 0.5))
-        {
-            allValid = false;
-            break;
-        }
-
-        // Clamp barycentric to valid range
-        bary = clamp(bary, float2(0), float2(1));
-        if (bary.x + bary.y > 1.0)
-        {
-            float s = bary.x + bary.y;
-            bary /= s;
-        }
-
-        // Get base position and normal
-        float3 P = getP(tri, bary);
-        float3 N = normalize(getN(tri, bary));
-
-        // Sample displacement
-        float h = displacementMaps[matIdx].SampleLevel(displacementSampler, texCorners[i], 0).r;
-        h *= DISPLACEMENT_SCALE;
-
-        // Displaced position: S = P + h * N
-        displaced[i] = P + N * h;
+        pos = float3(0, 0, 0);
+        return false;
     }
 
-    if (!allValid) return false;
-
-    // Test ray against the two triangles forming the texel quad
-    // Triangle 1: corners 0, 1, 2 (bottom-left, bottom-right, top-left)
-    float t1;
-    float2 bary1;
-    bool hit1 = rayTriangleIntersect(displaced[0], displaced[1], displaced[2],
-                                     rayO, rayD, t1, bary1);
-
-    // Triangle 2: corners 1, 3, 2 (bottom-right, top-right, top-left)
-    float t2;
-    float2 bary2;
-    bool hit2 = rayTriangleIntersect(displaced[1], displaced[3], displaced[2],
-                                     rayO, rayD, t2, bary2);
-
-    // Find closest valid hit
-    bool foundHit = false;
-
-    if (hit1 && t1 >= tMin && t1 <= tMax && t1 < hitT)
+    // Check if inside triangle (with some tolerance)
+    if (!baryInTriangle(bary, 0.01))
     {
-        hitT = t1;
-        // Interpolate texture coords: (1-u-v)*t0 + u*t1 + v*t2
-        float w = 1.0 - bary1.x - bary1.y;
-        hitTexUV = w * texCorners[0] + bary1.x * texCorners[1] + bary1.y * texCorners[2];
-        foundHit = true;
+        pos = float3(0, 0, 0);
+        return false;
     }
 
-    if (hit2 && t2 >= tMin && t2 <= tMax && t2 < hitT)
-    {
-        hitT = t2;
-        // Interpolate texture coords for second triangle
-        float w = 1.0 - bary2.x - bary2.y;
-        hitTexUV = w * texCorners[1] + bary2.x * texCorners[3] + bary2.y * texCorners[2];
-        foundHit = true;
-    }
+    // Get base position and normal
+    float3 P = getP(tri, bary);
+    float3 N = normalize(getN(tri, bary));
 
-    return foundHit;
+    // Sample displacement
+    float h = displacementMaps[matIdx].SampleLevel(displacementSampler, texUV, 0).r;
+    h *= DISPLACEMENT_SCALE;
+
+    // Displaced position: S = P + h * N
+    pos = P + N * h;
+    return true;
 }
 
 //=============================================================================
-// Texel marching using psi sign changes (Section 4.4)
-// The sign of psi at texel corners indicates which edge the ray exits
+// Get displaced position at barycentric coordinates
 //=============================================================================
-int2 findNextTexel(Tri tri, int2 texel, int2 texSize, float3 rayO, float3 rayD, int2 prevDir)
+float3 getDisplacedPositionBary(Tri tri, float2 bary, uint matIdx)
 {
-    // Compute psi at the 4 corners
-    float2 c00 = float2(texel) / float2(texSize);
-    float2 c10 = float2(texel + int2(1, 0)) / float2(texSize);
-    float2 c01 = float2(texel + int2(0, 1)) / float2(texSize);
-    float2 c11 = float2(texel + int2(1, 1)) / float2(texSize);
+    // Clamp barycentric to valid range
+    bary = max(float2(0), bary);
+    float w = 1.0 - bary.x - bary.y;
+    if (w < 0)
+    {
+        float s = bary.x + bary.y;
+        bary /= s;
+    }
 
-    float p00 = psi(tri, texToBary(tri, c00), rayO, rayD);
-    float p10 = psi(tri, texToBary(tri, c10), rayO, rayD);
-    float p01 = psi(tri, texToBary(tri, c01), rayO, rayD);
-    float p11 = psi(tri, texToBary(tri, c11), rayO, rayD);
+    float3 P = getP(tri, bary);
+    float3 N = normalize(getN(tri, bary));
+    float2 texUV = getT(tri, bary);
 
-    // Check each edge for sign change (excluding entry edge)
-    // Right edge: c10 to c11
-    bool rightCross = (p10 * p11 < 0) || (p10 == 0) || (p11 == 0);
-    // Left edge: c00 to c01
-    bool leftCross = (p00 * p01 < 0) || (p00 == 0) || (p01 == 0);
-    // Top edge: c01 to c11
-    bool topCross = (p01 * p11 < 0) || (p01 == 0) || (p11 == 0);
-    // Bottom edge: c00 to c10
-    bool bottomCross = (p00 * p10 < 0) || (p00 == 0) || (p10 == 0);
+    float h = displacementMaps[matIdx].SampleLevel(displacementSampler, texUV, 0).r;
+    h *= DISPLACEMENT_SCALE;
 
-    // Choose exit edge (not the entry edge)
-    if (rightCross && prevDir.x != 1) return int2(1, 0);
-    if (leftCross && prevDir.x != -1) return int2(-1, 0);
-    if (topCross && prevDir.y != 1) return int2(0, 1);
-    if (bottomCross && prevDir.y != -1) return int2(0, -1);
+    return P + N * h;
+}
 
-    // Fallback: try any crossing edge
-    if (rightCross) return int2(1, 0);
-    if (leftCross) return int2(-1, 0);
-    if (topCross) return int2(0, 1);
-    if (bottomCross) return int2(0, -1);
+//=============================================================================
+// Test ray against a single micro-triangle
+//=============================================================================
+bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
+                            uint matIdx, float3 rayO, float3 rayD, float tMin, float tMax,
+                            out float hitT, out float2 hitBary)
+{
+    hitT = tMax + 1.0;
+    hitBary = float2(0, 0);
 
-    // No exit found - check which direction has the smallest |psi| at center
-    float2 center = float2(texel) / float2(texSize) + 0.5 / float2(texSize);
-    float2 centerBary = texToBary(tri, center);
+    // Get displaced positions
+    float3 p0 = getDisplacedPositionBary(tri, b0, matIdx);
+    float3 p1 = getDisplacedPositionBary(tri, b1, matIdx);
+    float3 p2 = getDisplacedPositionBary(tri, b2, matIdx);
 
-    // Try moving toward where psi might be zero
-    float psiCenter = psi(tri, centerBary, rayO, rayD);
-
-    // Default: move in direction where psi values suggest the ray goes
-    if (abs(p10 + p11) < abs(p00 + p01)) return int2(1, 0);
-    if (abs(p00 + p01) < abs(p10 + p11)) return int2(-1, 0);
-    if (abs(p01 + p11) < abs(p00 + p10)) return int2(0, 1);
-    return int2(0, -1);
+    float t;
+    float2 triB;
+    if (rayTriangleIntersect(p0, p1, p2, rayO, rayD, t, triB))
+    {
+        if (t >= tMin && t <= tMax)
+        {
+            hitT = t;
+            float w = 1.0 - triB.x - triB.y;
+            hitBary = w * b0 + triB.x * b1 + triB.y * b2;
+            return true;
+        }
+    }
+    return false;
 }
 
 //=============================================================================
@@ -466,84 +340,84 @@ void intersectionMain()
     if (tEntry >= tExit) return;
 
     //=========================================================================
-    // Step 2: Project entry point to texture space using displacement inversion
+    // Step 2: Determine tessellation resolution
+    // Use triangular subdivision in barycentric space
     //=========================================================================
-    float3 entryPoint = rayOrigin + rayDir * tEntry;
-    float2 startBary;
+    // Resolution based on texture size
+    int resolution = min(64, max(8, texSize.x / 8));
 
-    if (!invertDisplacement(tri, entryPoint, startBary))
-    {
-        // Fallback: use simple projection onto base triangle
-        float t;
-        float2 bary;
-        if (rayTriangleIntersect(tri.v0, tri.v1, tri.v2, rayOrigin, rayDir, t, bary))
-        {
-            startBary = bary;
-        }
-        else
-        {
-            // Last resort: center of triangle
-            startBary = float2(0.33, 0.33);
-        }
-    }
-
-    // Clamp barycentric to valid range
-    startBary = clamp(startBary, float2(0), float2(1));
-    if (startBary.x + startBary.y > 1.0)
-    {
-        float s = startBary.x + startBary.y;
-        startBary /= s;
-    }
-
-    // Convert to texture coordinates
-    float2 startTex = getT(tri, startBary);
-
-    // Clamp to valid texture range
-    startTex = clamp(startTex, float2(0), float2(1));
-
-    // Convert to texel index
-    int2 texel = int2(floor(startTex * float2(texSize)));
-    texel = clamp(texel, int2(0), texSize - int2(1));
-
-    //=========================================================================
-    // Step 3: Texel marching along the projected ray
-    //=========================================================================
     float bestT = rayTMax + 1.0;
-    float2 bestUV = float2(0, 0);
+    float2 bestBary = float2(0, 0);
     bool foundHit = false;
 
-    int2 prevDir = int2(0, 0);
+    float step = 1.0 / float(resolution);
 
-    for (int step = 0; step < MAX_MARCH_STEPS; step++)
+    // Iterate through barycentric grid using triangular tessellation
+    // Each grid cell is split into 2 triangles (except at the diagonal edge)
+    for (int iu = 0; iu < resolution; iu++)
     {
-        // Bounds check
-        if (texel.x < 0 || texel.x >= texSize.x || texel.y < 0 || texel.y >= texSize.y)
-            break;
+        float u0 = iu * step;
+        float u1 = min((iu + 1) * step, 1.0);
 
-        // Test intersection with current texel's micro-geometry
-        float hitT;
-        float2 hitUV;
-        if (intersectTexelMicroGeometry(tri, texel, texSize, matIdx,
-                                        rayOrigin, rayDir, rayTMin, min(rayTMax, bestT),
-                                        hitT, hitUV))
+        // Number of cells in this row decreases as u increases
+        int maxIv = resolution - iu;
+
+        for (int iv = 0; iv < maxIv; iv++)
         {
-            if (hitT < bestT)
+            float v0 = iv * step;
+            float v1 = min((iv + 1) * step, 1.0);
+
+            // Vertices of the grid cell
+            float2 b00 = float2(u0, v0);              // Bottom-left
+            float2 b10 = float2(u1, v0);              // Bottom-right
+            float2 b01 = float2(u0, v1);              // Top-left
+            float2 b11 = float2(u1, v1);              // Top-right
+
+            // Clamp to triangle boundary (u + v <= 1)
+            if (b10.x + b10.y > 1.0) b10 = float2(1.0 - v0, v0);
+            if (b01.x + b01.y > 1.0) b01 = float2(u0, 1.0 - u0);
+            if (b11.x + b11.y > 1.0) b11 = float2(1.0 - v1, v1);
+
+            float hitT;
+            float2 hitBary;
+
+            // Triangle 1: b00, b10, b01 (always valid)
+            if (intersectMicroTriangle(tri, b00, b10, b01,
+                                       matIdx, rayOrigin, rayDir, rayTMin, min(rayTMax, bestT),
+                                       hitT, hitBary))
             {
-                bestT = hitT;
-                bestUV = hitUV;
-                foundHit = true;
-                // Don't break - continue to find closest hit
+                if (hitT < bestT)
+                {
+                    bestT = hitT;
+                    bestBary = hitBary;
+                    foundHit = true;
+                }
+            }
+
+            // Triangle 2: b10, b11, b01 (only if b11 is inside triangle)
+            // Check if b11 is valid (not collapsed to the edge)
+            float w11 = 1.0 - b11.x - b11.y;
+            if (w11 >= -0.001 && b11.x >= -0.001 && b11.y >= -0.001)
+            {
+                // Make sure b11 is different from b10 and b01
+                float d10 = length(b11 - b10);
+                float d01 = length(b11 - b01);
+                if (d10 > 0.001 && d01 > 0.001)
+                {
+                    if (intersectMicroTriangle(tri, b10, b11, b01,
+                                               matIdx, rayOrigin, rayDir, rayTMin, min(rayTMax, bestT),
+                                               hitT, hitBary))
+                    {
+                        if (hitT < bestT)
+                        {
+                            bestT = hitT;
+                            bestBary = hitBary;
+                            foundHit = true;
+                        }
+                    }
+                }
             }
         }
-
-        // Find next texel using psi sign changes
-        int2 nextDir = findNextTexel(tri, texel, texSize, rayOrigin, rayDir, prevDir);
-
-        if (nextDir.x == 0 && nextDir.y == 0)
-            break;  // No valid exit found
-
-        texel += nextDir;
-        prevDir = -nextDir;  // Entry edge of next texel is opposite of exit
     }
 
     //=========================================================================
@@ -551,6 +425,8 @@ void intersectionMain()
     //=========================================================================
     if (foundHit && bestT >= rayTMin && bestT <= rayTMax)
     {
-        ReportHit(bestT, 0, float2(asfloat(packUV(bestUV)), 0.0));
+        // Convert barycentric to texture UV for the hit
+        float2 hitTexUV = getT(tri, bestBary);
+        ReportHit(bestT, 0, float2(asfloat(packUV(hitTexUV)), 0.0));
     }
 }
