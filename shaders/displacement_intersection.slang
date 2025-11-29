@@ -21,10 +21,18 @@ static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
 static const int MAX_TRAVERSAL_ITERS = 128;
 static const int MAX_TEXEL_MARCH_STEPS = 128;
-static const float MARCHING_SCALE = 4.0;  // Switch to texel marching when bound < MARCHING_SCALE texels
+static const float MARCHING_SCALE = 8.0;  // Switch to tessellation when UV bound < MARCHING_SCALE texels
+static const int MAX_STACK_SIZE = 32;     // Maximum stack depth for hierarchical traversal
 
+// Displacement textures for sampling heights
 [[vk::binding(9, 1)]] Texture2D<float> displacementMaps[8];
 [[vk::binding(11, 1)]] SamplerState displacementSampler;
+
+// RMIP textures for O(1) min/max queries over rectangular regions
+// Each material has a Texture2DArray where layers correspond to different (p,q) levels
+[[vk::binding(8, 1)]] Texture2DArray<float2> rmipMaps[8];
+[[vk::binding(10, 1)]] SamplerState rmipSampler;
+
 [[vk::push_constant]] ConstantBuffer<PathtracePushConstant> pushConst;
 
 uint packUV(float2 uv)
@@ -119,6 +127,23 @@ bool texToBary(Tri tri, float2 tex, out float2 bary)
 float2 baryToTex(Tri tri, float2 bary)
 {
     return tri.t0 + bary.x * tri.dTdu + bary.y * tri.dTdv;
+}
+
+// V4.2 FIX: Compute texture-space bounding box for a barycentric region
+// IMPORTANT: baryToTex is a linear transform that may NOT be axis-aligned!
+// We must check ALL 4 corners to get the correct texture bounds.
+void baryRegionToTexBounds(Tri tri, float2 baryMin, float2 baryMax,
+                           out float2 texBoundsMin, out float2 texBoundsMax)
+{
+    // Compute all 4 corners of the barycentric region in texture space
+    float2 corner00 = baryToTex(tri, float2(baryMin.x, baryMin.y));
+    float2 corner10 = baryToTex(tri, float2(baryMax.x, baryMin.y));
+    float2 corner01 = baryToTex(tri, float2(baryMin.x, baryMax.y));
+    float2 corner11 = baryToTex(tri, float2(baryMax.x, baryMax.y));
+
+    // Take min/max of all 4 corners
+    texBoundsMin = min(min(corner00, corner10), min(corner01, corner11));
+    texBoundsMax = max(max(corner00, corner10), max(corner01, corner11));
 }
 
 // Check if barycentric coords are inside triangle (with tolerance)
@@ -445,33 +470,18 @@ float sampleDisplacement(uint matIdx, float2 texUV)
 }
 
 //=============================================================================
-// Get min/max displacement over a texture region (simple sampling)
-// In a full implementation, this would query the RMIP structure
+// Get min/max displacement over a texture region
+// V5.2: Use conservative global bounds to verify traversal logic works
+// Once verified, we can add RMIP queries back
 //=============================================================================
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
 {
+    // V5.2: Use conservative global bounds (like brute force)
+    // This provides NO culling benefit but should be CORRECT
+    // If this works, the traversal logic is correct and RMIP is the issue
     hMin = 0.0;
     hMax = DISPLACEMENT_SCALE;
-
-    // For tighter bounds, sample the region
-    int samples = 4;
-    float minH = 1e30;
-    float maxH = -1e30;
-
-    for (int i = 0; i <= samples; i++)
-    {
-        for (int j = 0; j <= samples; j++)
-        {
-            float2 uv = lerp(texMin, texMax, float2(i, j) / float(samples));
-            float h = sampleDisplacement(matIdx, uv);
-            minH = min(minH, h);
-            maxH = max(maxH, h);
-        }
-    }
-
-    hMin = minH - 0.01 * DISPLACEMENT_SCALE;
-    hMax = maxH + 0.01 * DISPLACEMENT_SCALE;
 }
 
 //=============================================================================
@@ -557,10 +567,11 @@ bool tessellateRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
 
-    // Determine tessellation resolution based on region size in texture space
-    float2 texMin = baryToTex(tri, baryMin);
-    float2 texMax = baryToTex(tri, baryMax);
-    float2 texSize2 = abs(texMax - texMin) * float2(texSize);
+    // V4.2 FIX: Determine tessellation resolution using proper texture bounds
+    // baryToTex is a linear transform that may NOT be axis-aligned!
+    float2 texBoundsMin, texBoundsMax;
+    baryRegionToTexBounds(tri, baryMin, baryMax, texBoundsMin, texBoundsMax);
+    float2 texSize2 = (texBoundsMax - texBoundsMin) * float2(texSize);
 
     int res = int(max(texSize2.x, texSize2.y)) + 1;
     res = clamp(res, 2, 8);  // 2x2 to 8x8 tessellation
@@ -651,7 +662,344 @@ bool tessellateRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// Main intersection shader - Implements Algorithm 1 from the paper
+// UV Bound structure for texture-space hierarchical traversal
+// V6: Work in TEXTURE SPACE as the paper describes, not barycentric space
+//=============================================================================
+struct UVBound
+{
+    float2 uvMin;    // Min UV coordinates
+    float2 uvMax;    // Max UV coordinates
+};
+
+//=============================================================================
+// Check if a UV region overlaps the valid triangle domain
+// Converts UV corners to barycentric and checks if any is inside u+v<=1
+//=============================================================================
+bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
+{
+    // Convert all 4 UV corners to barycentric
+    float2 bary00, bary10, bary01, bary11;
+    texToBary(tri, uvMin, bary00);
+    texToBary(tri, float2(uvMax.x, uvMin.y), bary10);
+    texToBary(tri, float2(uvMin.x, uvMax.y), bary01);
+    texToBary(tri, uvMax, bary11);
+
+    // Check if any corner is inside the triangle (with tolerance)
+    float eps = 0.01;
+
+    // A point is inside if u >= 0, v >= 0, and u+v <= 1
+    bool in00 = bary00.x >= -eps && bary00.y >= -eps && bary00.x + bary00.y <= 1.0 + eps;
+    bool in10 = bary10.x >= -eps && bary10.y >= -eps && bary10.x + bary10.y <= 1.0 + eps;
+    bool in01 = bary01.x >= -eps && bary01.y >= -eps && bary01.x + bary01.y <= 1.0 + eps;
+    bool in11 = bary11.x >= -eps && bary11.y >= -eps && bary11.x + bary11.y <= 1.0 + eps;
+
+    if (in00 || in10 || in01 || in11)
+        return true;
+
+    // Also check if the triangle vertices are inside the UV region
+    // This handles cases where UV region fully contains the triangle
+    bool triV0InUV = all(tri.t0 >= uvMin) && all(tri.t0 <= uvMax);
+    bool triV1InUV = all(tri.t1 >= uvMin) && all(tri.t1 <= uvMax);
+    bool triV2InUV = all(tri.t2 >= uvMin) && all(tri.t2 <= uvMax);
+
+    if (triV0InUV || triV1InUV || triV2InUV)
+        return true;
+
+    // Check edge intersections (UV rect edges vs triangle edges in UV space)
+    // For robustness, check if any triangle edge crosses the UV rectangle
+    // This is a conservative check
+    float2 triEdges[3][2] = {
+        { tri.t0, tri.t1 },
+        { tri.t1, tri.t2 },
+        { tri.t2, tri.t0 }
+    };
+
+    for (int i = 0; i < 3; i++)
+    {
+        float2 e0 = triEdges[i][0];
+        float2 e1 = triEdges[i][1];
+
+        // Check if edge intersects UV rectangle (simple line-rect intersection)
+        float2 eMin = min(e0, e1);
+        float2 eMax = max(e0, e1);
+
+        // Bounding box intersection
+        if (eMax.x >= uvMin.x && eMin.x <= uvMax.x &&
+            eMax.y >= uvMin.y && eMin.y <= uvMax.y)
+            return true;
+    }
+
+    return false;
+}
+
+//=============================================================================
+// Helper: Add a sample point to AABB if the barycentric is valid
+//=============================================================================
+bool addSampleToAABB(Tri tri, float2 bary, float hMin, float hMax,
+                     inout float3 aabbMin, inout float3 aabbMax)
+{
+    // Check if inside triangle (with tolerance)
+    float w = 1.0 - bary.x - bary.y;
+    if (bary.x < -0.02 || bary.y < -0.02 || w < -0.02)
+        return false;
+
+    // Clamp to valid range
+    bary = max(float2(0), bary);
+    if (bary.x + bary.y > 1.0)
+    {
+        float s = bary.x + bary.y;
+        bary /= s;
+    }
+
+    // Compute 3D position at both min and max displacement
+    float3 P = getP(tri, bary);
+    float3 N = normalize(getN(tri, bary));
+
+    float3 pMin = P + N * hMin;
+    float3 pMax = P + N * hMax;
+
+    aabbMin = min(aabbMin, min(pMin, pMax));
+    aabbMax = max(aabbMax, max(pMin, pMax));
+    return true;
+}
+
+//=============================================================================
+// Compute 3D AABB for a UV region with given displacement bounds
+// V6.1: Returns false if UV region doesn't meaningfully overlap triangle
+// This fixes the tearing issue caused by fallback AABBs
+//=============================================================================
+bool computeUVRegionAABB(Tri tri, float2 uvMin, float2 uvMax,
+                          float hMin, float hMax,
+                          out float3 aabbMin, out float3 aabbMax)
+{
+    aabbMin = float3(1e30, 1e30, 1e30);
+    aabbMax = float3(-1e30, -1e30, -1e30);
+
+    int validSamples = 0;
+
+    // 1. Sample grid within UV region (8x8 for better coverage)
+    const int samples = 8;
+    float2 uvStep = (uvMax - uvMin) / float(samples);
+
+    for (int i = 0; i <= samples; i++)
+    {
+        for (int j = 0; j <= samples; j++)
+        {
+            float2 uv = uvMin + float2(i, j) * uvStep;
+
+            // Convert UV to barycentric
+            float2 bary;
+            if (!texToBary(tri, uv, bary))
+                continue;
+
+            if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
+                validSamples++;
+        }
+    }
+
+    // 2. Sample triangle vertices if they fall within UV region
+    float2 triUVs[3] = { tri.t0, tri.t1, tri.t2 };
+    float2 triBary[3] = { float2(0, 0), float2(1, 0), float2(0, 1) };
+
+    for (int k = 0; k < 3; k++)
+    {
+        if (all(triUVs[k] >= uvMin - 0.001) && all(triUVs[k] <= uvMax + 0.001))
+        {
+            if (addSampleToAABB(tri, triBary[k], hMin, hMax, aabbMin, aabbMax))
+                validSamples++;
+        }
+    }
+
+    // 3. Sample triangle edge intersections with UV rectangle edges
+    // This catches thin sliver regions along triangle edges
+    float2 triEdgeStart[3] = { tri.t0, tri.t1, tri.t2 };
+    float2 triEdgeEnd[3] = { tri.t1, tri.t2, tri.t0 };
+    float2 edgeBaryStart[3] = { float2(0, 0), float2(1, 0), float2(0, 1) };
+    float2 edgeBaryEnd[3] = { float2(1, 0), float2(0, 1), float2(0, 0) };
+
+    for (int e = 0; e < 3; e++)
+    {
+        float2 e0 = triEdgeStart[e];
+        float2 e1 = triEdgeEnd[e];
+        float2 b0 = edgeBaryStart[e];
+        float2 b1 = edgeBaryEnd[e];
+
+        // Check intersection with UV rect left edge (u = uvMin.x)
+        if ((e0.x - uvMin.x) * (e1.x - uvMin.x) <= 0 && e1.x != e0.x)
+        {
+            float t = (uvMin.x - e0.x) / (e1.x - e0.x);
+            float v = e0.y + t * (e1.y - e0.y);
+            if (v >= uvMin.y && v <= uvMax.y)
+            {
+                float2 bary = b0 + t * (b1 - b0);
+                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
+                    validSamples++;
+            }
+        }
+
+        // Check intersection with UV rect right edge (u = uvMax.x)
+        if ((e0.x - uvMax.x) * (e1.x - uvMax.x) <= 0 && e1.x != e0.x)
+        {
+            float t = (uvMax.x - e0.x) / (e1.x - e0.x);
+            float v = e0.y + t * (e1.y - e0.y);
+            if (v >= uvMin.y && v <= uvMax.y)
+            {
+                float2 bary = b0 + t * (b1 - b0);
+                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
+                    validSamples++;
+            }
+        }
+
+        // Check intersection with UV rect bottom edge (v = uvMin.y)
+        if ((e0.y - uvMin.y) * (e1.y - uvMin.y) <= 0 && e1.y != e0.y)
+        {
+            float t = (uvMin.y - e0.y) / (e1.y - e0.y);
+            float u = e0.x + t * (e1.x - e0.x);
+            if (u >= uvMin.x && u <= uvMax.x)
+            {
+                float2 bary = b0 + t * (b1 - b0);
+                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
+                    validSamples++;
+            }
+        }
+
+        // Check intersection with UV rect top edge (v = uvMax.y)
+        if ((e0.y - uvMax.y) * (e1.y - uvMax.y) <= 0 && e1.y != e0.y)
+        {
+            float t = (uvMax.y - e0.y) / (e1.y - e0.y);
+            float u = e0.x + t * (e1.x - e0.x);
+            if (u >= uvMin.x && u <= uvMax.x)
+            {
+                float2 bary = b0 + t * (b1 - b0);
+                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
+                    validSamples++;
+            }
+        }
+    }
+
+    // If no valid samples, this UV region doesn't meaningfully overlap the triangle
+    if (validSamples == 0)
+        return false;
+
+    // Add padding
+    float3 padding = (aabbMax - aabbMin) * 0.05 + float3(0.001, 0.001, 0.001);
+    aabbMin -= padding;
+    aabbMax += padding;
+
+    return true;
+}
+
+//=============================================================================
+// Tessellate a UV region and test for intersection
+//=============================================================================
+bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                        int2 texSize,
+                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    // Determine tessellation resolution based on UV region size in texels
+    float2 uvSize = (uvMax - uvMin) * float2(texSize);
+    int res = int(max(uvSize.x, uvSize.y)) + 1;
+    res = clamp(res, 2, 8);
+
+    float bestT = rayTMax + 1.0;
+    bool found = false;
+
+    float2 uvStep = (uvMax - uvMin) / float(res);
+
+    for (int iu = 0; iu < res; iu++)
+    {
+        for (int iv = 0; iv < res; iv++)
+        {
+            // UV corners of this cell
+            float2 uv00 = uvMin + float2(iu, iv) * uvStep;
+            float2 uv10 = uvMin + float2(iu + 1, iv) * uvStep;
+            float2 uv01 = uvMin + float2(iu, iv + 1) * uvStep;
+            float2 uv11 = uvMin + float2(iu + 1, iv + 1) * uvStep;
+
+            // Convert to barycentric
+            float2 b00, b10, b01, b11;
+            texToBary(tri, uv00, b00);
+            texToBary(tri, uv10, b10);
+            texToBary(tri, uv01, b01);
+            texToBary(tri, uv11, b11);
+
+            // Check if any corner is inside triangle
+            float eps = 0.01;
+            bool valid00 = b00.x >= -eps && b00.y >= -eps && b00.x + b00.y <= 1.0 + eps;
+            bool valid10 = b10.x >= -eps && b10.y >= -eps && b10.x + b10.y <= 1.0 + eps;
+            bool valid01 = b01.x >= -eps && b01.y >= -eps && b01.x + b01.y <= 1.0 + eps;
+            bool valid11 = b11.x >= -eps && b11.y >= -eps && b11.x + b11.y <= 1.0 + eps;
+
+            // Skip if all corners are outside
+            if (!valid00 && !valid10 && !valid01 && !valid11)
+                continue;
+
+            // Clamp barycentric coords to valid triangle domain
+            b00 = clampBary(b00);
+            b10 = clampBary(b10);
+            b01 = clampBary(b01);
+            b11 = clampBary(b11);
+
+            float microT;
+            float2 microBary;
+            float3 microNormal;
+
+            // Triangle 1: b00, b10, b01
+            float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
+            if (area1 > 1e-6)
+            {
+                if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
+                                           rayTMin, min(rayTMax, bestT),
+                                           microT, microBary, microNormal))
+                {
+                    if (microT < bestT)
+                    {
+                        bestT = microT;
+                        hitT = microT;
+                        hitBary = microBary;
+                        hitGeoNormal = microNormal;
+                        found = true;
+                    }
+                }
+            }
+
+            // Triangle 2: b10, b11, b01
+            float w11 = 1.0 - b11.x - b11.y;
+            if (w11 >= -0.01)
+            {
+                float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
+                if (area2 > 1e-6)
+                {
+                    if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
+                                               rayTMin, min(rayTMax, bestT),
+                                               microT, microBary, microNormal))
+                    {
+                        if (microT < bestT)
+                        {
+                            bestT = microT;
+                            hitT = microT;
+                            hitBary = microBary;
+                            hitGeoNormal = microNormal;
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return found;
+}
+
+//=============================================================================
+// Main intersection shader - V7: Bound Reduction via Inverse Displacement
+// Implements Algorithm 1 with the key "ping-pong" feature (line 15)
+// After ray-AABB intersection, project hits back to 2D UV to tighten bounds
 //=============================================================================
 [shader("intersection")]
 void intersectionMain()
@@ -705,69 +1053,69 @@ void intersectionMain()
     if (texSize.x == 0 || texSize.y == 0) return;
 
     //=========================================================================
-    // Step 1: Intersect ray with bounding prism
-    // Compute tight AABB for the entire displaced triangle
+    // V6: Texture-Space Hierarchical Traversal (Algorithm 1 from paper)
     //=========================================================================
-    float hMin = 0.0;
-    float hMax = DISPLACEMENT_SCALE;
 
-    float3 aabbMin, aabbMax;
-    computeRegionAABB(tri, float2(0, 0), float2(1, 1), hMin, hMax, aabbMin, aabbMax);
+    // Step 1: Compute triangle's UV bounding box (texture-space footprint)
+    float2 triUVMin = min(min(tri.t0, tri.t1), tri.t2);
+    float2 triUVMax = max(max(tri.t0, tri.t1), tri.t2);
+
+    // Step 2: First test full triangle AABB
+    float3 fullAABBMin, fullAABBMax;
+    if (!computeUVRegionAABB(tri, triUVMin, triUVMax, 0.0, DISPLACEMENT_SCALE, fullAABBMin, fullAABBMax))
+        return;  // Should not happen for full triangle
 
     float tEntry, tExit;
-    if (!rayAABBIntersect(rayOrigin, rayDir, aabbMin, aabbMax, tEntry, tExit))
+    if (!rayAABBIntersect(rayOrigin, rayDir, fullAABBMin, fullAABBMax, tEntry, tExit))
         return;
 
     tEntry = max(tEntry, rayTMin);
     tExit = min(tExit, rayTMax);
     if (tEntry >= tExit) return;
 
-    //=========================================================================
-    // DIRECT BRUTE FORCE: Tessellate entire triangle
-    // (Bypassing hierarchical traversal to debug the 16-hole issue)
-    //=========================================================================
+    // Step 3: Stack-based hierarchical traversal in UV space
+    UVBound stack[MAX_STACK_SIZE];
+    int stackPtr = 0;
+
+    // Push initial UV bound
+    stack[stackPtr].uvMin = triUVMin;
+    stack[stackPtr].uvMax = triUVMax;
+    stackPtr++;
+
     float bestT = rayTMax + 1.0;
     float2 bestBary = float2(0, 0);
     float3 bestGeoNormal = float3(0, 1, 0);
     bool foundHit = false;
 
-    // Resolution based on texture size
-    int resolution = min(64, max(8, texSize.x / 8));
-    float step = 1.0 / float(resolution);
+    int iterations = 0;
 
-    // Iterate through barycentric grid using triangular tessellation
-    for (int iu = 0; iu < resolution; iu++)
+    while (stackPtr > 0 && iterations < MAX_TRAVERSAL_ITERS)
     {
-        float u0 = iu * step;
-        float u1 = min((iu + 1) * step, 1.0);
+        iterations++;
 
-        // Number of cells in this row decreases as u increases
-        int maxIv = resolution - iu;
+        // Pop bound from stack
+        stackPtr--;
+        UVBound bound = stack[stackPtr];
 
-        for (int iv = 0; iv < maxIv; iv++)
+        // Check if UV region overlaps valid triangle domain
+        if (!uvRegionOverlapsTriangle(tri, bound.uvMin, bound.uvMax))
+            continue;
+
+        // Compute UV region size in texels
+        float2 uvSizeTexels = (bound.uvMax - bound.uvMin) * float2(texSize);
+        float maxTexelSize = max(uvSizeTexels.x, uvSizeTexels.y);
+
+        // If small enough, tessellate and test
+        if (maxTexelSize <= MARCHING_SCALE)
         {
-            float v0 = iv * step;
-            float v1 = min((iv + 1) * step, 1.0);
-
-            // Vertices of the grid cell
-            float2 b00 = float2(u0, v0);
-            float2 b10 = float2(u1, v0);
-            float2 b01 = float2(u0, v1);
-            float2 b11 = float2(u1, v1);
-
-            // Clamp to triangle boundary (u + v <= 1)
-            if (b10.x + b10.y > 1.0) b10 = float2(1.0 - v0, v0);
-            if (b01.x + b01.y > 1.0) b01 = float2(u0, 1.0 - u0);
-            if (b11.x + b11.y > 1.0) b11 = float2(1.0 - v1, v1);
-
             float hitT;
             float2 hitBary;
             float3 hitGeoNormal;
 
-            // Triangle 1: b00, b10, b01
-            if (intersectMicroTriangle(tri, b00, b10, b01,
-                                       matIdx, rayOrigin, rayDir, tEntry, min(tExit, bestT),
-                                       hitT, hitBary, hitGeoNormal))
+            if (tessellateUVRegion(tri, matIdx, rayOrigin, rayDir,
+                                   bound.uvMin, bound.uvMax,
+                                   rayTMin, min(rayTMax, bestT),
+                                   texSize, hitT, hitBary, hitGeoNormal))
             {
                 if (hitT < bestT)
                 {
@@ -777,28 +1125,100 @@ void intersectionMain()
                     foundHit = true;
                 }
             }
+            continue;
+        }
 
-            // Triangle 2: b10, b11, b01 (only if b11 is inside triangle)
-            float w11 = 1.0 - b11.x - b11.y;
-            if (w11 >= -0.001 && b11.x >= -0.001 && b11.y >= -0.001)
+        // Query RMIP for displacement bounds over this UV region
+        float hMin, hMax;
+        getDisplacementBounds(matIdx, bound.uvMin, bound.uvMax, texSize, hMin, hMax);
+
+        // Compute 3D AABB for this UV region
+        // V6.1: Skip if UV region doesn't meaningfully overlap triangle
+        float3 aabbMin, aabbMax;
+        if (!computeUVRegionAABB(tri, bound.uvMin, bound.uvMax, hMin, hMax, aabbMin, aabbMax))
+            continue;
+
+        // Test ray against AABB
+        float regionTEntry, regionTExit;
+        if (!rayAABBIntersect(rayOrigin, rayDir, aabbMin, aabbMax, regionTEntry, regionTExit))
+            continue;
+
+        // Clamp to valid ray interval
+        regionTEntry = max(regionTEntry, rayTMin);
+        regionTExit = min(regionTExit, min(rayTMax, bestT));
+
+        // Early termination if no valid interval
+        if (regionTEntry >= regionTExit)
+            continue;
+
+        //=====================================================================
+        // V7: Bound reduction via inverse displacement (Paper's line 15)
+        // Project ray-AABB intersection points back to 2D UV to tighten bounds
+        // This is the "ping-pong" that makes the paper's method efficient
+        //=====================================================================
+        float3 Q_entry = rayOrigin + regionTEntry * rayDir;
+        float3 Q_exit = rayOrigin + regionTExit * rayDir;
+
+        float2 baryEntry, baryExit;
+        bool validEntry = inverseDisplacement(tri, Q_entry, baryEntry);
+        bool validExit = inverseDisplacement(tri, Q_exit, baryExit);
+
+        if (validEntry && validExit)
+        {
+            // Convert barycentric to UV
+            float2 uvEntry = baryToTex(tri, baryEntry);
+            float2 uvExit = baryToTex(tri, baryExit);
+
+            // Compute new tighter UV bounds from projected points
+            float2 projUVMin = min(uvEntry, uvExit);
+            float2 projUVMax = max(uvEntry, uvExit);
+
+            // Add small padding for numerical safety
+            float2 uvPadding = (bound.uvMax - bound.uvMin) * 0.05;
+            projUVMin -= uvPadding;
+            projUVMax += uvPadding;
+
+            // Intersect with current bounds (can only shrink, never expand)
+            bound.uvMin = max(bound.uvMin, projUVMin);
+            bound.uvMax = min(bound.uvMax, projUVMax);
+
+            // If bounds became degenerate, skip this region
+            if (any(bound.uvMin >= bound.uvMax))
+                continue;
+        }
+
+        // Subdivide UV region along longer dimension
+        float2 uvSize = bound.uvMax - bound.uvMin;
+
+        if (stackPtr + 2 <= MAX_STACK_SIZE)
+        {
+            if (uvSize.x >= uvSize.y)
             {
-                float d10 = length(b11 - b10);
-                float d01 = length(b11 - b01);
-                if (d10 > 0.001 && d01 > 0.001)
-                {
-                    if (intersectMicroTriangle(tri, b10, b11, b01,
-                                               matIdx, rayOrigin, rayDir, tEntry, min(tExit, bestT),
-                                               hitT, hitBary, hitGeoNormal))
-                    {
-                        if (hitT < bestT)
-                        {
-                            bestT = hitT;
-                            bestBary = hitBary;
-                            bestGeoNormal = hitGeoNormal;
-                            foundHit = true;
-                        }
-                    }
-                }
+                // Split horizontally (along U)
+                float uMid = (bound.uvMin.x + bound.uvMax.x) * 0.5;
+
+                // Push back half first (so front is popped first)
+                stack[stackPtr].uvMin = float2(uMid, bound.uvMin.y);
+                stack[stackPtr].uvMax = bound.uvMax;
+                stackPtr++;
+
+                stack[stackPtr].uvMin = bound.uvMin;
+                stack[stackPtr].uvMax = float2(uMid, bound.uvMax.y);
+                stackPtr++;
+            }
+            else
+            {
+                // Split vertically (along V)
+                float vMid = (bound.uvMin.y + bound.uvMax.y) * 0.5;
+
+                // Push back half first
+                stack[stackPtr].uvMin = float2(bound.uvMin.x, vMid);
+                stack[stackPtr].uvMax = bound.uvMax;
+                stackPtr++;
+
+                stack[stackPtr].uvMin = bound.uvMin;
+                stack[stackPtr].uvMax = float2(bound.uvMax.x, vMid);
+                stackPtr++;
             }
         }
     }

@@ -48,9 +48,12 @@ MinMax combineMinMax4(MinMax tl, MinMax tr, MinMax bl, MinMax br)
     return combineMinMax(temp1, temp2);
 }
 
+// NOTE: This MUST match computeLayerIndex() used in the build shaders!
+// stride = maxLevel + 1
 uint getRmipLayer(uint p, uint q, uint maxLevel)
 {
-    return p * (maxLevel + 1) + q;
+    uint stride = maxLevel + 1;
+    return p + q * stride;  // Must match: computeLayerIndex(p, q, stride)
 }
 
 //-----------------------------------------------------------------------
