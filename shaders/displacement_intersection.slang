@@ -1451,36 +1451,32 @@ bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                         out float hitT, out float2 hitBary, out float3 hitGeoNormal);
 
 //=============================================================================
-// ψ-Guided Texel Marching (Paper Section 4.4)
+// V21: Brute-Force Texel Testing (Replacing ψ-Guided Marching)
 //
-// March through texels one-by-one, using ψ sign at corners to determine
-// which edge the ray exits from. This is more efficient than tessellating
-// the entire UV region because we only visit texels the ray actually passes through.
+// V12-V20 used ψ-guided marching which had fundamental issues:
+// 1. Wrong entry texel detection (using AABB entry, not ψ=0 curve entry)
+// 2. Numerical precision issues near ψ≈0 causing wrong crossing counts
+// 3. Asymmetric fallback (+X/+Y only) missing texels in -X/-Y directions
 //
-// V14 NOTE: ψ degeneracy is now checked at START of intersectionMain().
-// If this function is called, ψ is NOT degenerate and sign-based marching works.
+// V21 Solution: Since hierarchical RMIP already narrows to small UV regions
+// (typically 2-8 texels wide), simply test ALL texels in the region.
+// This is robust, simple, and guaranteed correct.
 //
 // Algorithm:
-// 1. Find entry texel from ray's entry UV coordinate
-// 2. For each texel:
-//    a. Compute ψ at all 4 corners
-//    b. Test displaced surface for intersection
-//    c. If hit, return immediately (front-to-back)
-//    d. Determine exit edge from ψ sign pattern
-//    e. Move to adjacent texel across exit edge
-// 3. Stop when ray exits the UV region
+// 1. Convert UV bounds to texel coordinates
+// 2. Double loop over ALL texels in [texelMin, texelMax]
+// 3. For each texel, test its 2 micro-triangles for intersection
+// 4. Track the closest hit across all texels
+// 5. Return the best hit found
 //=============================================================================
-bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                       float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                       int2 texSize,
-                       out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                           float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                           int2 texSize,
+                           out float hitT, out float2 hitBary, out float3 hitGeoNormal)
 {
     hitT = rayTMax + 1.0;
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
-
-    // V14: ψ degeneracy is now checked at START of intersectionMain()
-    // If we reach here, ψ is NOT degenerate and sign-based marching should work
 
     // Convert UV bounds to texel coordinates
     int2 texelMin = int2(floor(uvMin * float2(texSize)));
@@ -1493,97 +1489,40 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     if (any(texelMin > texelMax))
         return false;
 
-    // Find entry point by projecting ray entry to UV space
-    // Use inverse displacement to find where ray enters the UV region
-    float3 Q_entry = rayO + rayTMin * rayD;
-    float2 entryBary;
-    bool validEntry = inverseDisplacement(tri, Q_entry, entryBary);
-
-    int2 currentTexel;
-    int entryEdge = EDGE_NONE;
-
-    if (validEntry && baryInTriangle(entryBary, 0.1))
-    {
-        // Start at the texel containing the entry point
-        float2 entryUV = baryToTex(tri, entryBary);
-        currentTexel = int2(floor(entryUV * float2(texSize)));
-        currentTexel = clamp(currentTexel, texelMin, texelMax);
-    }
-    else
-    {
-        // Fallback: start at corner of UV region
-        currentTexel = texelMin;
-    }
-
     float bestT = rayTMax + 1.0;
     bool found = false;
 
-    // V19: Initialize curve direction from gradient at entry point
-    // Use rayDirUV as initial guess, will be refined by gradient
-    float2 curveDir = computeRayDirUV(tri, rayD);
-
-    // Compute initial curve direction from ψ gradient at entry texel center
+    // V21: Simple double loop over ALL texels - no ψ, no marching, just test everything
+    for (int ty = texelMin.y; ty <= texelMax.y; ty++)
     {
-        float2 initUV = (float2(currentTexel) + 0.5) / float2(texSize);
-        float2 initBary;
-        texToBary(tri, initUV, initBary);
-        float2 grad = psiGrad(tri, initBary, rayO, rayD);
-
-        // Tangent is perpendicular to gradient
-        float2 tangent = float2(-grad.y, grad.x);
-
-        // Choose tangent direction that aligns with rayDirUV (initial guess)
-        if (dot(tangent, curveDir) < 0)
-            tangent = -tangent;
-
-        // Use tangent as initial curveDir if valid
-        if (length(tangent) > 1e-6)
-            curveDir = normalize(tangent);
-    }
-
-    // Maximum iterations to prevent infinite loops
-    int maxIters = (texelMax.x - texelMin.x + 1) * (texelMax.y - texelMin.y + 1) + 10;
-
-    for (int iter = 0; iter < maxIters; iter++)
-    {
-        // Check if current texel is within bounds
-        if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
-            currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
+        for (int tx = texelMin.x; tx <= texelMax.x; tx++)
         {
-            break;
-        }
+            int2 currentTexel = int2(tx, ty);
 
-        // Compute UV coordinates for texel corners
-        float2 uv00 = float2(currentTexel) / float2(texSize);
-        float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
-        float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
-        float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
+            // Compute UV coordinates for texel corners
+            float2 uv00 = float2(currentTexel) / float2(texSize);
+            float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
+            float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
+            float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
 
-        // Convert to barycentric
-        float2 b00, b10, b01, b11;
-        texToBary(tri, uv00, b00);
-        texToBary(tri, uv10, b10);
-        texToBary(tri, uv01, b01);
-        texToBary(tri, uv11, b11);
+            // Convert to barycentric
+            float2 b00, b10, b01, b11;
+            texToBary(tri, uv00, b00);
+            texToBary(tri, uv10, b10);
+            texToBary(tri, uv01, b01);
+            texToBary(tri, uv11, b11);
 
-        // V15 FIX: Save original unclamped values for ψ computation
-        // ψ must be computed on original positions, not clamped ones!
-        // Clamping moves multiple corners to the same edge position → similar ψ values
-        float2 b00_orig = b00;
-        float2 b10_orig = b10;
-        float2 b01_orig = b01;
-        float2 b11_orig = b11;
+            // Check if any corner is in valid triangle domain
+            float eps = 0.01;
+            bool valid00 = b00.x >= -eps && b00.y >= -eps && b00.x + b00.y <= 1.0 + eps;
+            bool valid10 = b10.x >= -eps && b10.y >= -eps && b10.x + b10.y <= 1.0 + eps;
+            bool valid01 = b01.x >= -eps && b01.y >= -eps && b01.x + b01.y <= 1.0 + eps;
+            bool valid11 = b11.x >= -eps && b11.y >= -eps && b11.x + b11.y <= 1.0 + eps;
 
-        // Check if any corner is in valid triangle domain
-        float eps = 0.01;
-        bool valid00 = b00.x >= -eps && b00.y >= -eps && b00.x + b00.y <= 1.0 + eps;
-        bool valid10 = b10.x >= -eps && b10.y >= -eps && b10.x + b10.y <= 1.0 + eps;
-        bool valid01 = b01.x >= -eps && b01.y >= -eps && b01.x + b01.y <= 1.0 + eps;
-        bool valid11 = b11.x >= -eps && b11.y >= -eps && b11.x + b11.y <= 1.0 + eps;
+            if (!(valid00 || valid10 || valid01 || valid11))
+                continue;
 
-        if (valid00 || valid10 || valid01 || valid11)
-        {
-            // Clamp barycentric coordinates for micro-triangle intersection only
+            // Clamp barycentric coordinates for micro-triangle intersection
             b00 = clampBary(b00);
             b10 = clampBary(b10);
             b01 = clampBary(b01);
@@ -1609,8 +1548,6 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                         hitBary = microBary;
                         hitGeoNormal = microNormal;
                         found = true;
-                        // Don't return immediately - we need to check if there's a closer hit
-                        // in an adjacent texel that we haven't visited yet
                     }
                 }
             }
@@ -1637,62 +1574,6 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                     }
                 }
             }
-        }
-
-        // V15 FIX: Compute ψ at all 4 corners using ORIGINAL unclamped values
-        // Using clamped values caused multiple corners to have similar ψ → EDGE_NONE
-        float psi00 = psi(tri, b00_orig, rayO, rayD);
-        float psi10 = psi(tri, b10_orig, rayO, rayD);
-        float psi01 = psi(tri, b01_orig, rayO, rayD);
-        float psi11 = psi(tri, b11_orig, rayO, rayD);
-
-        // V19: Find exit edge using tracked curve direction
-        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, curveDir);
-
-        if (exitEdge == EDGE_NONE)
-        {
-            // No valid exit - try moving in a default direction
-            // This can happen at boundaries or degenerate cases
-            if (currentTexel.x < texelMax.x)
-                currentTexel.x++;
-            else if (currentTexel.y < texelMax.y)
-                currentTexel.y++;
-            else
-                break;
-            entryEdge = EDGE_NONE;
-            continue;
-        }
-
-        // Move to adjacent texel
-        switch (exitEdge)
-        {
-            case EDGE_LEFT:   currentTexel.x--; break;
-            case EDGE_RIGHT:  currentTexel.x++; break;
-            case EDGE_BOTTOM: currentTexel.y--; break;
-            case EDGE_TOP:    currentTexel.y++; break;
-        }
-
-        // The entry edge for the next texel is opposite to our exit edge
-        entryEdge = getOppositeEdge(exitEdge);
-
-        // V19: Update curveDir from gradient at new texel center
-        // This maintains consistent direction along the ψ=0 curve
-        {
-            float2 nextUV = (float2(currentTexel) + 0.5) / float2(texSize);
-            float2 nextBary;
-            texToBary(tri, nextUV, nextBary);
-            float2 grad = psiGrad(tri, nextBary, rayO, rayD);
-
-            // Tangent is perpendicular to gradient
-            float2 tangent = float2(-grad.y, grad.x);
-
-            // Choose tangent direction that aligns with current curveDir (consistency)
-            if (dot(tangent, curveDir) < 0)
-                tangent = -tangent;
-
-            // Update curveDir if valid
-            if (length(tangent) > 1e-6)
-                curveDir = normalize(tangent);
         }
     }
 
@@ -1946,16 +1827,16 @@ void intersectionMain()
 
         if (maxTexelSize <= MARCHING_SCALE)
         {
-            // V12: Use ψ-guided texel marching (Paper Section 4.4)
-            // March through texels using ψ sign at corners to determine exit edge
+            // V21: Test ALL texels in this small region (replaces ψ-guided marching)
+            // Brute-force is more robust than ψ-guided and the region is small anyway
             float hitT;
             float2 hitBary;
             float3 hitGeoNormal;
 
-            if (texelMarchWithPsi(tri, matIdx, rayOrigin, rayDir,
-                                  bound.uvMin, bound.uvMax,
-                                  rayTMin, min(rayTMax, bestT),
-                                  texSize, hitT, hitBary, hitGeoNormal))
+            if (testAllTexelsInRegion(tri, matIdx, rayOrigin, rayDir,
+                                      bound.uvMin, bound.uvMax,
+                                      rayTMin, min(rayTMax, bestT),
+                                      texSize, hitT, hitBary, hitGeoNormal))
             {
                 if (hitT < bestT)
                 {
