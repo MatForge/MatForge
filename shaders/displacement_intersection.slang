@@ -1,23 +1,24 @@
 /*
- * RMIP V11 - Affine Arithmetic Implementation
+ * RMIP V12 - ψ-Guided Texel Marching Implementation
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
  * Reference: "Tessellation-Free Displacement Mapping for Ray Tracing" (Thonat et al. 2021)
  *
- * V11 Key Changes:
- * - Use AFFINE ARITHMETIC to compute mathematically guaranteed 3D bounds
- * - Grid sampling (V10.1) can miss extrema between sample points
- * - Affine arithmetic provides tight, conservative bounds automatically
+ * V12 Key Changes (from V11):
+ * - Implement paper's Section 4.4: texel marching using ψ sign at corners
+ * - The sign of ψ(u,v) = det(P-O, N, D) at texel corners determines exit edge
+ * - March through texels one-by-one following the ψ = 0 curve
+ * - More efficient than tessellating entire UV region
  *
- * Affine Arithmetic Basics (Appendix A of Thonat 2021):
- * - Affine form: [x] = x_c + x_u*ε_u + x_v*ε_v + x_K*ε_K
- * - x_c = center value, x_u/x_v = coefficients for u/v, x_K = accumulated error
- * - ε_u, ε_v, ε_K are symbolic variables in [-1, 1]
- * - AABB extraction: [x_c - |x_u| - |x_v| - x_K, x_c + |x_u| + |x_v| + x_K]
+ * V11 Features Retained:
+ * - Affine arithmetic for 3D bounds computation
+ * - Bounding prism for initial intersection
+ * - Bound reduction via inverse displacement
+ * - Turning point detection
  *
  * Key Equations from Paper:
- * - Eq 11: Height affine form from minmax mipmap
- * - Eq 12: UV domain as affine form
- * - Eq 13: Displaced surface AABB from affine form
+ * - Eq 3: ψ(u,v) = det(P-O, N, D) = 0 (implicit ray projection)
+ * - Section 4.4: "The sign of ψ at each texel corner indicates from which edge
+ *   the ray leaves the texel"
  */
 
 #include "shaderio.h"
@@ -446,6 +447,93 @@ float2 psiGrad(Tri tri, float2 bary, float3 rayO, float3 rayD)
     float psi_v = dot(tri.dPdv, NxD) + dot(PmO, NvxD);
 
     return float2(psi_u, psi_v);
+}
+
+//=============================================================================
+// V12: Edge direction constants for ψ-guided texel marching (Section 4.4)
+//=============================================================================
+static const int EDGE_NONE   = -1;
+static const int EDGE_LEFT   = 0;   // u decreases (texel to the left)
+static const int EDGE_RIGHT  = 1;   // u increases (texel to the right)
+static const int EDGE_BOTTOM = 2;   // v decreases (texel below)
+static const int EDGE_TOP    = 3;   // v increases (texel above)
+
+//=============================================================================
+// V12: Find exit edge from ψ sign pattern at texel corners
+//
+// Paper Section 4.4: "The sign of the implicit form ψ (3) at each texel corner
+// indicates from which edge the ray leaves the texel"
+//
+// Texel corners:
+//   (0,1)-----(1,1)
+//     |         |
+//     |  texel  |
+//     |         |
+//   (0,0)-----(1,0)
+//
+// If ψ changes sign across an edge, the ray curve ψ=0 crosses that edge.
+// The exit edge is where the ray LEAVES (not enters) the texel.
+//=============================================================================
+int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEdge)
+{
+    // Check which edges have sign changes
+    bool crossLeft   = (psi00 * psi01 < 0.0);  // Left edge: between (0,0) and (0,1)
+    bool crossRight  = (psi10 * psi11 < 0.0);  // Right edge: between (1,0) and (1,1)
+    bool crossBottom = (psi00 * psi10 < 0.0);  // Bottom edge: between (0,0) and (1,0)
+    bool crossTop    = (psi01 * psi11 < 0.0);  // Top edge: between (0,1) and (1,1)
+
+    // Count crossings
+    int numCrossings = (crossLeft ? 1 : 0) + (crossRight ? 1 : 0) +
+                       (crossBottom ? 1 : 0) + (crossTop ? 1 : 0);
+
+    // If only one crossing, that's both entry and exit (degenerate case)
+    // If two crossings, one is entry and one is exit
+    // The exit edge is the one that's NOT the entry edge
+
+    if (numCrossings == 0)
+    {
+        // No crossings - ray doesn't pass through this texel
+        // This shouldn't happen if we started correctly
+        return EDGE_NONE;
+    }
+
+    if (numCrossings == 1)
+    {
+        // Only one edge - must be the exit
+        if (crossLeft)   return EDGE_LEFT;
+        if (crossRight)  return EDGE_RIGHT;
+        if (crossBottom) return EDGE_BOTTOM;
+        if (crossTop)    return EDGE_TOP;
+    }
+
+    // Two or more crossings - pick the one that's not the entry
+    if (crossRight && entryEdge != EDGE_RIGHT)   return EDGE_RIGHT;
+    if (crossTop && entryEdge != EDGE_TOP)       return EDGE_TOP;
+    if (crossLeft && entryEdge != EDGE_LEFT)     return EDGE_LEFT;
+    if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+
+    // Fallback: return any crossing edge
+    if (crossRight)  return EDGE_RIGHT;
+    if (crossTop)    return EDGE_TOP;
+    if (crossLeft)   return EDGE_LEFT;
+    if (crossBottom) return EDGE_BOTTOM;
+
+    return EDGE_NONE;
+}
+
+//=============================================================================
+// V12: Get the opposite edge (for determining entry edge when moving to adjacent texel)
+//=============================================================================
+int getOppositeEdge(int edge)
+{
+    switch (edge)
+    {
+        case EDGE_LEFT:   return EDGE_RIGHT;
+        case EDGE_RIGHT:  return EDGE_LEFT;
+        case EDGE_BOTTOM: return EDGE_TOP;
+        case EDGE_TOP:    return EDGE_BOTTOM;
+        default:          return EDGE_NONE;
+    }
 }
 
 //=============================================================================
@@ -1235,7 +1323,198 @@ bool computeUVRegionPrism(Tri tri, float2 uvMin, float2 uvMax,
 }
 
 //=============================================================================
-// Tessellate UV region
+// V12: ψ-Guided Texel Marching (Paper Section 4.4)
+//
+// March through texels one-by-one, using ψ sign at corners to determine
+// which edge the ray exits from. This is more efficient than tessellating
+// the entire UV region because we only visit texels the ray actually passes through.
+//
+// Algorithm:
+// 1. Find entry texel from ray's entry UV coordinate
+// 2. For each texel:
+//    a. Compute ψ at all 4 corners
+//    b. Test displaced surface for intersection
+//    c. If hit, return immediately (front-to-back)
+//    d. Determine exit edge from ψ sign pattern
+//    e. Move to adjacent texel across exit edge
+// 3. Stop when ray exits the UV region
+//=============================================================================
+bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                       float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                       int2 texSize,
+                       out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    // Convert UV bounds to texel coordinates
+    int2 texelMin = int2(floor(uvMin * float2(texSize)));
+    int2 texelMax = int2(ceil(uvMax * float2(texSize)));
+
+    // Clamp to valid range
+    texelMin = max(texelMin, int2(0, 0));
+    texelMax = min(texelMax, texSize - int2(1, 1));
+
+    if (any(texelMin > texelMax))
+        return false;
+
+    // Find entry point by projecting ray entry to UV space
+    // Use inverse displacement to find where ray enters the UV region
+    float3 Q_entry = rayO + rayTMin * rayD;
+    float2 entryBary;
+    bool validEntry = inverseDisplacement(tri, Q_entry, entryBary);
+
+    int2 currentTexel;
+    int entryEdge = EDGE_NONE;
+
+    if (validEntry && baryInTriangle(entryBary, 0.1))
+    {
+        // Start at the texel containing the entry point
+        float2 entryUV = baryToTex(tri, entryBary);
+        currentTexel = int2(floor(entryUV * float2(texSize)));
+        currentTexel = clamp(currentTexel, texelMin, texelMax);
+    }
+    else
+    {
+        // Fallback: start at corner of UV region
+        currentTexel = texelMin;
+    }
+
+    float bestT = rayTMax + 1.0;
+    bool found = false;
+
+    // Maximum iterations to prevent infinite loops
+    int maxIters = (texelMax.x - texelMin.x + 1) * (texelMax.y - texelMin.y + 1) + 10;
+
+    for (int iter = 0; iter < maxIters; iter++)
+    {
+        // Check if current texel is within bounds
+        if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
+            currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
+        {
+            break;
+        }
+
+        // Compute UV coordinates for texel corners
+        float2 uv00 = float2(currentTexel) / float2(texSize);
+        float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
+        float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
+        float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
+
+        // Convert to barycentric
+        float2 b00, b10, b01, b11;
+        texToBary(tri, uv00, b00);
+        texToBary(tri, uv10, b10);
+        texToBary(tri, uv01, b01);
+        texToBary(tri, uv11, b11);
+
+        // Check if any corner is in valid triangle domain
+        float eps = 0.01;
+        bool valid00 = b00.x >= -eps && b00.y >= -eps && b00.x + b00.y <= 1.0 + eps;
+        bool valid10 = b10.x >= -eps && b10.y >= -eps && b10.x + b10.y <= 1.0 + eps;
+        bool valid01 = b01.x >= -eps && b01.y >= -eps && b01.x + b01.y <= 1.0 + eps;
+        bool valid11 = b11.x >= -eps && b11.y >= -eps && b11.x + b11.y <= 1.0 + eps;
+
+        if (valid00 || valid10 || valid01 || valid11)
+        {
+            // Clamp barycentric coordinates
+            b00 = clampBary(b00);
+            b10 = clampBary(b10);
+            b01 = clampBary(b01);
+            b11 = clampBary(b11);
+
+            // Test micro-triangles for intersection
+            float microT;
+            float2 microBary;
+            float3 microNormal;
+
+            // Triangle 1: b00, b10, b01
+            float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
+            if (area1 > 1e-6)
+            {
+                if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
+                                           rayTMin, min(rayTMax, bestT),
+                                           microT, microBary, microNormal))
+                {
+                    if (microT < bestT)
+                    {
+                        bestT = microT;
+                        hitT = microT;
+                        hitBary = microBary;
+                        hitGeoNormal = microNormal;
+                        found = true;
+                        // Don't return immediately - we need to check if there's a closer hit
+                        // in an adjacent texel that we haven't visited yet
+                    }
+                }
+            }
+
+            // Triangle 2: b10, b11, b01
+            float w11 = 1.0 - b11.x - b11.y;
+            if (w11 >= -0.01)
+            {
+                float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
+                if (area2 > 1e-6)
+                {
+                    if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
+                                               rayTMin, min(rayTMax, bestT),
+                                               microT, microBary, microNormal))
+                    {
+                        if (microT < bestT)
+                        {
+                            bestT = microT;
+                            hitT = microT;
+                            hitBary = microBary;
+                            hitGeoNormal = microNormal;
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute ψ at all 4 corners for exit edge determination
+        float psi00 = psi(tri, b00, rayO, rayD);
+        float psi10 = psi(tri, b10, rayO, rayD);
+        float psi01 = psi(tri, b01, rayO, rayD);
+        float psi11 = psi(tri, b11, rayO, rayD);
+
+        // Find exit edge
+        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge);
+
+        if (exitEdge == EDGE_NONE)
+        {
+            // No valid exit - try moving in a default direction
+            // This can happen at boundaries or degenerate cases
+            if (currentTexel.x < texelMax.x)
+                currentTexel.x++;
+            else if (currentTexel.y < texelMax.y)
+                currentTexel.y++;
+            else
+                break;
+            entryEdge = EDGE_NONE;
+            continue;
+        }
+
+        // Move to adjacent texel
+        switch (exitEdge)
+        {
+            case EDGE_LEFT:   currentTexel.x--; break;
+            case EDGE_RIGHT:  currentTexel.x++; break;
+            case EDGE_BOTTOM: currentTexel.y--; break;
+            case EDGE_TOP:    currentTexel.y++; break;
+        }
+
+        // The entry edge for the next texel is opposite to our exit edge
+        entryEdge = getOppositeEdge(exitEdge);
+    }
+
+    return found;
+}
+
+//=============================================================================
+// Tessellate UV region (V11 fallback method)
 //=============================================================================
 bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                         float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
@@ -1336,14 +1615,19 @@ bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// Main intersection shader - V11: Affine Arithmetic Implementation
+// Main intersection shader - V12: ψ-Guided Texel Marching Implementation
 //
-// Key changes from V10.1:
-// 1. Use AFFINE ARITHMETIC to compute 3D bounds (replaces grid sampling)
-// 2. Affine arithmetic provides mathematically guaranteed conservative bounds
-// 3. Handles position/normal interpolation exactly (linear operations)
-// 4. Uses Chebyshev approximation for normalization (non-linear)
-// 5. Should eliminate tearing caused by grid sampling missing extrema
+// V12 Key changes from V11:
+// 1. Use ψ-guided texel marching instead of tessellation (Paper Section 4.4)
+// 2. March through texels one-by-one following the ψ = 0 curve
+// 3. Use ψ sign at texel corners to determine exit edge (like DDA)
+// 4. More efficient: only visit texels the ray actually passes through
+//
+// V11 Features retained:
+// - Affine arithmetic for 3D bounds computation
+// - Bounding prism for initial intersection
+// - Bound reduction via inverse displacement
+// - Turning point detection
 //=============================================================================
 [shader("intersection")]
 void intersectionMain()
@@ -1476,14 +1760,16 @@ void intersectionMain()
 
         if (maxTexelSize <= MARCHING_SCALE)
         {
+            // V12: Use ψ-guided texel marching (Paper Section 4.4)
+            // March through texels using ψ sign at corners to determine exit edge
             float hitT;
             float2 hitBary;
             float3 hitGeoNormal;
 
-            if (tessellateUVRegion(tri, matIdx, rayOrigin, rayDir,
-                                   bound.uvMin, bound.uvMax,
-                                   rayTMin, min(rayTMax, bestT),
-                                   texSize, hitT, hitBary, hitGeoNormal))
+            if (texelMarchWithPsi(tri, matIdx, rayOrigin, rayDir,
+                                  bound.uvMin, bound.uvMax,
+                                  rayTMin, min(rayTMax, bestT),
+                                  texSize, hitT, hitBary, hitGeoNormal))
             {
                 if (hitT < bestT)
                 {
