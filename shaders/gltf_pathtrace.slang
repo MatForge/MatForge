@@ -51,6 +51,7 @@
 [[vk::binding(BindingPoints::eOutImages, 1)]]       RWTexture2D<float4>                     outImages[];
 [[vk::binding(BindingPoints::eQoldsMatrices, 1)]]   StructuredBuffer<int>                   qoldsMatrices;
 [[vk::binding(BindingPoints::eQoldsSeeds, 1)]]      StructuredBuffer<uint>                  qoldsSeeds;
+[[vk::binding(8, 1)]]                                Texture2DArray<float2>                  rmipTextures[8];  // RMIP minmax bounds per material
 
 // HDR Environment
 [[vk::binding(EnvBindings::eImpSamples, 2)]]    StructuredBuffer<EnvAccel>  envSamplingData;
@@ -598,6 +599,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, uint 
         //return sampleResult;
       }
 
+      // DEBUG visualization removed - now rendering normally
 
       PbrMaterial       pbrMat;
       GltfShadeMaterial material;
@@ -946,6 +948,87 @@ void rgenMain()
 }
 
 //-----------------------------------------------------------------------
+// DISPLACEMENT SHADERS
+//-----------------------------------------------------------------------
+
+// Helper function to unpack UV from intersection shader
+float2 unpackUV(uint packedUV)
+{
+    float2 uv;
+    uv.x = float((packedUV >> 16) & 0xFFFF) / 65535.0;
+    uv.y = float(packedUV & 0xFFFF) / 65535.0;
+    return uv;
+}
+
+// Helper function to convert UV to barycentric coordinates
+float3 uvToBarycentric(float2 hitUV, float2 uv0, float2 uv1, float2 uv2)
+{
+    float2 v = uv1 - uv0;
+    float2 w = uv2 - uv0;
+    float2 p = hitUV - uv0;
+
+    float d00 = dot(v, v);
+    float d01 = dot(v, w);
+    float d11 = dot(w, w);
+    float d20 = dot(p, v);
+    float d21 = dot(p, w);
+
+    float denom = d00 * d11 - d01 * d01;
+    if (abs(denom) < 1e-10)
+    {
+        return float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
+    }
+
+    float baryV = (d11 * d20 - d01 * d21) / denom;
+    float baryW = (d00 * d21 - d01 * d20) / denom;
+    return float3(1.0 - baryV - baryW, baryV, baryW);
+}
+
+// Octahedron decoding for normals (unpack uint to float3)
+float3 octDecode(float2 oct)
+{
+    oct = oct * 2.0 - 1.0;
+    float3 n = float3(oct.x, oct.y, 1.0 - abs(oct.x) - abs(oct.y));
+    if (n.z < 0)
+    {
+        float2 wrapped = (1.0 - abs(n.yx)) * float2(n.x >= 0 ? 1.0 : -1.0, n.y >= 0 ? 1.0 : -1.0);
+        n.xy = wrapped;
+    }
+    return normalize(n);
+}
+
+float3 unpackNormal(uint packed)
+{
+    float x = float((packed >> 16) & 0xFFFF) / 65535.0;
+    float y = float(packed & 0xFFFF) / 65535.0;
+    return octDecode(float2(x, y));
+}
+
+// Helper function to get hit state from UV for displaced geometry
+HitState getHitStateFromUV(GltfRenderPrimitive renderPrim, 
+                           float2 hitUV,
+                           float4x3 worldToObject,
+                           float4x3 objectToWorld,
+                           int primitiveID,
+                           float3 worldRayOrigin)
+{
+    // Get triangle indices
+    uint3 triangleIndex = getTriangleIndices(renderPrim, primitiveID);
+
+    // Get vertex UVs individually
+    float2 uv0 = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, float3(1.0, 0.0, 0.0));
+    float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, float3(0.0, 1.0, 0.0));
+    float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, float3(0.0, 0.0, 1.0));
+
+    // Convert hit UV to barycentric coordinates
+    float3 barycentrics = uvToBarycentric(hitUV, uv0, uv1, uv2);
+
+    // Now use the existing getHitState function with the computed barycentrics
+    // This will handle all the interpolation of normals, tangents, etc.
+    return getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
+}
+
+//-----------------------------------------------------------------------
 // CLOSEST HIT
 //-----------------------------------------------------------------------
 [shader("closesthit")]
@@ -983,6 +1066,55 @@ void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
   payload.totalTransmission = float3(0.0);
 }
 
+//-----------------------------------------------------------------------
+// DISPLACEMENT CLOSEST HIT
+//-----------------------------------------------------------------------
+[shader("closesthit")]
+void rchitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+    // DEBUG: Mark this as a displaced hit for path tracer debug
+    payload.isDisplacedHit = true;
+
+    // Unpack UV from intersection shader (packed in attr.barycentrics.x)
+    uint packedUV = asuint(attr.barycentrics.x);
+    float2 hitUV = unpackUV(packedUV);
+
+    // Unpack geometric normal from intersection shader (packed in attr.barycentrics.y)
+    uint packedNormal = asuint(attr.barycentrics.y);
+    float3 objectGeoNormal = unpackNormal(packedNormal);
+
+    int instanceID = InstanceIndex();
+    int renderPrimID = InstanceID();
+    int primitiveID = PrimitiveIndex();
+
+    // Get the built-in ray tracing variables
+    float4x3 worldToObject = WorldToObject4x3();
+    float4x3 objectToWorld = ObjectToWorld4x3();
+    float3 worldRayOrigin = WorldRayOrigin();
+    float hitT = RayTCurrent();
+
+    // Retrieve the Primitive mesh buffer information
+    GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
+
+    // Get hit state using UV instead of hardware barycentrics
+    HitState hit = getHitStateFromUV(renderPrim, hitUV, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
+
+    // Override geometric normal with the one computed from displaced micro-triangle
+    // Transform object-space geometric normal to world space
+    // Note: For normals, we use worldToObject (inverse) for correct transformation under non-uniform scale
+    float3 worldGeoNormal = normalize(float3(mul(worldToObject, objectGeoNormal).xyz));
+
+    // Use geometric normal for both shading and geometric normal
+    // This ensures proper lighting on displaced surfaces
+    hit.geonrm = worldGeoNormal;
+    hit.nrm = worldGeoNormal;  // Use geometric normal for shading (can be improved with normal maps later)
+
+    // Fill payload exactly the same way as regular hit shader
+    payload.hitT = hitT;
+    payload.rprimID = renderPrimID;
+    payload.rnodeID = instanceID;
+    payload.hitState = hit;
+}
 
 //-----------------------------------------------------------------------
 // MISS
@@ -1070,4 +1202,46 @@ void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
   }
   // We want all possible intersections
   IgnoreHit();
+}
+
+//-----------------------------------------------------------------------
+// DISPLACEMENT ANY HIT (for alpha testing)
+//-----------------------------------------------------------------------
+[shader("anyhit")]
+void rahitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+    // DEBUG: Disable opacity testing - accept all hits
+    // This should make displaced geometry always visible
+    return;  // Early return - don't call IgnoreHit()
+
+    // ORIGINAL CODE (DISABLED):
+    /*
+    // Unpack UV from intersection shader
+    uint packedUV = asuint(attr.barycentrics.x);
+    float2 hitUV = unpackUV(packedUV);
+
+    uint instanceID = InstanceIndex();
+    uint renderPrimID = InstanceID();
+    uint triangleID = PrimitiveIndex();
+
+    // Retrieve the render node and primitive info
+    GltfRenderNode renderNode = pushConst.gltfScene->renderNodes[instanceID];
+    GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
+
+    // Get triangle indices and vertex UVs
+    uint3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
+    float2 uv0 = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, float3(1.0, 0.0, 0.0));
+    float2 uv1 = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, float3(0.0, 1.0, 0.0));
+    float2 uv2 = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, float3(0.0, 0.0, 1.0));
+
+    // Convert UV to barycentric
+    float3 barycentrics = uvToBarycentric(hitUV, uv0, uv1, uv2);
+
+    // Use the same opacity test as regular geometry
+    float opacity = getOpacity(renderNode, renderPrim, triangleID, barycentrics);
+    if (rand(payload.seed) > opacity)
+    {
+        IgnoreHit();
+    }
+    */
 }

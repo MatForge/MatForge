@@ -1,0 +1,150 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "MatForge Displacement Test"
+  },
+  "extensionsUsed": [
+    "KHR_materials_displacement"
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "DisplacedChippedPlanks"
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Chipped Planks",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "Chipped PlanksMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.6,
+          0.4,
+          0.2,
+          1.0
+        ],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.5
+      },
+      "normalTexture": {
+        "index": 1,
+        "texCoord": 0
+      },
+      "extensions": {
+        "KHR_materials_displacement": {
+          "displacementGeometryTexture": {
+            "index": 0,
+            "texCoord": 0
+          },
+          "displacementGeometryFactor": 0.3,
+          "displacementGeometryOffset": 0.0
+        }
+      }
+    }
+  ],
+  "textures": [
+    {
+      "source": 0
+    },
+    {
+      "source": 1
+    }
+  ],
+  "images": [
+    {
+      "uri": "121_chipped_planks_height_512.png",
+      "mimeType": "image/png"
+    },
+    {
+      "uri": "121_chipped_planks_normal_512.jpg",
+      "mimeType": "image/jpeg"
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3",
+      "min": [
+        -2.0,
+        -2.0,
+        -3.0
+      ],
+      "max": [
+        2.0,
+        2.0,
+        -3.0
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5123,
+      "count": 6,
+      "type": "SCALAR"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 48
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 48,
+      "byteLength": 48
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 96,
+      "byteLength": 32
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 128,
+      "byteLength": 12
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 140,
+      "uri": "data:application/octet-stream;base64,AAAAwAAAAMAAAEDAAAAAQAAAAMAAAEDAAAAAQAAAAEAAAEDAAAAAwAAAAEAAAEDAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAAAAAAAEAAgAAAAIAAwA="
+    }
+  ]
+}

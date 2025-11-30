@@ -66,6 +66,12 @@ enum BindingPoints
   eTexturesStorage,
   eQoldsMatrices, // QOLDS generator matrices
   eQoldsSeeds,    // QOLDS Owen scrambling seeds
+  // ADD: RMIP texture array for displacement
+  eRmipTextures = 8,			// Texture2DArray for RMIP minmax bounds
+  eDisplacementTextures = 9,	// Regular displacement textures
+  eRmipSampler = 10,			// Sampler for RMIP textures
+  eDisplacementSampler = 11,	// Sampler for displacement textures
+
 };
 
 // Binding points for descriptors
@@ -135,6 +141,8 @@ struct PathtracePushConstant
   SceneFrameInfo*        frameInfo;            // Camera info
   SkyPhysicalParameters* skyParams;            // Sky physical parameters
   GltfScene*             gltfScene;            // GLTF sceneF
+
+  uint hasDisplacement;
 };
 
 // Push constant

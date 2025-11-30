@@ -14,7 +14,8 @@ _install/
 build/                
 spv/
 others/
-san-miguel/           
+san-miguel/    
+build_log.txt       
 
 # =============================================================================
 # Project-Specific Exclusions
@@ -30,3 +31,9 @@ _downloaded_resources/
 .claude/
 CLAUDE.md
 
+nul
+*.bak
+*.orig
+*.patch
+build_output.txt
+build_log.txt

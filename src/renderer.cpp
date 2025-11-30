@@ -92,6 +92,10 @@
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
 #include "nvvkgltf/converter.hpp"
+#include "nvvkgltf/tinygltf_utils.hpp"
+
+// For reading image dimensions
+#include "stb/stb_image.h"
 
 extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 
@@ -230,6 +234,12 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     });
 #endif
   }
+
+  // Initialize RMIP builder
+  m_rmipBuilder.init(m_resources.allocator, m_transientCmdPool);
+
+  // Initialize AABB computer for displacement mapping
+  m_aabbComputer.init(m_device, &m_resources.allocator);
 
   // ===== Renderer Initialization =====
 
@@ -899,14 +909,172 @@ void GltfRenderer::createVulkanScene()
 
     m_resources.sceneVk.create(cmd, m_resources.staging, m_resources.scene, false);  // Creating the scene in Vulkan buffers
     m_resources.staging.cmdUploadAppended(cmd);
+
+    // CRITICAL: Execute vertex upload IMMEDIATELY (not queued)
+    // The AABB compute shader needs vertex data to be available BEFORE it runs
+    nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+    LOGI("[Renderer] Vertex data uploaded immediately (synchronous)\n");
+  }
+  // Build RMIPs FIRST, before creating BLAS (needed for displacement info)
+  {
+    VkCommandBuffer cmd{};
+    nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+    buildDisplacementRMIPs(cmd);
+    nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+  }
+
+
+  // Prepare displacement information for BLAS creation (AABB geometry)
+  std::vector<nvvkgltf::DisplacementInfo> displacementInfo(m_resources.scene.getModel().materials.size());
+  for(size_t matIdx = 0; matIdx < m_displacementRMIPs.size() && matIdx < displacementInfo.size(); matIdx++)
+  {
+    const auto& rmipData = m_displacementRMIPs[matIdx];
+    if(rmipData.hasDisplacement)
     {
-      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-      m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
+      displacementInfo[matIdx].hasDisplacement = true;
+      displacementInfo[matIdx].minDisplacement = 0.0f;  // Assuming normalized height map
+      displacementInfo[matIdx].maxDisplacement = rmipData.displacementFactor;  // Scale factor
     }
   }
 
   // Create the bottom-level acceleration structure descriptors (no building yet)
-  m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags);
+  // Use the new overload that supports AABB geometry for displaced primitives
+  m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags, displacementInfo);
+
+  // Compute AABBs for displaced primitives before building BLAS
+  {
+    const auto& renderPrimitives = m_resources.scene.getRenderPrimitives();
+    const auto& vertexBuffers = m_resources.sceneVk.vertexBuffers();
+    const auto& indices = m_resources.sceneVk.indices();
+
+    // Check if we have any displaced primitives
+    bool hasAnyDisplacement = false;
+    for(const auto& info : displacementInfo)
+    {
+      if(info.hasDisplacement)
+      {
+        hasAnyDisplacement = true;
+        break;
+      }
+    }
+
+    LOGI("[AABB] hasAnyDisplacement=%d, displacementInfo.size()=%zu, renderPrimitives.size()=%zu\n",
+         hasAnyDisplacement, displacementInfo.size(), renderPrimitives.size());
+    LOGI("[AABB] vertexBuffers.size()=%zu, indices.size()=%zu\n",
+         vertexBuffers.size(), indices.size());
+
+    if(hasAnyDisplacement)
+    {
+      VkCommandBuffer cmd{};
+      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+      // For each displaced primitive, compute its AABBs
+      VkDeviceSize aabbOffset = 0;
+      uint32_t numDisplacedPrims = 0;
+      for(uint32_t p_idx = 0; p_idx < renderPrimitives.size(); p_idx++)
+      {
+        const auto& prim = renderPrimitives[p_idx];
+
+        // Check if this primitive has displacement
+        bool hasDisplacement = false;
+        nvvkgltf::DisplacementInfo dispInfo;
+        if(prim.pPrimitive && prim.pPrimitive->material >= 0 &&
+           prim.pPrimitive->material < static_cast<int>(displacementInfo.size()))
+        {
+          dispInfo = displacementInfo[prim.pPrimitive->material];
+          hasDisplacement = dispInfo.hasDisplacement;
+          LOGI("[AABB]   Prim %u: material=%d, hasDisp=%d\n", p_idx, prim.pPrimitive->material, hasDisplacement);
+        }
+        else
+        {
+          LOGI("[AABB]   Prim %u: NO MATERIAL\n", p_idx);
+        }
+        if(hasDisplacement)
+        {
+          // Prepare AABB compute parameters
+          AabbComputeParams params;
+          params.numTriangles = prim.indexCount / 3;
+          params.minDisplacement = dispInfo.minDisplacement;
+          params.maxDisplacement = dispInfo.maxDisplacement;
+          params.padding = 0;
+
+          // Create sub-buffer view for this primitive's AABBs
+          const nvvk::Buffer& aabbBuffer = m_resources.sceneRtx.getAabbBuffer();
+          nvvk::Buffer aabbSubBuffer;
+          aabbSubBuffer.buffer = aabbBuffer.buffer;
+          aabbSubBuffer.address = aabbBuffer.address + aabbOffset;
+
+          LOGI("[AABB]     Computing %u AABBs: minDisp=%.3f, maxDisp=%.3f, buffer addr=0x%llx\n",
+               params.numTriangles, params.minDisplacement, params.maxDisplacement, aabbSubBuffer.address);
+          LOGI("[AABB]     Vertex buffer addr=0x%llx, Index buffer addr=0x%llx\n",
+               vertexBuffers[p_idx].position.address, indices[p_idx].address);
+          LOGI("[AABB]     Prim indexCount=%u, vertexCount=%u\n", prim.indexCount, prim.vertexCount);
+
+          // DEBUG: Read back vertex buffer to verify contents
+          const nvvk::Buffer& vtxBuf = vertexBuffers[p_idx].position;
+          if(vtxBuf.mapping != nullptr)
+          {
+            glm::vec3* vertices = reinterpret_cast<glm::vec3*>(vtxBuf.mapping);
+            LOGI("[AABB]     First 4 vertices from CPU-side mapping:\n");
+            uint32_t numVertsToShow = (prim.vertexCount < 4) ? prim.vertexCount : 4;
+            for(uint32_t v = 0; v < numVertsToShow; v++)
+            {
+              LOGI("[AABB]       v[%u] = (%.3f, %.3f, %.3f)\n", v, vertices[v].x, vertices[v].y, vertices[v].z);
+            }
+          }
+          else
+          {
+            LOGI("[AABB]     WARNING: Vertex buffer not mapped, cannot verify contents!\n");
+          }
+
+          // DEBUG: Read back index buffer
+          const nvvk::Buffer& idxBuf = indices[p_idx];
+          if(idxBuf.mapping != nullptr)
+          {
+            uint32_t* idxData = reinterpret_cast<uint32_t*>(idxBuf.mapping);
+            LOGI("[AABB]     First 6 indices: %u %u %u %u %u %u\n",
+                 idxData[0], idxData[1], idxData[2], idxData[3], idxData[4], idxData[5]);
+          }
+
+          numDisplacedPrims++;
+
+          // Compute AABBs for this primitive
+          m_aabbComputer.computeAABBs(cmd,
+                                      vertexBuffers[p_idx].position,
+                                      vertexBuffers[p_idx].normal,
+                                      indices[p_idx],
+                                      aabbSubBuffer,
+                                      params);
+
+          aabbOffset += params.numTriangles * sizeof(VkAabbPositionsKHR);
+        }
+      }
+      LOGI("[AABB] Computed for %u primitives\n", numDisplacedPrims);
+
+      // Submit and wait (AABBs must be ready before BLAS build)
+      nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+      // DEBUG: Read back first AABB to verify correctness
+      if(numDisplacedPrims > 0)
+      {
+        const nvvk::Buffer& aabbBuffer = m_resources.sceneRtx.getAabbBuffer();
+        if(aabbBuffer.mapping != nullptr)
+        {
+          struct VkAabbPositionsKHR {
+            float minX, minY, minZ, maxX, maxY, maxZ;
+          };
+          VkAabbPositionsKHR* aabbs = reinterpret_cast<VkAabbPositionsKHR*>(aabbBuffer.mapping);
+          LOGI("[AABB] First AABB: min=(%.3f, %.3f, %.3f), max=(%.3f, %.3f, %.3f)\n",
+               aabbs[0].minX, aabbs[0].minY, aabbs[0].minZ,
+               aabbs[0].maxX, aabbs[0].maxY, aabbs[0].maxZ);
+        }
+        else
+        {
+          LOGI("[AABB] WARNING: AABB buffer not mapped!\n");
+        }
+      }
+    }
+  }
 
   // Build the bottom-level acceleration structure
   // Memory-conscious approach: build within a fixed memory budget using multiple command buffers if needed
@@ -930,16 +1098,20 @@ void GltfRenderer::createVulkanScene()
 
     // Queue TLAS building for after all BLAS work completes
     // TLAS is the top-level structure referencing all bottom-level acceleration structures
+    // IMPORTANT: This must be queued and executed AFTER BLAS build completes
+    // The queue processing ensures correct ordering: BLAS first, then TLAS
     {
       VkCommandBuffer cmd{};
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, m_resources.scene);
+      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, m_resources.scene, displacementInfo);
       m_resources.staging.cmdUploadAppended(cmd);
       {
         std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
         m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
       }
+      LOGI("[Renderer] TLAS build queued (will execute after BLAS build)\n");
     }
+
   }
 
   // Build mapping for faster node lookups
@@ -1117,6 +1289,18 @@ void GltfRenderer::createDescriptorSets()
                                               1, VK_SHADER_STAGE_ALL);
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eQoldsSeeds, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                               VK_SHADER_STAGE_ALL);
+
+  // RMIP displacement bindings (8-11)
+  // Note: Keep total push descriptors <= 32 (maxPushDescriptors limit)
+  // Current: 1 (TLAS) + 10 (output images) + 8 (RMIP) + 8 (displacement) + 1 + 1 = 29
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eRmipTextures,
+                                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8, VK_SHADER_STAGE_ALL);  // Array of RMIP textures
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementTextures,
+                                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8, VK_SHADER_STAGE_ALL);  // Displacement textures
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eRmipSampler,
+                                              VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // RMIP sampler
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementSampler,
+                                              VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // Displacement sampler
 
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
@@ -1299,6 +1483,21 @@ void GltfRenderer::destroyResources()
   // Destroy convergence analyzer before allocator to prevent memory leak
   m_convergenceAnalyzer.destroy();
 
+  // Clean up RMIP resources BEFORE destroying allocator
+  for (auto& rmipData : m_displacementRMIPs)
+  {
+      if (rmipData.view != VK_NULL_HANDLE)
+          vkDestroyImageView(m_device, rmipData.view, nullptr);
+      if (rmipData.image.image != VK_NULL_HANDLE)
+          m_resources.allocator.destroyImage(rmipData.image);
+  }
+  m_displacementRMIPs.clear();
+
+  // Deinit RMIP builder and AABB computer BEFORE destroying allocator (they have internal buffers)
+  m_rmipBuilder.deinit();
+  m_aabbComputer.deinit();
+
+  // NOW it's safe to destroy the allocator
   m_resources.allocator.deinit();
 }
 
@@ -1605,3 +1804,193 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
            m_convergenceTestSampleCounts.size(), targetSamples, timeDeltaMs);
   }
 }
+void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
+{
+    NVVK_DBG_SCOPE(cmd);
+    SCOPED_TIMER(__FUNCTION__);
+
+    cleanupDisplacementRMIPs();
+
+    // Reset descriptor pool to free all previously allocated descriptor sets
+    m_rmipBuilder.resetDescriptorPool();
+
+    const tinygltf::Model& model = m_resources.scene.getModel();
+
+    // Resize vector to hold displacement data for all materials
+    m_displacementRMIPs.resize(model.materials.size());
+
+    for (size_t matIdx = 0; matIdx < model.materials.size(); matIdx++)
+    {
+        const tinygltf::Material& material = model.materials[matIdx];
+
+        KHR_materials_displacement displacement = tinygltf::utils::getDisplacement(material);
+
+        if (displacement.displacementGeometryTexture.index < 0)
+            continue;  // No displacement texture
+
+        int textureIdx = displacement.displacementGeometryTexture.index;
+        if (textureIdx < 0 || textureIdx >= static_cast<int>(model.textures.size()))
+            continue;
+
+        // Get displacement factor
+        float displacementFactor = displacement.displacementGeometryFactor;
+ 
+        const tinygltf::Texture& texture = model.textures[textureIdx];
+        int imageIdx = texture.source;
+
+        if (imageIdx < 0 || imageIdx >= static_cast<int>(model.images.size()))
+            continue;
+
+        // Get the Vulkan texture
+        const auto& sceneTextures = m_resources.sceneVk.textures();
+        if (textureIdx >= static_cast<int>(sceneTextures.size()))
+            continue;
+
+        VkImage     displacementImage = sceneTextures[textureIdx].image;
+        VkImageView displacementView = sceneTextures[textureIdx].descriptor.imageView;
+
+        // Get image resolution
+        // Note: tinygltf doesn't populate width/height for external URI images,
+        // so we need to read them from the actual image file
+        const tinygltf::Image& image = model.images[imageIdx];
+        int width = image.width;
+        int height = image.height;
+
+        // If dimensions are not set (external URI), load them from the file
+        if (width <= 0 || height <= 0)
+        {
+            // Construct full path to image file
+            std::filesystem::path basePath = m_resources.scene.getFilename().parent_path();
+            std::filesystem::path imagePath = basePath / image.uri;
+
+            int channels;
+            if (!stbi_info(imagePath.string().c_str(), &width, &height, &channels))
+            {
+                LOGW("Failed to read image info for displacement map: %s\n", imagePath.string().c_str());
+                continue;
+            }
+            LOGI("Loaded image dimensions from file: %s (%dx%d)\n", image.uri.c_str(), width, height);
+        }
+
+        // RMIP requires square, power-of-2 textures
+        if (width != height)
+        {
+            LOGW("Displacement map %d is not square (%dx%d), skipping RMIP\n",
+                imageIdx, width, height);
+            continue;
+        }
+
+        uint32_t resolution = width;
+
+        // Validate power of 2
+        if ((resolution & (resolution - 1)) != 0)
+        {
+            LOGW("Displacement map %d is not power of 2 (%dx%d), skipping RMIP\n",
+                imageIdx, width, height);
+            continue;
+        }
+
+        // Calculate RMIP layers
+        uint32_t maxLevel = static_cast<uint32_t>(std::log2(resolution));
+        uint32_t numLayers = (maxLevel + 1) * (maxLevel + 1);
+
+        // Create RMIP output image
+        RmipData rmipData;
+
+        VkImageCreateInfo rmipImageInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R32G32_SFLOAT,  // (min, max) pairs
+            .extent = {resolution, resolution, 1},
+            .mipLevels = 1,
+            .arrayLayers = numLayers,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        NVVK_CHECK(m_resources.allocator.createImage(rmipData.image, rmipImageInfo));
+        NVVK_DBG_NAME(rmipData.image.image);
+
+        VkImageViewCreateInfo viewInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = rmipData.image.image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = numLayers
+            },
+        };
+
+        NVVK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &rmipData.view));
+        NVVK_DBG_NAME(rmipData.view);
+
+        // Build the RMIP structure
+        m_rmipBuilder.buildRMIP(cmd, displacementImage, displacementView,
+            rmipData.image.image, rmipData.view, resolution);
+
+        // Store the RMIP and factor for later use
+        rmipData.displacementFactor = displacementFactor;  // Store the scale factor
+        rmipData.texCoord = displacement.displacementGeometryTexture.texCoord;
+        rmipData.displacementTextureIndex = static_cast<uint32_t>(textureIdx);
+        rmipData.maxDisplacement = displacement.displacementGeometryFactor;
+        rmipData.hasDisplacement = true;
+        m_displacementRMIPs[static_cast<int>(matIdx)] = rmipData;
+
+        LOGI("Built RMIP for material %zu '%s', displacement map %d (%dx%d, %d layers, factor=%.3f)\n",
+            matIdx, material.name.c_str(), imageIdx, resolution, resolution, numLayers, displacementFactor);
+    }
+
+    passRMIPToPathTracer();
+}
+
+void GltfRenderer::cleanupDisplacementRMIPs()
+{
+    for (auto& rmip : m_displacementRMIPs)
+    {
+        if (rmip.view != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(m_device, rmip.view, nullptr);
+            rmip.view = VK_NULL_HANDLE;
+        }
+        if (rmip.image.image != VK_NULL_HANDLE)
+        {
+            m_resources.allocator.destroyImage(rmip.image);
+        }
+        rmip = RmipData{};  // Reset to default
+    }
+    m_displacementRMIPs.clear();
+}
+
+// ADD: Pass RMIP data to PathTracer
+void GltfRenderer::passRMIPToPathTracer()
+{
+    // Convert RmipData to PathTracer::DisplacementInfo
+    std::vector<PathTracer::DisplacementInfo> displacementInfo;
+    displacementInfo.reserve(m_displacementRMIPs.size());
+
+    for (size_t i = 0; i < m_displacementRMIPs.size(); ++i)
+    {
+        const auto& rmip = m_displacementRMIPs[i];
+
+        PathTracer::DisplacementInfo info;
+        info.hasDisplacement = rmip.hasDisplacement;
+        info.rmipView = rmip.view;
+        info.rmipTextureIndex = static_cast<uint32_t>(i);  // Index in the array
+        info.displacementTextureIndex = rmip.displacementTextureIndex;
+        info.maxDisplacement = rmip.maxDisplacement * rmip.displacementFactor;
+
+        displacementInfo.push_back(info);
+    }
+
+    // Pass to PathTracer
+    m_pathTracer.setDisplacementData(displacementInfo);
+}
+
+
