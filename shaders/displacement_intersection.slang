@@ -1,24 +1,21 @@
 /*
- * RMIP V12 - ψ-Guided Texel Marching Implementation
+ * RMIP V20 - Simple Exit Selection (2 Crossings = No Direction Needed)
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
  * Reference: "Tessellation-Free Displacement Mapping for Ray Tracing" (Thonat et al. 2021)
  *
- * V12 Key Changes (from V11):
- * - Implement paper's Section 4.4: texel marching using ψ sign at corners
- * - The sign of ψ(u,v) = det(P-O, N, D) at texel corners determines exit edge
- * - March through texels one-by-one following the ψ = 0 curve
- * - More efficient than tessellating entire UV region
+ * V20 Key Changes (from V19):
+ * - V16-V19 all tried to determine curve direction - ALL FAILED
+ * - Key insight: When numCrossings == 2, we DON'T NEED direction at all!
+ * - The exit is simply the crossing edge that's NOT the entry edge
+ * - Direction is only needed for:
+ *   1. First texel (entryEdge == EDGE_NONE, don't know which is which)
+ *   2. Multiple crossings (numCrossings >= 3, curve loops/turns)
  *
- * V11 Features Retained:
- * - Affine arithmetic for 3D bounds computation
- * - Bounding prism for initial intersection
- * - Bound reduction via inverse displacement
- * - Turning point detection
+ * This DRAMATICALLY simplifies the common case!
  *
  * Key Equations from Paper:
- * - Eq 3: ψ(u,v) = det(P-O, N, D) = 0 (implicit ray projection)
- * - Section 4.4: "The sign of ψ at each texel corner indicates from which edge
- *   the ray leaves the texel"
+ * - Eq 3: ψ(u,v) = det(P-O, N, D) = (P-O)·(N×D) = 0 (implicit ray projection)
+ * - Eq 4: ∇ψ = (ψu, ψv) for gradient computation
  */
 
 #include "shaderio.h"
@@ -450,6 +447,52 @@ float2 psiGrad(Tri tri, float2 bary, float3 rayO, float3 rayD)
 }
 
 //=============================================================================
+// V18: Compute ray direction projected into texture (UV) space
+//
+// The ray has direction D in 3D world space. We want to know which direction
+// it's traveling in UV space - this determines how we march through texels.
+//
+// Method: Project D onto the triangle's tangent plane and express in UV coords.
+// - D_proj = D - (D·N)*N (project D onto tangent plane)
+// - Solve: D_proj ≈ rayDirUV.x * dPdu + rayDirUV.y * dPdv
+// - Use Gram matrix: G = [dPdu·dPdu  dPdu·dPdv; dPdv·dPdu  dPdv·dPdv]
+// - rayDirUV = G^(-1) * [D_proj·dPdu, D_proj·dPdv]
+//=============================================================================
+float2 computeRayDirUV(Tri tri, float3 rayD)
+{
+    // Triangle normal (average of vertex normals or from edge cross product)
+    float3 edge1 = tri.v1 - tri.v0;
+    float3 edge2 = tri.v2 - tri.v0;
+    float3 N = normalize(cross(edge1, edge2));
+
+    // Project ray direction onto tangent plane
+    float3 D_proj = rayD - dot(rayD, N) * N;
+
+    // Gram matrix components
+    float g00 = dot(tri.dPdu, tri.dPdu);
+    float g01 = dot(tri.dPdu, tri.dPdv);
+    float g11 = dot(tri.dPdv, tri.dPdv);
+
+    // Right-hand side
+    float b0 = dot(D_proj, tri.dPdu);
+    float b1 = dot(D_proj, tri.dPdv);
+
+    // Solve 2x2 system: G * rayDirUV = b
+    float det = g00 * g11 - g01 * g01;
+    if (abs(det) < 1e-10)
+    {
+        // Degenerate case: use a simple approximation
+        return float2(b0, b1);
+    }
+
+    float2 rayDirUV;
+    rayDirUV.x = (g11 * b0 - g01 * b1) / det;
+    rayDirUV.y = (g00 * b1 - g01 * b0) / det;
+
+    return rayDirUV;
+}
+
+//=============================================================================
 // V12: Edge direction constants for ψ-guided texel marching (Section 4.4)
 //=============================================================================
 static const int EDGE_NONE   = -1;
@@ -459,7 +502,7 @@ static const int EDGE_BOTTOM = 2;   // v decreases (texel below)
 static const int EDGE_TOP    = 3;   // v increases (texel above)
 
 //=============================================================================
-// V12: Find exit edge from ψ sign pattern at texel corners
+// V20: Find exit edge - SIMPLE case for 2 crossings (Section 4.4)
 //
 // Paper Section 4.4: "The sign of the implicit form ψ (3) at each texel corner
 // indicates from which edge the ray leaves the texel"
@@ -473,8 +516,12 @@ static const int EDGE_TOP    = 3;   // v increases (texel above)
 //
 // If ψ changes sign across an edge, the ray curve ψ=0 crosses that edge.
 // The exit edge is where the ray LEAVES (not enters) the texel.
+//
+// V20 KEY INSIGHT: When numCrossings == 2 and we know the entry edge,
+// the exit is simply the OTHER crossing edge - NO DIRECTION NEEDED!
+// Direction is only used for first texel or when curve makes 3+ crossings.
 //=============================================================================
-int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEdge)
+int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEdge, float2 curveDir)
 {
     // Check which edges have sign changes
     bool crossLeft   = (psi00 * psi01 < 0.0);  // Left edge: between (0,0) and (0,1)
@@ -486,14 +533,8 @@ int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEd
     int numCrossings = (crossLeft ? 1 : 0) + (crossRight ? 1 : 0) +
                        (crossBottom ? 1 : 0) + (crossTop ? 1 : 0);
 
-    // If only one crossing, that's both entry and exit (degenerate case)
-    // If two crossings, one is entry and one is exit
-    // The exit edge is the one that's NOT the entry edge
-
     if (numCrossings == 0)
     {
-        // No crossings - ray doesn't pass through this texel
-        // This shouldn't happen if we started correctly
         return EDGE_NONE;
     }
 
@@ -506,13 +547,94 @@ int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEd
         if (crossTop)    return EDGE_TOP;
     }
 
-    // Two or more crossings - pick the one that's not the entry
-    if (crossRight && entryEdge != EDGE_RIGHT)   return EDGE_RIGHT;
-    if (crossTop && entryEdge != EDGE_TOP)       return EDGE_TOP;
-    if (crossLeft && entryEdge != EDGE_LEFT)     return EDGE_LEFT;
-    if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+    // V20 FIX: When numCrossings == 2 and we know the entry, exit is the OTHER crossing
+    // This is the COMMON CASE and requires NO direction logic!
+    if (numCrossings == 2 && entryEdge != EDGE_NONE)
+    {
+        // Simple: return the crossing edge that's not the entry
+        if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+        if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+        if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+        if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+    }
 
-    // Fallback: return any crossing edge
+    // Only use direction for: first texel (entryEdge == EDGE_NONE) or 3+ crossings
+    // Use curveDir to pick the best exit
+
+    if (abs(curveDir.x) > abs(curveDir.y))
+    {
+        // Curve moves primarily horizontally in UV space
+        if (curveDir.x > 0)
+        {
+            // Moving right (+u): prefer RIGHT > TOP/BOTTOM > LEFT
+            if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+            if (curveDir.y > 0)
+            {
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+            }
+            else
+            {
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+            }
+            if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+        }
+        else
+        {
+            // Moving left (-u): prefer LEFT > TOP/BOTTOM > RIGHT
+            if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+            if (curveDir.y > 0)
+            {
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+            }
+            else
+            {
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+            }
+            if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+        }
+    }
+    else
+    {
+        // Curve moves primarily vertically in UV space
+        if (curveDir.y > 0)
+        {
+            // Moving up (+v): prefer TOP > LEFT/RIGHT > BOTTOM
+            if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+            if (curveDir.x > 0)
+            {
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+            }
+            else
+            {
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+            }
+            if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+        }
+        else
+        {
+            // Moving down (-v): prefer BOTTOM > LEFT/RIGHT > TOP
+            if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+            if (curveDir.x > 0)
+            {
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+            }
+            else
+            {
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+            }
+            if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+        }
+    }
+
+    // Fallback: return any crossing edge (shouldn't reach here normally)
     if (crossRight)  return EDGE_RIGHT;
     if (crossTop)    return EDGE_TOP;
     if (crossLeft)   return EDGE_LEFT;
@@ -1322,12 +1444,21 @@ bool computeUVRegionPrism(Tri tri, float2 uvMin, float2 uvMax,
     return true;
 }
 
+// Forward declaration for V13 fallback
+bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                        int2 texSize,
+                        out float hitT, out float2 hitBary, out float3 hitGeoNormal);
+
 //=============================================================================
-// V12: ψ-Guided Texel Marching (Paper Section 4.4)
+// ψ-Guided Texel Marching (Paper Section 4.4)
 //
 // March through texels one-by-one, using ψ sign at corners to determine
 // which edge the ray exits from. This is more efficient than tessellating
 // the entire UV region because we only visit texels the ray actually passes through.
+//
+// V14 NOTE: ψ degeneracy is now checked at START of intersectionMain().
+// If this function is called, ψ is NOT degenerate and sign-based marching works.
 //
 // Algorithm:
 // 1. Find entry texel from ray's entry UV coordinate
@@ -1347,6 +1478,9 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     hitT = rayTMax + 1.0;
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
+
+    // V14: ψ degeneracy is now checked at START of intersectionMain()
+    // If we reach here, ψ is NOT degenerate and sign-based marching should work
 
     // Convert UV bounds to texel coordinates
     int2 texelMin = int2(floor(uvMin * float2(texSize)));
@@ -1384,6 +1518,29 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     float bestT = rayTMax + 1.0;
     bool found = false;
 
+    // V19: Initialize curve direction from gradient at entry point
+    // Use rayDirUV as initial guess, will be refined by gradient
+    float2 curveDir = computeRayDirUV(tri, rayD);
+
+    // Compute initial curve direction from ψ gradient at entry texel center
+    {
+        float2 initUV = (float2(currentTexel) + 0.5) / float2(texSize);
+        float2 initBary;
+        texToBary(tri, initUV, initBary);
+        float2 grad = psiGrad(tri, initBary, rayO, rayD);
+
+        // Tangent is perpendicular to gradient
+        float2 tangent = float2(-grad.y, grad.x);
+
+        // Choose tangent direction that aligns with rayDirUV (initial guess)
+        if (dot(tangent, curveDir) < 0)
+            tangent = -tangent;
+
+        // Use tangent as initial curveDir if valid
+        if (length(tangent) > 1e-6)
+            curveDir = normalize(tangent);
+    }
+
     // Maximum iterations to prevent infinite loops
     int maxIters = (texelMax.x - texelMin.x + 1) * (texelMax.y - texelMin.y + 1) + 10;
 
@@ -1409,6 +1566,14 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
         texToBary(tri, uv01, b01);
         texToBary(tri, uv11, b11);
 
+        // V15 FIX: Save original unclamped values for ψ computation
+        // ψ must be computed on original positions, not clamped ones!
+        // Clamping moves multiple corners to the same edge position → similar ψ values
+        float2 b00_orig = b00;
+        float2 b10_orig = b10;
+        float2 b01_orig = b01;
+        float2 b11_orig = b11;
+
         // Check if any corner is in valid triangle domain
         float eps = 0.01;
         bool valid00 = b00.x >= -eps && b00.y >= -eps && b00.x + b00.y <= 1.0 + eps;
@@ -1418,7 +1583,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
         if (valid00 || valid10 || valid01 || valid11)
         {
-            // Clamp barycentric coordinates
+            // Clamp barycentric coordinates for micro-triangle intersection only
             b00 = clampBary(b00);
             b10 = clampBary(b10);
             b01 = clampBary(b01);
@@ -1474,14 +1639,15 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             }
         }
 
-        // Compute ψ at all 4 corners for exit edge determination
-        float psi00 = psi(tri, b00, rayO, rayD);
-        float psi10 = psi(tri, b10, rayO, rayD);
-        float psi01 = psi(tri, b01, rayO, rayD);
-        float psi11 = psi(tri, b11, rayO, rayD);
+        // V15 FIX: Compute ψ at all 4 corners using ORIGINAL unclamped values
+        // Using clamped values caused multiple corners to have similar ψ → EDGE_NONE
+        float psi00 = psi(tri, b00_orig, rayO, rayD);
+        float psi10 = psi(tri, b10_orig, rayO, rayD);
+        float psi01 = psi(tri, b01_orig, rayO, rayD);
+        float psi11 = psi(tri, b11_orig, rayO, rayD);
 
-        // Find exit edge
-        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge);
+        // V19: Find exit edge using tracked curve direction
+        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, curveDir);
 
         if (exitEdge == EDGE_NONE)
         {
@@ -1508,6 +1674,26 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
         // The entry edge for the next texel is opposite to our exit edge
         entryEdge = getOppositeEdge(exitEdge);
+
+        // V19: Update curveDir from gradient at new texel center
+        // This maintains consistent direction along the ψ=0 curve
+        {
+            float2 nextUV = (float2(currentTexel) + 0.5) / float2(texSize);
+            float2 nextBary;
+            texToBary(tri, nextUV, nextBary);
+            float2 grad = psiGrad(tri, nextBary, rayO, rayD);
+
+            // Tangent is perpendicular to gradient
+            float2 tangent = float2(-grad.y, grad.x);
+
+            // Choose tangent direction that aligns with current curveDir (consistency)
+            if (dot(tangent, curveDir) < 0)
+                tangent = -tangent;
+
+            // Update curveDir if valid
+            if (length(tangent) > 1e-6)
+                curveDir = normalize(tangent);
+        }
     }
 
     return found;
@@ -1615,19 +1801,19 @@ bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// Main intersection shader - V12: ψ-Guided Texel Marching Implementation
+// Main intersection shader - V17: Entry-Consistent Tangent Direction
 //
-// V12 Key changes from V11:
-// 1. Use ψ-guided texel marching instead of tessellation (Paper Section 4.4)
-// 2. March through texels one-by-one following the ψ = 0 curve
-// 3. Use ψ sign at texel corners to determine exit edge (like DDA)
-// 4. More efficient: only visit texels the ray actually passes through
+// V17 Key fix:
+// - V16 rotated the problem 90° (ac→bd became ab→cd)
+// - Issue: tangent gives ONE direction, but ray could go either way along curve
+// - FIX: Flip tangent if it contradicts entry edge direction
 //
-// V11 Features retained:
+// Core algorithm:
+// - ψ-guided texel marching using sign at corners (Section 4.4)
+// - V17: Entry-consistent tangent for correct exit edge selection
 // - Affine arithmetic for 3D bounds computation
 // - Bounding prism for initial intersection
 // - Bound reduction via inverse displacement
-// - Turning point detection
 //=============================================================================
 [shader("intersection")]
 void intersectionMain()
