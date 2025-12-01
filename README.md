@@ -50,8 +50,6 @@
 
 ## Features
 
-### ✅ Implemented (Milestone 2)
-
 #### 🎲 Quad-Optimized Low-Discrepancy Sequences (QOLDS)
 
 - **Paper**: "Quad-Optimized Low-Discrepancy Sequences" (SIGGRAPH 2024)
@@ -77,8 +75,6 @@
 - Tighter spherical cap bounds for importance sampling
 - Modified bound factor: `k = (1 - a²)s² / (s² + a²z²)`
 - Reduces rejected samples for rough surfaces
-
-### ✅ Implemented (Milestone 3)
 
 #### 🏔️ RMIP (Rectangular MinMax Image Pyramid)
 
@@ -134,19 +130,6 @@ cmake --build build -- -j$(nproc)
    - **Use FastMSX**: Toggle Fast-MSX multi-scatter evaluation
 3. Load custom models: File → Open Scene (supports .gltf/.glb)
 4. Load HDR environments: File → Open HDR
-
-
-**Convergence Test Output** (Milestone 2):
-
-```
-[Test] QOLDS vs PCG Convergence Analysis
-[Test] Sample counts: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
-[Test] At 512 SPP:
-  - QOLDS: PSNR = 46.38 dB, MSE = 2.30e-05
-  - PCG:   PSNR = 43.81 dB, MSE = 4.16e-05
-  - Improvement: +2.57 dB, -44.7% MSE
-[Test] Results saved to test/qolds_test_*.csv
-```
 
 ---
 
@@ -254,7 +237,7 @@ cmake --build build -- -j$(nproc)
 
 ![Bounded VNDF Showcase](doc/presentations/img/Bounded-VNDF.png)
 
-### Displaced Plane
+### RMIP Displaced Plane
 
 <p align="center">
   <img src="doc/presentations/disp/fabric.gif" width="30%" alt="Vertical View"/>
