@@ -33,16 +33,6 @@
 				"metallicRoughnessTexture":{
 					"index":2
 				}
-			},
-			"extensions": {
-				"KHR_materials_displacement": {
-				"displacementGeometryTexture": {
-					"index": 3,
-					"texCoord": 0
-				},
-				"displacementGeometryFactor": 0.1,
-				"displacementGeometryOffset": 0.0
-				}
 			}
 		}
 	],
@@ -74,12 +64,7 @@
 		{
 			"sampler":0,
 			"source":2
-		},
-		{
-			"sampler":0,
-			"source":3
 		}
-		
 	],
 	"images":[
 		{
@@ -96,11 +81,6 @@
 			"mimeType":"image/png",
 			"name":"patterned_paving_02_rough",
 			"uri":"patterned_paving_02_rough.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"patterned_paving_02_disp_512",
-			"uri":"patterned_paving_02_disp_512.png"
 		}
 	],
 	"accessors":[
