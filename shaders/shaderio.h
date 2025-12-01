@@ -71,6 +71,7 @@ enum BindingPoints
   eDisplacementTextures = 9,	// Regular displacement textures
   eRmipSampler = 10,			// Sampler for RMIP textures
   eDisplacementSampler = 11,	// Sampler for displacement textures
+  eDisplacementFactors = 12,	// Per-material displacement factors from glTF
 
 };
 

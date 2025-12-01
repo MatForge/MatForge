@@ -617,6 +617,13 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
       }
   }
 
+  // Add displacement factors buffer (per-material displacement scale from glTF)
+  if (resources.bDisplacementFactors.buffer != VK_NULL_HANDLE)
+  {
+      VkDescriptorBufferInfo dispFactorsInfo{resources.bDisplacementFactors.buffer, 0, VK_WHOLE_SIZE};
+      write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementFactors), &dispFactorsInfo);
+  }
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 

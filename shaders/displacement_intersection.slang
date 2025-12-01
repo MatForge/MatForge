@@ -26,7 +26,6 @@
 #include "nvshaders/constants.h.slang"
 #include "rmip_common.h.slang"
 
-static const float DISPLACEMENT_SCALE = 0.5;
 static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
 
@@ -49,7 +48,16 @@ static const float BARY_EPS = 0.05;  // Was 0.01 in many places
 [[vk::binding(8, 1)]] Texture2DArray<float2> rmipMaps[8];
 [[vk::binding(10, 1)]] SamplerState rmipSampler;
 
+// Per-material displacement factors from glTF's KHR_materials_displacement.displacementGeometryFactor
+[[vk::binding(12, 1)]] StructuredBuffer<float> displacementFactors;
+
 [[vk::push_constant]] ConstantBuffer<PathtracePushConstant> pushConst;
+
+// Helper to get displacement scale for a material
+float getDisplacementScale(uint matIdx)
+{
+    return displacementFactors[matIdx];
+}
 
 //=============================================================================
 // Helper: Pack UV and Normal for hit attributes
@@ -739,15 +747,15 @@ void findTurningPointsInRegion(Tri tri, float2 baryMin, float2 baryMax,
 //=============================================================================
 float sampleDisplacement(uint matIdx, float2 texUV)
 {
-    return displacementMaps[matIdx].SampleLevel(displacementSampler, texUV, 0).r * DISPLACEMENT_SCALE;
+    return displacementMaps[matIdx].SampleLevel(displacementSampler, texUV, 0).r * getDisplacementScale(matIdx);
 }
 
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
 {
-    // Conservative global bounds (like brute force)
+    // Conservative global bounds using per-material displacement factor from glTF
     hMin = 0.0;
-    hMax = DISPLACEMENT_SCALE;
+    hMax = getDisplacementScale(matIdx);
 }
 
 //=============================================================================
@@ -1764,7 +1772,8 @@ void intersectionMain()
     // V10: Create full-triangle bounding PRISM and intersect ray with it
     // This is the key difference from V9 - we use PRISM instead of AABB!
     //=========================================================================
-    Prism fullPrism = makePrism(tri, 0.0, DISPLACEMENT_SCALE);
+    float dispScale = getDisplacementScale(matIdx);
+    Prism fullPrism = makePrism(tri, 0.0, dispScale);
 
     float prismTEntry, prismTExit;
     if (!rayPrismIntersect(fullPrism, rayOrigin, rayDir, prismTEntry, prismTExit))
