@@ -59,6 +59,9 @@
 - 47 dimensions × 243 max points (3^5)
 - Real-time toggle between QOLDS and PCG sampling
 
+![QOLDS Screenshot](doc/presentations/QOLDS_screenshot.png)
+*Low-discrepancy sampling with 47 dimensions*
+
 #### ⚡ Fast-MSX (Fast Multiple Scattering Approximation)
 
 - **Paper**: "Fast Multiple Scattering Approximation" (SIGGRAPH 2023)
@@ -68,6 +71,9 @@
 - Fresnel squared (F²) for multi-bounce energy
 - Real-time toggle for comparison
 
+![Fast-MSX Showcase](doc/presentations/img/msxshowcase.png)
+*Multiple scattering approximation (top: without, bottom: with Fast-MSX)*
+
 #### 🎯 Bounded VNDF Sampling
 
 - **Paper**: "Bounded VNDF Sampling for Smith-GGX Reflections" (SIGGRAPH Asia 2023)
@@ -76,6 +82,8 @@
 - Modified bound factor: `k = (1 - a²)s² / (s² + a²z²)`
 - Reduces rejected samples for rough surfaces
 
+![Bounded VNDF Showcase](doc/presentations/img/Bounded-VNDF.png)
+
 #### 🏔️ RMIP (Rectangular MinMax Image Pyramid)
 
 - **Paper**: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
@@ -83,6 +91,13 @@
 - Hierarchical min-max pyramid for displacement maps
 - Custom intersection shader with KHR_materials_displacement support
 - Displacement map on 2d plane loaded correctly
+
+<p align="center">
+  <img src="doc/presentations/disp/fabric.gif" width="32%" alt="Vertical View"/>
+  <img src="doc/presentations/disp/green.gif" width="32%" alt="Grazing Angle"/>
+  <img src="doc/presentations/disp/wall.gif" width="32%" alt="Diagonal View"/>
+</p>
+
 
 ### 🛠️ Base Framework
 
@@ -216,34 +231,10 @@ cmake --build build -- -j$(nproc)
 
 ---
 
-## Gallery
-
 ### QOLDS Convergence Analysis
 
 ![Convergence Comparison](test/convergence_comparison_20251122_141202.png)
 *QOLDS vs PCG: +2.57 dB PSNR improvement, 44.7% MSE reduction at 512 SPP*
-
-### QOLDS Sampling
-
-![QOLDS Screenshot](doc/presentations/QOLDS_screenshot.png)
-*Low-discrepancy sampling with 47 dimensions*
-
-### Fast-MSX Model
-
-![Fast-MSX Showcase](doc/presentations/img/msxshowcase.png)
-*Multiple scattering approximation (top: without, bottom: with Fast-MSX)*
-
-### Bounded VNDF
-
-![Bounded VNDF Showcase](doc/presentations/img/Bounded-VNDF.png)
-
-### RMIP Displaced Plane
-
-<p align="center">
-  <img src="doc/presentations/disp/fabric.gif" width="30%" alt="Vertical View"/>
-  <img src="doc/presentations/disp/green.gif" width="30%" alt="Grazing Angle"/>
-  <img src="doc/presentations/disp/wall.gif" width="30%" alt="Diagonal View"/>
-</p>
 
 ---
 
@@ -548,6 +539,7 @@ See [LICENSE](LICENSE) for full license text.
 ---
 
 <div align="center">
+  
 ### The Demo Scene
 
 ![Close View](doc/presentations/img/CloseView1.png)
