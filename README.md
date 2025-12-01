@@ -60,11 +60,6 @@
 - Owen scrambling for randomization
 - 47 dimensions × 243 max points (3^5)
 - Real-time toggle between QOLDS and PCG sampling
-- **Measured Results** (vs PCG random sampling):
-  - **+2.57 dB PSNR improvement** at 512 samples per pixel
-  - **44.7% MSE reduction** at 512 samples per pixel
-  - **15-33% sample savings** for equivalent visual quality
-  - **<1% performance overhead** (essentially free improvement)
 
 #### ⚡ Fast-MSX (Fast Multiple Scattering Approximation)
 
@@ -74,7 +69,6 @@
 - Modified geometry term (G_I) and distribution (D_I)
 - Fresnel squared (F²) for multi-bounce energy
 - Real-time toggle for comparison
-- **Expected Benefits**: 100× better energy conservation at high roughness
 
 #### 🎯 Bounded VNDF Sampling
 
@@ -83,7 +77,6 @@
 - Tighter spherical cap bounds for importance sampling
 - Modified bound factor: `k = (1 - a²)s² / (s² + a²z²)`
 - Reduces rejected samples for rough surfaces
-- **Expected Benefits**: 15-40% variance reduction for α = 0.6-1.0
 
 ### ✅ Implemented (Milestone 3)
 
@@ -94,8 +87,6 @@
 - Hierarchical min-max pyramid for displacement maps
 - Custom intersection shader with KHR_materials_displacement support
 - Displacement map on 2d plane loaded correctly
-- ~5ms build time for 4K textures
-- **Expected Benefits**: 11× faster than tessellation, 3× less memory
 
 ### 🛠️ Base Framework
 
