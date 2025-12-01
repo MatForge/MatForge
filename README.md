@@ -32,7 +32,7 @@
 │     └─ Generate low-discrepancy random numbers              │
 │        ↓                                                    │
 │  2. RMIP - Geometry Detail                                  │
-│     └─ Ray-trace displacement maps directly (WIP)           │
+│     └─ Ray-trace displacement maps directly                 │
 │        ↓                                                    │
 │  3. BOUNDED VNDF - Direction Sampling                       │
 │     └─ Efficient importance sampling                        │
@@ -85,7 +85,7 @@
 - Reduces rejected samples for rough surfaces
 - **Expected Benefits**: 15-40% variance reduction for α = 0.6-1.0
 
-### 🚧 In Progress (Milestone 3 - Dec 1)
+### ✅ Implemented (Milestone 3)
 
 #### 🏔️ RMIP (Rectangular MinMax Image Pyramid)
 
@@ -93,7 +93,7 @@
 - **Status**: GPU compute pipeline operational, intersection shader loading functional
 - Hierarchical min-max pyramid for displacement maps
 - Custom intersection shader with KHR_materials_displacement support
-- Test scene (`displaced_plane.gltf`) loading successfully
+- Displacement map on 2d plane loaded correctly
 - ~5ms build time for 4K textures
 - **Expected Benefits**: 11× faster than tessellation, 3× less memory
 
@@ -227,7 +227,7 @@ Switched to Bounded VNDF sampling
 - Custom intersection shader (`shaders/rmip_intersection.slang`)
 - Descriptor set management for RMIP/displacement textures
 - KHR_materials_displacement extension support
-- **Status**: 🚧 In Progress - Loading functional, traversal WIP (~800 LOC)
+- **Status**: ✅ Visually correct - Hierarchical traversal (~2,000 LOC)
 
 ---
 
@@ -311,7 +311,7 @@ MatForge/
 | Team Member       | Responsibility          | Implementation                                        |
 | ----------------- | ----------------------- | ----------------------------------------------------- |
 | **Yiding**  | Quad-Optimized LDS      | Sampling + Convergence Analysis (✅ Complete)         |
-| **Cecilia** | RMIP                    | Displacement ray tracing (🚧 Loading Complete, Traversal WIP) |
+| **Cecilia** | RMIP                    | Displacement ray tracing (✅ with few bugs) |
 | **Xiaonan** | Fast-MSX + Bounded VNDF | Material system (✅ Both Complete)                    |
 
 ---
@@ -329,7 +329,7 @@ MatForge/
 
 - [Milestone 1 Report](doc/presentations/Milestone1.md) (Nov 12, 2025)
 - [Milestone 2 Report](https://docs.google.com/presentation/d/1KfiufcOu-iZWNO3kYZDekGecSDXhlwpd4ZzbTKqC-8c/edit?slide=id.g3a90943984b_1_633#slide=id.g3a90943984b_1_633) (Nov 24, 2025)
-
+- [Milestone 3 Report](https://docs.google.com/presentation/d/1GBva_VEDiKJ5iOu4Ge92aJ_yK5sJ3sQRD8Z-WB-hKts/edit?slide=id.gc6f9e470d_0_5#slide=id.gc6f9e470d_0_5) (Dec 1, 2025)
 ---
 
 ## Usage
@@ -341,7 +341,7 @@ MatForge/
 - ☑️ **Use QOLDS**: Enable Quad-Optimized Low-Discrepancy Sequences
 - ☑️ **Use FastMSX**: Enable Fast Multiple Scattering (default: ON)
 - ☑️ **Use Bounded VNDF**: Enable bounded importance sampling for GGX
-- ☐ **Use RMIP**: Enable displacement ray tracing (coming in Milestone 3)
+- ☑️ **Use RMIP**: Enable displacement ray tracing (having few bugs)
 
 **Quality Settings**:
 
@@ -452,19 +452,24 @@ MatForge/
 
 ---
 
-### 🚧 Milestone 3 (Dec 1, 2025) - IN PROGRESS
+### ✅ Milestone 3 (Dec 1, 2025) - COMPLETE
 
-**Goal**: Production features + comprehensive analysis
+**Goal**: RMIP debugging and scene integration
 
-**Planned Deliverables**:
+**Deliverables**:
 
-- ⏭️ **RMIP Traversal Complete**: Full texel marching with displaced surface intersection
-- ⏭️ **Material Library**: 7+ materials demonstrating all techniques
-- ⏭️ **Material Parameter Editor**: ImGui-based live editing
-- ⏭️ **Side-by-Side Comparisons**: Visual comparisons with/without each technique
-- ⏭️ **Perceptual Metrics**: SSIM, FLIP analysis
-- ⏭️ **Demo Video**: Showcase all features
+- ✅ **RMIP Traversal Complete**: Full texel marching with displaced surface intersection
+- ✅ **RMIP Bug Fixes**: 24 iterations to achieve visually correct rendering
+- ✅ **Large Scene Integration**: Displaced floor applied to full scene
+- 🚧 **Demo Video**: Showcase all features
 
+---
+
+### 🚧 Deferred to Future Work:
+
+- ⏭️ ψ-guided Marching Optimization: Currently using brute-force leaf testing for correctness; resolve visual artifacts in 3D objects
+- ⏭️ Side-by-Side Comparisons: Visual comparisons with/without each technique
+- ⏭️ Perceptual Metrics: SSIM, FLIP analysis
 ---
 
 ## Building from Source
@@ -583,6 +588,14 @@ See [LICENSE](LICENSE) for full license text.
 
 ![RMIP Structure](doc/presentations/RMIP_structure.png)
 *Hierarchical min-max pyramid for displacement maps*
+
+### Displaced Plane
+
+<p align="center">
+  <img src="doc/presentations/disp/fabric.gif" width="30%" alt="Vertical View"/>
+  <img src="doc/presentations/disp/green.gif" width="30%" alt="Grazing Angle"/>
+  <img src="doc/presentations/disp/wall.gif" width="30%" alt="Diagonal View"/>
+</p>
 
 ---
 
