@@ -99,14 +99,7 @@
 
 ### 🛠️ Base Framework
 
-Built on [NVIDIA nvpro-samples/vk_gltf_renderer](https://github.com/nvpro-samples/vk_gltf_renderer):
-
-- **Graphics API**: Vulkan 1.3 with ray tracing extensions
-- **Shader Language**: Slang with hot-reload support (F5)
-- **Framework**: nvpro-core2 (NVIDIA Professional Graphics)
-- **Path Tracer**: Adaptive sampling, MIS, optional DLSS-RR denoiser
-- **Rasterizer**: PBR-based with HDR environment mapping
-- **glTF 2.0**: Full scene loading support (.gltf/.glb)
+Built on [NVIDIA nvpro-samples/vk_gltf_renderer](https://github.com/nvpro-samples/vk_gltf_renderer)
 
 ---
 
@@ -151,25 +144,6 @@ cmake --build build -- -j$(nproc)
 3. Load custom models: File → Open Scene (supports .gltf/.glb)
 4. Load HDR environments: File → Open HDR
 
-### Console Output
-
-```
-Creating Vulkan Context                -> 112.3 ms
-Scene Loading                          -> 1.2 ms
-[QOLDS] Loaded initialization data for 47 dimensions
-[QOLDS] Built 47 matrices of size 5x5 (max 243 points)
-[QOLDS] Generated 47 scrambling seeds
-QOLDS buffers created: 47 dimensions, 243 max points
-Path tracer initialized with PCG (default) sampling
-```
-
-**Toggle Messages**:
-
-```
-Switched to QOLDS sampling (Quad-Optimized Low-Discrepancy Sequences)
-Switched to FastMSX (Fast Multiple Scattering)
-Switched to Bounded VNDF sampling
-```
 
 **Convergence Test Output** (Milestone 2):
 
@@ -265,6 +239,37 @@ Switched to Bounded VNDF sampling
 - BRDF evaluation (`shaders/fast_msx.h.slang`)
 - Integration into path tracer with toggle
 - **Status**: ✅ Complete (350 LOC)
+
+---
+
+## Gallery
+
+### QOLDS Convergence Analysis
+
+![Convergence Comparison](test/convergence_comparison_20251122_141202.png)
+*QOLDS vs PCG: +2.57 dB PSNR improvement, 44.7% MSE reduction at 512 SPP*
+
+### QOLDS Sampling
+
+![QOLDS Screenshot](doc/presentations/QOLDS_screenshot.png)
+*Low-discrepancy sampling with 47 dimensions*
+
+### Fast-MSX Model
+
+![Fast-MSX Showcase](doc/presentations/img/msxshowcase.png)
+*Multiple scattering approximation (top: without, bottom: with Fast-MSX)*
+
+### Bounded VNDF
+
+![Bounded VNDF Showcase](doc/presentations/img/Bounded-VNDF.png)
+
+### Displaced Plane
+
+<p align="center">
+  <img src="doc/presentations/disp/fabric.gif" width="30%" alt="Vertical View"/>
+  <img src="doc/presentations/disp/green.gif" width="30%" alt="Grazing Angle"/>
+  <img src="doc/presentations/disp/wall.gif" width="30%" alt="Diagonal View"/>
+</p>
 
 ---
 
@@ -565,42 +570,6 @@ See [LICENSE](LICENSE) for full license text.
   - Fast-MSX (SIGGRAPH 2023) - Multiple Scattering
 - **Reference Implementation**: [QOLDS GitHub](https://github.com/liris-origami/Quad-Optimized-LDS)
 
----
-
-## Gallery
-
-### QOLDS Convergence Analysis
-
-![Convergence Comparison](test/convergence_comparison_20251122_141202.png)
-*QOLDS vs PCG: +2.57 dB PSNR improvement, 44.7% MSE reduction at 512 SPP*
-
-### QOLDS Sampling
-
-![QOLDS Screenshot](doc/presentations/QOLDS_screenshot.png)
-*Low-discrepancy sampling with 47 dimensions*
-
-### Fast-MSX Model
-
-![Fast-MSX Showcase](doc/presentations/img/msxshowcase.png)
-*Multiple scattering approximation (top: without, bottom: with Fast-MSX)*
-
-### Bounded VNDF
-
-![Bounded VNDF Showcase](doc/presentations/img/Bounded-VNDF.png)
-
-
-### RMIP Structure
-
-![RMIP Structure](doc/presentations/RMIP_structure.png)
-*Hierarchical min-max pyramid for displacement maps*
-
-### Displaced Plane
-
-<p align="center">
-  <img src="doc/presentations/disp/fabric.gif" width="30%" alt="Vertical View"/>
-  <img src="doc/presentations/disp/green.gif" width="30%" alt="Grazing Angle"/>
-  <img src="doc/presentations/disp/wall.gif" width="30%" alt="Diagonal View"/>
-</p>
 
 ---
 
