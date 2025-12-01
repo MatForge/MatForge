@@ -605,6 +605,11 @@ See [LICENSE](LICENSE) for full license text.
 ---
 
 <div align="center">
+### The Demo Scene
+
+![Close View](doc/presentations/img/CloseView1.png)
+
+![Top View](doc/presentations/img/TopView.png)
 
 **MatForge** - Advanced Material Rendering System
 CIS 5650 GPU Programming | University of Pennsylvania | Fall 2025
