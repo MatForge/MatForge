@@ -1462,6 +1462,7 @@ void GltfRenderer::destroyResources()
   m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
   m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
   m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
+  m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
 
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);
