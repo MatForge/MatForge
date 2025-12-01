@@ -579,10 +579,15 @@ See [LICENSE](LICENSE) for full license text.
 ![QOLDS Screenshot](doc/presentations/QOLDS_screenshot.png)
 *Low-discrepancy sampling with 47 dimensions*
 
-### Fast-MSX Comparison
+### Fast-MSX Model
 
 ![Fast-MSX Showcase](doc/presentations/img/msxshowcase.png)
-*Multiple scattering approximation (left: without, right: with Fast-MSX)*
+*Multiple scattering approximation (top: without, bottom: with Fast-MSX)*
+
+### Bounded VNDF
+
+![Bounded VNDF Showcase](doc/presentations/img/Bounded-VNDF.png)
+
 
 ### RMIP Structure
 
