@@ -1264,9 +1264,9 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
     float2 tex1 = baryToTex(tri, b1);
     float2 tex2 = baryToTex(tri, b2);
 
-    float h0 = sampleDisplacement(0, tex0);
-    float h1 = sampleDisplacement(0, tex1);
-    float h2 = sampleDisplacement(0, tex2);
+    float h0 = sampleDisplacement(matIdx, tex0);
+    float h1 = sampleDisplacement(matIdx, tex1);
+    float h2 = sampleDisplacement(matIdx, tex2);
 
     float3 P0 = getP(tri, b0);
     float3 P1 = getP(tri, b1);
@@ -1294,8 +1294,11 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
             float3 e2 = p2 - p0;
             hitGeoNormal = normalize(cross(e1, e2));
 
-            if (dot(hitGeoNormal, rayD) > 0)
-                hitGeoNormal = -hitGeoNormal;
+            // FIX: For displacement mapping, preserve the actual geometric normal
+            // Flipping based on ray direction causes incorrect lighting (dark upside issue)
+            // The geometric normal represents the true surface orientation after displacement
+            // Note: If backface hits are unwanted, they should be filtered during traversal,
+            // not by flipping normals which breaks the displacement illusion
 
             return true;
         }

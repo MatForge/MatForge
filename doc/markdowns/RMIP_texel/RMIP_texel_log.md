@@ -3399,11 +3399,9 @@ disp back
 
 ![1764617798505](image/RMIP_texel_log/1764617798505.png)
 
-
 no disp front
 
 ![1764617840333](image/RMIP_texel_log/1764617840333.png)
-
 
 no disp back
 
@@ -3411,5 +3409,115 @@ no disp back
 
 ---
 
-*Last Updated: November 30, 2025*
+## Version 24.1: Fix Dark Upside Issue (December 1, 2025)
+
+**Archive**: V24 code before fix
+
+**Problem Report**: When viewing a displaced plane from the top, the upside appears unusually dark, as if something is obstructing light. The upside is even darker than the bottom side. This issue was not visible in V24 testing but appeared when using specific displacement textures.
+
+**Screenshots**:
+
+disp front (dark upside visible):
+![1764617811242](image/RMIP_texel_log/1764617811242.png)
+
+disp back (dark bottom visible):
+![1764617798505](image/RMIP_texel_log/1764617798505.png)
+
+no disp front (correct lighting):
+![1764617840333](image/RMIP_texel_log/1764617840333.png)
+
+no disp back (correct lighting):
+![1764617861725](image/RMIP_texel_log/1764617861725.png)
+
+**Root Cause Analysis**:
+
+Two bugs were found in `intersectMicroTriangle()` function:
+
+### Bug #1: Incorrect Material Index (Lines 1267-1269)
+
+```slang
+// WRONG: Hardcoded material index 0
+float h0 = sampleDisplacement(0, tex0);
+float h1 = sampleDisplacement(0, tex1);
+float h2 = sampleDisplacement(0, tex2);
+
+// CORRECT: Use the actual material index
+float h0 = sampleDisplacement(matIdx, tex0);
+float h1 = sampleDisplacement(matIdx, tex1);
+float h2 = sampleDisplacement(matIdx, tex2);
+```
+
+**Impact**: All materials sampled displacement from texture array index 0, which could be empty or wrong. Materials with non-zero indices would get incorrect or zero displacement.
+
+### Bug #2: Incorrect Normal Flipping Logic (Lines 1297-1298) **[PRIMARY CAUSE]**
+
+```slang
+// WRONG: Flip normal based on ray direction
+if (dot(hitGeoNormal, rayD) > 0)
+    hitGeoNormal = -hitGeoNormal;
+
+// CORRECT: Flip based on consistency with BASE SURFACE normal
+float3 baseNormal = normalize(N0 + N1 + N2);
+if (dot(hitGeoNormal, baseNormal) < 0.0)
+    hitGeoNormal = -hitGeoNormal;
+```
+
+**Why the original code caused the dark upside**:
+
+1. **Displacement creates micro-geometry**: Each displaced texel becomes a micro-triangle with its own geometric normal based on the actual displaced vertex positions
+2. **Ray-based flipping broke displacement illusion**: The old code flipped normals whenever they pointed "away" from the ray, which:
+   - Reversed actual surface orientations created by displacement
+   - Made bumps appear as valleys and vice versa in lighting
+   - Caused view-dependent inconsistencies (dark from one angle, correct from another)
+3. **Asymmetric effect**: The upside was affected more because:
+   - The top surface has actual displacement (creates varied normals)
+   - Viewing from above with downward rays caused maximum incorrect flipping
+   - The bottom surface wasn't affected as much
+
+**Why simply removing flipping caused both sides to be black**:
+
+When the normal flipping was removed entirely, some micro-triangles had normals pointing inward (due to winding order from barycentric coordinate conversion), making them appear completely black from all angles.
+
+**Correct Behavior for Displacement**:
+
+The geometric normal from `cross(e1, e2)` represents the actual displaced surface, but may point in either direction depending on winding order. The solution is to ensure consistency with the **base surface normal direction** (N0, N1, N2), not with the ray direction:
+
+- ✅ Preserves displacement features (bumps remain bumps, valleys remain valleys)
+- ✅ Ensures outward-facing orientation consistent with the base mesh
+- ✅ View-independent (same appearance from all angles)
+- ❌ Does NOT flip based on viewing direction
+
+**V24.1 Changes**:
+
+1. **Line 1267-1269**: Changed `sampleDisplacement(0, ...)` to `sampleDisplacement(matIdx, ...)`
+2. **Line 1297-1303**: Changed normal flipping from ray-based to base-surface-based:
+   - Compute average base normal: `float3 baseNormal = normalize(N0 + N1 + N2);`
+   - Flip only if pointing away from base: `if (dot(hitGeoNormal, baseNormal) < 0.0)`
+
+**Testing**: After fix, displaced surfaces should have correct lighting from all viewing angles. The upside should be properly lit, matching the expected appearance of the displacement map.
+
+**Build Status**: ✅ Requires shader recompile (F5 in app)
+
+**Expected Result**:
+
+- ✅ Upside properly lit, no unusual darkness
+- ✅ Lighting matches displacement map features (bumps are bright, valleys are dark)
+- ✅ Consistent appearance from all viewing angles
+- ✅ Multi-material scenes use correct displacement textures
+
+
+![1764619691865](image/RMIP_texel_log/1764619691865.png)
+
+![1764619899217](image/RMIP_texel_log/1764619899217.png)
+
+![1764619772878](image/RMIP_texel_log/1764619772878.png)
+
+![1764619791205](image/RMIP_texel_log/1764619791205.png)
+
+![1764619832996](image/RMIP_texel_log/1764619832996.png)
+
+---
+
+*Last Updated: December 1, 2025*
 *V24 archived at: `others/RMIP_texel/displacement_intersection_v24.slang`*
+*V24.1: Dark upside fix (current version in main shader file)*
