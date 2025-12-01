@@ -55,7 +55,7 @@
             "index": 0,
             "texCoord": 0
           },
-          "displacementGeometryFactor": 0.1,
+          "displacementGeometryFactor": 0.5,
           "displacementGeometryOffset": 0.0
         }
       }
