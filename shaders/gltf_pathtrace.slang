@@ -1104,6 +1104,14 @@ void rchitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionA
     // Note: For normals, we use worldToObject (inverse) for correct transformation under non-uniform scale
     float3 worldGeoNormal = normalize(float3(mul(worldToObject, objectGeoNormal).xyz));
 
+    // CRITICAL FIX: Apply the same view-direction flipping as getHitState() does
+    // This ensures the displacement normal faces the camera (matches behavior of regular triangles)
+    float3 V = (worldRayOrigin - hit.pos);
+    if(dot(worldGeoNormal, V) < 0)  // Flip if back facing
+    {
+        worldGeoNormal = -worldGeoNormal;
+    }
+
     // Use geometric normal for both shading and geometric normal
     // This ensures proper lighting on displaced surfaces
     hit.geonrm = worldGeoNormal;
