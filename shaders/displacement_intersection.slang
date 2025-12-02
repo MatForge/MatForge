@@ -1294,11 +1294,12 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
             float3 e2 = p2 - p0;
             hitGeoNormal = normalize(cross(e1, e2));
 
-            // FIX: For displacement mapping, preserve the actual geometric normal
-            // Flipping based on ray direction causes incorrect lighting (dark upside issue)
-            // The geometric normal represents the true surface orientation after displacement
-            // Note: If backface hits are unwanted, they should be filtered during traversal,
-            // not by flipping normals which breaks the displacement illusion
+            // Align micro-triangle normal with base surface normal direction
+            // The base surface normal (from vertex normals) defines the "outward" direction
+            float3 baseNormal = normalize(N0 * w + N1 * triB.x + N2 * triB.y);
+            if (dot(hitGeoNormal, baseNormal) < 0) {
+                hitGeoNormal = -hitGeoNormal;
+            }
 
             return true;
         }

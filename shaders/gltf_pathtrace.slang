@@ -1099,14 +1099,19 @@ void rchitDisplacement(inout HitPayload payload, in BuiltInTriangleIntersectionA
     // Get hit state using UV instead of hardware barycentrics
     HitState hit = getHitStateFromUV(renderPrim, hitUV, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
 
+    // Compute actual displaced hit position (not base triangle position from getHitStateFromUV)
+    float3 worldRayDir = WorldRayDirection();
+    float3 displacedHitPos = worldRayOrigin + worldRayDir * hitT;
+    hit.pos = displacedHitPos;  // Override with correct displaced position
+
     // Override geometric normal with the one computed from displaced micro-triangle
     // Transform object-space geometric normal to world space
     // Note: For normals, we use worldToObject (inverse) for correct transformation under non-uniform scale
     float3 worldGeoNormal = normalize(float3(mul(worldToObject, objectGeoNormal).xyz));
 
-    // CRITICAL FIX: Apply the same view-direction flipping as getHitState() does
-    // This ensures the displacement normal faces the camera (matches behavior of regular triangles)
-    float3 V = (worldRayOrigin - hit.pos);
+    // Apply view-direction flipping as getHitState() does
+    // Use the actual displaced hit position for correct view direction
+    float3 V = (worldRayOrigin - displacedHitPos);
     if(dot(worldGeoNormal, V) < 0)  // Flip if back facing
     {
         worldGeoNormal = -worldGeoNormal;
