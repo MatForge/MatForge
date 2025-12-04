@@ -1264,9 +1264,9 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
     float2 tex1 = baryToTex(tri, b1);
     float2 tex2 = baryToTex(tri, b2);
 
-    float h0 = sampleDisplacement(matIdx, tex0);
-    float h1 = sampleDisplacement(matIdx, tex1);
-    float h2 = sampleDisplacement(matIdx, tex2);
+    float h0 = sampleDisplacement(0, tex0);
+    float h1 = sampleDisplacement(0, tex1);
+    float h2 = sampleDisplacement(0, tex2);
 
     float3 P0 = getP(tri, b0);
     float3 P1 = getP(tri, b1);
@@ -1294,12 +1294,8 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
             float3 e2 = p2 - p0;
             hitGeoNormal = normalize(cross(e1, e2));
 
-            // Align micro-triangle normal with base surface normal direction
-            // The base surface normal (from vertex normals) defines the "outward" direction
-            float3 baseNormal = normalize(N0 * w + N1 * triB.x + N2 * triB.y);
-            if (dot(hitGeoNormal, baseNormal) < 0) {
+            if (dot(hitGeoNormal, rayD) > 0)
                 hitGeoNormal = -hitGeoNormal;
-            }
 
             return true;
         }

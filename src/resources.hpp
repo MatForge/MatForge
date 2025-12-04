@@ -119,6 +119,9 @@ struct Resources
   // QOLDS sampling buffers
   nvvk::Buffer bQoldsMatrices;  // QOLDS generator matrices
   nvvk::Buffer bQoldsSeeds;     // QOLDS Owen scrambling seeds
+
+  // Displacement factors from glTF (per material)
+  nvvk::Buffer bDisplacementFactors;  // Array of floats, one per material
   nvshaders::Tonemapper           tonemapper{};  // Tonemapper
   shaderio::TonemapperData        tonemapperData{
              .autoExposure = 1,

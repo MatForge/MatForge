@@ -17,7 +17,13 @@
   "nodes": [
     {
       "mesh": 0,
-      "name": "DisplacedPlane"
+      "name": "DisplacedPlane",
+      "rotation": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
     }
   ],
   "meshes": [
@@ -68,7 +74,7 @@
   ],
   "images": [
     {
-      "uri": "displacement_vertical_512.png",
+      "uri": "displacement_vertical_512_inv.png",
       "mimeType": "image/png"
     }
   ],

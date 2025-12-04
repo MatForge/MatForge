@@ -37,3 +37,4 @@ nul
 *.patch
 build_output.txt
 build_log.txt
+DemoScene/

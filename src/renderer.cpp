@@ -1301,6 +1301,8 @@ void GltfRenderer::createDescriptorSets()
                                               VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // RMIP sampler
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementSampler,
                                               VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // Displacement sampler
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementFactors,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);  // Displacement factors from glTF
 
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
@@ -1460,6 +1462,7 @@ void GltfRenderer::destroyResources()
   m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
   m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
   m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
+  m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
 
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);
@@ -1975,6 +1978,10 @@ void GltfRenderer::passRMIPToPathTracer()
     std::vector<PathTracer::DisplacementInfo> displacementInfo;
     displacementInfo.reserve(m_displacementRMIPs.size());
 
+    // Also collect displacement factors for shader
+    std::vector<float> displacementFactors;
+    displacementFactors.resize(m_displacementRMIPs.size(), 1.0f);  // Default to 1.0
+
     for (size_t i = 0; i < m_displacementRMIPs.size(); ++i)
     {
         const auto& rmip = m_displacementRMIPs[i];
@@ -1987,6 +1994,33 @@ void GltfRenderer::passRMIPToPathTracer()
         info.maxDisplacement = rmip.maxDisplacement * rmip.displacementFactor;
 
         displacementInfo.push_back(info);
+
+        // Store displacement factor for shader access
+        displacementFactors[i] = rmip.displacementFactor;
+    }
+
+    // Create/update displacement factors buffer
+    if (m_resources.bDisplacementFactors.buffer != VK_NULL_HANDLE)
+    {
+        m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
+    }
+
+    if (!displacementFactors.empty())
+    {
+        VkDeviceSize bufferSize = displacementFactors.size() * sizeof(float);
+        NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bDisplacementFactors, bufferSize,
+                                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                                                      VMA_MEMORY_USAGE_GPU_ONLY));
+        NVVK_DBG_NAME(m_resources.bDisplacementFactors.buffer);
+
+        // Upload data using staging buffer
+        VkCommandBuffer cmd{};
+        nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+        m_resources.staging.appendBuffer(m_resources.bDisplacementFactors, 0, bufferSize, displacementFactors.data());
+        m_resources.staging.cmdUploadAppended(cmd);
+        nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+        LOGI("Created displacement factors buffer with %zu entries\n", displacementFactors.size());
     }
 
     // Pass to PathTracer
