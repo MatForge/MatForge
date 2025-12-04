@@ -3518,6 +3518,227 @@ The geometric normal from `cross(e1, e2)` represents the actual displaced surfac
 
 ---
 
-*Last Updated: December 1, 2025*
+## V25 Discussion: Bringing Back ψ-Guided Texel Marching (December 3, 2025)
+
+### Current State (V24.1)
+
+The current implementation uses `testAllTexelsInRegion()` - a brute-force double loop over ALL texels in the leaf UV region. This is:
+
+- ✅ **Correct**: No stripping artifacts, works at all viewing angles
+- ❌ **Slow**: Tests every texel in the region, even ones the ray doesn't pass through
+- ❌ **Not following the paper**: Paper's Section 4.4 describes ψ-guided texel marching
+
+### What V18 Had: ψ-Guided Texel Marching
+
+V18 implemented the paper's Section 4.4 algorithm:
+
+```slang
+// V18's texelMarchWithPsi() key elements:
+1. Find entry texel via inverse displacement of ray entry point
+2. For each texel:
+   a. Compute ψ at all 4 corners
+   b. Find exit edge using sign changes in ψ
+   c. Move to adjacent texel across exit edge
+   d. Repeat until ray exits UV region or hit found
+```
+
+**Key functions in V18**:
+- `computeRayDirUV()`: Project ray direction into UV space
+- `findExitEdge()`: Use ψ sign at corners to determine exit edge
+- `texelMarchWithPsi()`: Main marching loop following ψ=0 curve
+
+### Why V18's ψ-Marching Was Removed (V21)
+
+From the V12-V20 analysis, three fundamental issues caused stripping artifacts:
+
+#### Issue 1: Wrong Entry Texel Detection
+
+```slang
+// V18 approach:
+float3 Q_entry = rayO + rayTMin * rayD;  // 3D AABB entry point
+float2 entryBary;
+bool validEntry = inverseDisplacement(tri, Q_entry, entryBary);
+currentTexel = int2(floor(entryUV * float2(texSize)));
+```
+
+**Problem**: `rayTMin` comes from ray-AABB intersection, NOT where the ψ=0 curve enters the UV region. The paper says to find where ψ=0 intersects the UV region boundary.
+
+#### Issue 2: ψ Sign Detection Fails Near ψ≈0
+
+```slang
+bool crossLeft = (psi00 * psi01 < 0.0);  // Sign change detection
+```
+
+**Problem**: Near the ψ=0 curve, all four corners have ψ≈0. Floating-point precision causes:
+- False negatives: No crossing detected when curve passes through
+- False positives: Multiple edges appear to have crossings
+- Result: EDGE_NONE returned → fallback path fails
+
+#### Issue 3: Asymmetric Fallback
+
+```slang
+if (exitEdge == EDGE_NONE) {
+    if (currentTexel.x < texelMax.x)
+        currentTexel.x++;      // Only +X
+    else if (currentTexel.y < texelMax.y)
+        currentTexel.y++;      // Only +Y
+    else
+        break;
+}
+```
+
+**Problem**: Fallback only marches in +X/+Y, never -X/-Y. When ψ=0 curve moves in negative direction, fallback fails to follow it.
+
+### The Strips Pattern Explained
+
+The stripping artifacts in V12-V20 **ARE the ψ=0 isolines** projected onto the surface:
+
+1. Strips follow mathematical contours where ψ≈0
+2. These are exactly where sign-based edge detection fails
+3. When detection fails, marching takes wrong path → gaps appear along ψ=0 curves
+
+### Paper's Section 4.4: What It Actually Says
+
+> "The sign of the implicit form ψ (3) at each texel corner indicates from which edge the ray leaves the texel, as illustrated in the inline figure on the right."
+
+The paper's inline figure shows a 2×2 grid where:
+- ψ > 0 at some corners (one side of curve)
+- ψ < 0 at other corners (other side of curve)
+- The ψ=0 curve crosses exactly two edges
+- Entry edge is known, exit edge is the OTHER crossing
+
+### Why Paper's Method Works (In Theory)
+
+1. **Well-defined ψ values**: The paper assumes clean ψ computation
+2. **Entry point known**: Paper starts from ψ=0 curve entry point (line 3 of Algorithm 1)
+3. **Exactly 2 crossings**: When ψ is well-behaved, curve enters one edge, exits another
+4. **Front-to-back ordering**: Curve direction determined by ray parameter t
+
+### Gap Between Paper and Implementation
+
+| Aspect | Paper | V18 Implementation | Issue |
+|--------|-------|-------------------|-------|
+| Entry point | ψ=0 curve entry to UV region | Inverse displacement of 3D AABB entry | Different point! |
+| ψ precision | Implicit: assumes clean values | Floating-point: ψ≈0 causes issues | Numerical noise |
+| Crossing count | Always 2 for well-behaved ψ | 0, 1, 2, 3, or 4 in practice | Ambiguity |
+| Fallback | None described | +X/+Y only | Asymmetric bias |
+
+### Potential Approaches for V25
+
+#### Approach A: Robust ψ-Based Marching
+
+Fix the three fundamental issues:
+
+1. **Correct entry point**: Find where ψ=0 curve enters the leaf UV region, not where 3D ray enters AABB
+   ```slang
+   // Find ψ=0 intersection with UV region edges
+   // Paper's line 3: bounds = inverse_displacement(points, triangle)
+   ```
+
+2. **Robust crossing detection**: Handle ψ≈0 cases explicitly
+   ```slang
+   // When |ψ| < threshold at all corners, treat as degenerate
+   // Fall back to brute force for this texel only
+   float psiThreshold = 0.01 * maxPsiInRegion;
+   if (max(abs(psi00), abs(psi10), abs(psi01), abs(psi11)) < psiThreshold) {
+       // Degenerate: test this texel and neighbors
+   }
+   ```
+
+3. **Symmetric fallback**: Use DDA-style marching when EDGE_NONE
+   ```slang
+   if (exitEdge == EDGE_NONE) {
+       // Use rayDirUV to march in correct direction
+       if (abs(rayDirUV.x) > abs(rayDirUV.y)) {
+           currentTexel.x += (rayDirUV.x > 0) ? 1 : -1;
+       } else {
+           currentTexel.y += (rayDirUV.y > 0) ? 1 : -1;
+       }
+   }
+   ```
+
+**Pros**: More faithful to paper, potentially faster (only tests texels on ray path)
+**Cons**: Complex, many edge cases, may still have precision issues
+
+#### Approach B: Hybrid ψ-Guided + Brute Force
+
+Use ψ-marching for the common case, brute force for edge cases:
+
+```slang
+bool testLeafRegion(...) {
+    // Try ψ-guided marching first
+    int texelsTested = 0;
+    int expectedTexels = estimatePathLength(uvMin, uvMax, rayDirUV);
+
+    bool found = texelMarchWithPsi(..., texelsTested);
+
+    // If marching visited too few texels, something went wrong
+    // Fall back to brute force to ensure correctness
+    if (!found && texelsTested < expectedTexels * 0.5) {
+        found = testAllTexelsInRegion(...);
+    }
+
+    return found;
+}
+```
+
+**Pros**: Fast for normal cases, correct for edge cases
+**Cons**: Complex logic, two code paths to maintain
+
+#### Approach C: DDA-Based Marching (Instead of ψ)
+
+Replace ψ sign detection with traditional DDA ray marching:
+
+```slang
+// Project ray into UV space
+float2 rayDirUV = computeRayDirUV(tri, rayD);
+
+// DDA setup
+float2 rayStartUV = entryUV;
+float2 tDelta = abs(1.0 / rayDirUV);
+int2 step = int2(sign(rayDirUV));
+// ... standard DDA traversal
+```
+
+**Pros**: Simple, well-understood algorithm, no ψ computation
+**Cons**: Doesn't follow paper's method, may not be optimal for curved ray projections
+
+### Performance Comparison
+
+| Method | Texels Tested | Per-Texel Cost | Total Cost |
+|--------|---------------|----------------|------------|
+| V24 Brute Force | All in region (N×M) | Low (just intersection) | O(N×M) |
+| V18 ψ-Marching | Path length (~max(N,M)) | Higher (ψ at 4 corners) | O(max(N,M)) |
+| DDA Marching | Path length (~max(N,M)) | Medium (DDA step) | O(max(N,M)) |
+
+For a typical leaf region of 4×4 texels:
+- Brute force: 16 texels tested
+- ψ/DDA marching: ~4-6 texels tested (2.5-4× fewer)
+
+### Recommendation
+
+Given the extensive debugging history (V12-V20), **Approach B (Hybrid)** is recommended:
+
+1. **Keep brute force as fallback**: V24's correctness is proven
+2. **Add ψ-marching as fast path**: Only activate when conditions are favorable
+3. **Detect problematic cases early**: Skip ψ-marching when ψ values are degenerate
+4. **Monitor texel count**: Fall back if marching visits suspiciously few texels
+
+This provides:
+- Performance improvement for normal cases
+- Guaranteed correctness via fallback
+- Easier debugging (can disable fast path to isolate issues)
+
+### Questions to Answer Before V25 Implementation
+
+1. **Is performance actually a problem?** Measure V24's performance on target hardware
+2. **How often are leaf regions large?** If typically 2×2, brute force is fine
+3. **What's the ψ degeneracy frequency?** Profile how often ψ≈0 at all corners
+4. **Is DDA simpler than ψ?** May be worth trying as intermediate step
+
+---
+
+*Last Updated: December 3, 2025*
 *V24 archived at: `others/RMIP_texel/displacement_intersection_v24.slang`*
 *V24.1: Dark upside fix (current version in main shader file)*
+*V25 discussion: Considering bringing back ψ-guided marching for performance*
