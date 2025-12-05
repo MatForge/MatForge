@@ -22,8 +22,8 @@
 //=============================================================================
 static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
-static const int MAX_TRAVERSAL_ITERS = 1024;
-static const float MARCHING_SCALE = 2.0;
+static const int MAX_TRAVERSAL_ITERS = 512;
+static const float MARCHING_SCALE = 8.0;
 static const int MAX_STACK_SIZE = 32;
 static const float BARY_EPS = 0.05;
 static const float PSI_NEAR_ZERO_THRESHOLD = 0.01;
@@ -384,6 +384,288 @@ float psi(Tri tri, float2 bary, float3 rayO, float3 rayD)
     float3 N = getN(tri, bary);
     float3 NxD = cross(N, rayD);
     return dot(P - rayO, NxD);
+}
+
+//=============================================================================
+// ψ Quadric Coefficients (Paper Section 4.2)
+// ψ(u,v) = A*u² + B*v² + C*u*v + D*u + E*v + F
+// where (u,v) are barycentric coordinates
+//=============================================================================
+struct PsiQuadric
+{
+    float A, B, C, D, E, F;  // Quadric coefficients
+    float3 NxD_0, NxD_u, NxD_v;  // Cross products for derivatives
+};
+
+PsiQuadric computePsiQuadric(Tri tri, float3 rayO, float3 rayD)
+{
+    PsiQuadric q;
+
+    // Cross products (constant per ray-triangle pair)
+    q.NxD_0 = cross(tri.n0, rayD);
+    q.NxD_u = cross(tri.dNdu, rayD);
+    q.NxD_v = cross(tri.dNdv, rayD);
+
+    float3 PmO = tri.v0 - rayO;
+
+    // ψ = (P - O) · (N × D)
+    // P(u,v) = P0 + u*Pu + v*Pv
+    // N(u,v) = N0 + u*Nu + v*Nv
+    // N×D = NxD_0 + u*NxD_u + v*NxD_v
+    //
+    // Expanding: ψ = A*u² + B*v² + C*uv + D*u + E*v + F
+
+    q.A = dot(tri.dPdu, q.NxD_u);
+    q.B = dot(tri.dPdv, q.NxD_v);
+    q.C = dot(tri.dPdu, q.NxD_v) + dot(tri.dPdv, q.NxD_u);
+    q.D = dot(PmO, q.NxD_u) + dot(tri.dPdu, q.NxD_0);
+    q.E = dot(PmO, q.NxD_v) + dot(tri.dPdv, q.NxD_0);
+    q.F = dot(PmO, q.NxD_0);
+
+    return q;
+}
+
+// Evaluate ψ using quadric coefficients
+float evalPsiQuadric(PsiQuadric q, float2 bary)
+{
+    float u = bary.x, v = bary.y;
+    return q.A*u*u + q.B*v*v + q.C*u*v + q.D*u + q.E*v + q.F;
+}
+
+//=============================================================================
+// ψ Partial Derivatives (Paper Eq. 4-5)
+// ψ_u = 2A*u + C*v + D = 0  (line in barycentric space)
+// ψ_v = C*u + 2B*v + E = 0  (line in barycentric space)
+//=============================================================================
+
+// Compute ψ gradient at a point
+float2 psiGradient(PsiQuadric q, float2 bary)
+{
+    float u = bary.x, v = bary.y;
+    float psi_u = 2.0 * q.A * u + q.C * v + q.D;
+    float psi_v = q.C * u + 2.0 * q.B * v + q.E;
+    return float2(psi_u, psi_v);
+}
+
+//=============================================================================
+// Turning Point Detection (Paper Section 4.2)
+// Find where ψ=0 curve intersects ψ_u=0 or ψ_v=0 lines
+// These are points where the curve changes principal direction
+//=============================================================================
+struct TurningPoints
+{
+    float2 points[4];  // Up to 4 turning points (in barycentric coords)
+    int count;
+};
+
+// Solve quadratic a*t² + b*t + c = 0
+// Returns number of real roots (0, 1, or 2)
+int solveQuadratic(float a, float b, float c, out float t0, out float t1)
+{
+    t0 = 0.0;
+    t1 = 0.0;
+
+    if (abs(a) < 1e-10)
+    {
+        // Linear equation: b*t + c = 0
+        if (abs(b) < 1e-10)
+            return 0;
+        t0 = -c / b;
+        return 1;
+    }
+
+    float disc = b * b - 4.0 * a * c;
+    if (disc < 0.0)
+        return 0;
+
+    float sqrtDisc = sqrt(disc);
+    float inv2a = 0.5 / a;
+    t0 = (-b - sqrtDisc) * inv2a;
+    t1 = (-b + sqrtDisc) * inv2a;
+    return (disc < 1e-10) ? 1 : 2;
+}
+
+// Find turning points in barycentric space within the triangle
+TurningPoints findTurningPoints(PsiQuadric q)
+{
+    TurningPoints tp;
+    tp.count = 0;
+
+    // Line 1: ψ_u = 0 → 2A*u + C*v + D = 0
+    // If C ≠ 0: v = -(2A*u + D) / C
+    // Substitute into ψ = 0: A*u² + B*v² + C*u*v + D*u + E*v + F = 0
+
+    // Try ψ_u = 0 (solve for v in terms of u, then substitute)
+    if (abs(q.C) > 1e-10)
+    {
+        // v = -(2A*u + D) / C = alpha*u + beta
+        float alpha = -2.0 * q.A / q.C;
+        float beta = -q.D / q.C;
+
+        // Substitute into ψ = A*u² + B*v² + C*u*v + D*u + E*v + F = 0
+        // ψ = A*u² + B*(alpha*u + beta)² + C*u*(alpha*u + beta) + D*u + E*(alpha*u + beta) + F
+        // ψ = A*u² + B*(alpha²*u² + 2*alpha*beta*u + beta²) + C*(alpha*u² + beta*u) + D*u + E*(alpha*u + beta) + F
+        // ψ = (A + B*alpha² + C*alpha)*u² + (2*B*alpha*beta + C*beta + D + E*alpha)*u + (B*beta² + E*beta + F)
+
+        float qa = q.A + q.B * alpha * alpha + q.C * alpha;
+        float qb = 2.0 * q.B * alpha * beta + q.C * beta + q.D + q.E * alpha;
+        float qc = q.B * beta * beta + q.E * beta + q.F;
+
+        float u0, u1;
+        int nRoots = solveQuadratic(qa, qb, qc, u0, u1);
+
+        for (int i = 0; i < nRoots && tp.count < 4; i++)
+        {
+            float u = (i == 0) ? u0 : u1;
+            float v = alpha * u + beta;
+
+            // Check if in triangle (with margin for numerical stability)
+            float w = 1.0 - u - v;
+            if (u >= -0.1 && v >= -0.1 && w >= -0.1)
+            {
+                tp.points[tp.count] = float2(u, v);
+                tp.count++;
+            }
+        }
+    }
+    else if (abs(q.A) > 1e-10)
+    {
+        // C ≈ 0, use: 2A*u + D = 0 → u = -D / (2A)
+        float u = -q.D / (2.0 * q.A);
+
+        // Substitute into ψ = 0: solve for v
+        // B*v² + (C*u + E)*v + (A*u² + D*u + F) = 0
+        float qa = q.B;
+        float qb = q.C * u + q.E;
+        float qc = q.A * u * u + q.D * u + q.F;
+
+        float v0, v1;
+        int nRoots = solveQuadratic(qa, qb, qc, v0, v1);
+
+        for (int i = 0; i < nRoots && tp.count < 4; i++)
+        {
+            float v = (i == 0) ? v0 : v1;
+            float w = 1.0 - u - v;
+            if (u >= -0.1 && v >= -0.1 && w >= -0.1)
+            {
+                tp.points[tp.count] = float2(u, v);
+                tp.count++;
+            }
+        }
+    }
+
+    // Line 2: ψ_v = 0 → C*u + 2B*v + E = 0
+    if (abs(q.C) > 1e-10)
+    {
+        // u = -(2B*v + E) / C = alpha*v + beta
+        float alpha = -2.0 * q.B / q.C;
+        float beta = -q.E / q.C;
+
+        // Substitute into ψ = 0
+        float qa = q.A * alpha * alpha + q.B + q.C * alpha;
+        float qb = 2.0 * q.A * alpha * beta + q.C * beta + q.D * alpha + q.E;
+        float qc = q.A * beta * beta + q.D * beta + q.F;
+
+        float v0, v1;
+        int nRoots = solveQuadratic(qa, qb, qc, v0, v1);
+
+        for (int i = 0; i < nRoots && tp.count < 4; i++)
+        {
+            float v = (i == 0) ? v0 : v1;
+            float u = alpha * v + beta;
+
+            // Check if in triangle and not duplicate
+            float w = 1.0 - u - v;
+            if (u >= -0.1 && v >= -0.1 && w >= -0.1)
+            {
+                // Check for duplicates
+                bool isDuplicate = false;
+                for (int j = 0; j < tp.count; j++)
+                {
+                    if (length(tp.points[j] - float2(u, v)) < 0.01)
+                    {
+                        isDuplicate = true;
+                        break;
+                    }
+                }
+                if (!isDuplicate)
+                {
+                    tp.points[tp.count] = float2(u, v);
+                    tp.count++;
+                }
+            }
+        }
+    }
+    else if (abs(q.B) > 1e-10)
+    {
+        // C ≈ 0, use: 2B*v + E = 0 → v = -E / (2B)
+        float v = -q.E / (2.0 * q.B);
+
+        // Substitute into ψ = 0: solve for u
+        float qa = q.A;
+        float qb = q.C * v + q.D;
+        float qc = q.B * v * v + q.E * v + q.F;
+
+        float u0, u1;
+        int nRoots = solveQuadratic(qa, qb, qc, u0, u1);
+
+        for (int i = 0; i < nRoots && tp.count < 4; i++)
+        {
+            float u = (i == 0) ? u0 : u1;
+            float w = 1.0 - u - v;
+            if (u >= -0.1 && v >= -0.1 && w >= -0.1)
+            {
+                bool isDuplicate = false;
+                for (int j = 0; j < tp.count; j++)
+                {
+                    if (length(tp.points[j] - float2(u, v)) < 0.01)
+                    {
+                        isDuplicate = true;
+                        break;
+                    }
+                }
+                if (!isDuplicate)
+                {
+                    tp.points[tp.count] = float2(u, v);
+                    tp.count++;
+                }
+            }
+        }
+    }
+
+    return tp;
+}
+
+// Convert turning points from barycentric to UV space
+TurningPoints turningPointsToUV(Tri tri, TurningPoints tpBary)
+{
+    TurningPoints tpUV;
+    tpUV.count = 0;
+
+    for (int i = 0; i < tpBary.count; i++)
+    {
+        float2 uv = baryToTex(tri, tpBary.points[i]);
+        tpUV.points[tpUV.count] = uv;
+        tpUV.count++;
+    }
+
+    return tpUV;
+}
+
+// Check if a turning point is within a UV region
+bool turningPointInRegion(float2 tp, float2 uvMin, float2 uvMax)
+{
+    return tp.x >= uvMin.x && tp.x <= uvMax.x &&
+           tp.y >= uvMin.y && tp.y <= uvMax.y;
+}
+
+// Get ψ curve direction at a point (perpendicular to gradient)
+float2 psiCurveDirection(PsiQuadric q, float2 bary)
+{
+    float2 grad = psiGradient(q, bary);
+    // Curve direction is perpendicular to gradient
+    // Rotate 90 degrees: (gx, gy) → (-gy, gx)
+    return float2(-grad.y, grad.x);
 }
 
 //=============================================================================
@@ -954,6 +1236,7 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
 //=============================================================================
 // ψ-Guided Texel Marching (Paper Section 4.4)
+// Enhanced with turning point detection (Paper Section 4.2)
 //=============================================================================
 bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
@@ -963,6 +1246,14 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     hitT = rayTMax + 1.0;
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
+
+    // Compute ψ quadric coefficients (Paper Section 4.2)
+    PsiQuadric psiQ = computePsiQuadric(tri, rayO, rayD);
+
+    // Find turning points (Paper Section 4.2, Eq. 4-5)
+    // These are where ψ_u = 0 or ψ_v = 0 intersects ψ = 0
+    TurningPoints tpBary = findTurningPoints(psiQ);
+    TurningPoints tpUV = turningPointsToUV(tri, tpBary);
 
     // Entry detection via inverse_displacement (Paper Section 4.1)
     float3 Q_entry = rayO + rayTMin * rayD;
@@ -976,6 +1267,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     float2 uvExit = baryToTex(tri, baryExit);
 
     // Bound refinement (Paper Algorithm 1 line 15)
+    // Also expand bounds to include turning points (Paper Section 4.2)
     float2 refinedUvMin = uvMin;
     float2 refinedUvMax = uvMax;
 
@@ -983,6 +1275,18 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     {
         float2 rayUvMin = min(uvEntry, uvExit);
         float2 rayUvMax = max(uvEntry, uvExit);
+
+        // Expand bounds to include any turning points within the region
+        // This ensures the bounding rectangle contains the entire ψ curve
+        for (int i = 0; i < tpUV.count; i++)
+        {
+            if (turningPointInRegion(tpUV.points[i], uvMin, uvMax))
+            {
+                rayUvMin = min(rayUvMin, tpUV.points[i]);
+                rayUvMax = max(rayUvMax, tpUV.points[i]);
+            }
+        }
+
         float2 padding = float2(1.0) / float2(texSize);
         refinedUvMin = max(uvMin, rayUvMin - padding);
         refinedUvMax = min(uvMax, rayUvMax + padding);
@@ -996,13 +1300,32 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     if (any(texelMin > texelMax))
         return false;
 
-    // Find entry texel
+    // Find entry texel using inverse displacement or ray direction
     int2 currentTexel;
+    float2 curveDir = rayDirUV;  // Initial curve direction estimate
+
     if (validEntry)
     {
         float2 clampedEntryUV = clamp(uvEntry, refinedUvMin, refinedUvMax);
         currentTexel = int2(floor(clampedEntryUV * float2(texSize)));
         currentTexel = clamp(currentTexel, texelMin, texelMax);
+
+        // Use ψ gradient for initial curve direction (Paper Section 4.2)
+        // Curve direction is perpendicular to gradient
+        float2 grad = psiGradient(psiQ, baryEntry);
+        if (length(grad) > 1e-6)
+        {
+            // Convert barycentric gradient to UV direction
+            float2 curveDirBary = psiCurveDirection(psiQ, baryEntry);
+            // Transform to UV space (approximate)
+            curveDir = float2(
+                curveDirBary.x * tri.dTdu.x + curveDirBary.y * tri.dTdv.x,
+                curveDirBary.x * tri.dTdu.y + curveDirBary.y * tri.dTdv.y
+            );
+            // Ensure we're going from entry toward exit
+            if (validExit && dot(curveDir, uvExit - uvEntry) < 0)
+                curveDir = -curveDir;
+        }
     }
     else
     {
@@ -1017,10 +1340,10 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     }
 
     int entryEdge = EDGE_NONE;
-    if (abs(rayDirUV.x) >= abs(rayDirUV.y))
-        entryEdge = (rayDirUV.x >= 0) ? EDGE_LEFT : EDGE_RIGHT;
+    if (abs(curveDir.x) >= abs(curveDir.y))
+        entryEdge = (curveDir.x >= 0) ? EDGE_LEFT : EDGE_RIGHT;
     else
-        entryEdge = (rayDirUV.y >= 0) ? EDGE_BOTTOM : EDGE_TOP;
+        entryEdge = (curveDir.y >= 0) ? EDGE_BOTTOM : EDGE_TOP;
 
     float bestT = rayTMax + 1.0;
     bool found = false;
@@ -1104,20 +1427,54 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             }
         }
 
-        // Compute ψ at valid corners
-        float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 0.0;
-        float psi10 = valid10 ? psi(tri, b10_orig, rayO, rayD) : 0.0;
-        float psi01 = valid01 ? psi(tri, b01_orig, rayO, rayD) : 0.0;
-        float psi11 = valid11 ? psi(tri, b11_orig, rayO, rayD) : 0.0;
+        // Compute ψ at valid corners using quadric for efficiency
+        // Use NaN-safe values for invalid corners to avoid false crossings
+        float psi00 = valid00 ? evalPsiQuadric(psiQ, b00_orig) : 1e30;
+        float psi10 = valid10 ? evalPsiQuadric(psiQ, b10_orig) : 1e30;
+        float psi01 = valid01 ? evalPsiQuadric(psiQ, b01_orig) : 1e30;
+        float psi11 = valid11 ? evalPsiQuadric(psiQ, b11_orig) : 1e30;
 
         int validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
+
+        // Check if a turning point exists in this texel
+        float2 texelUvMin = float2(currentTexel) / float2(texSize);
+        float2 texelUvMax = float2(currentTexel + int2(1, 1)) / float2(texSize);
+        bool hasTurningPoint = false;
+        for (int tpi = 0; tpi < tpUV.count; tpi++)
+        {
+            if (turningPointInRegion(tpUV.points[tpi], texelUvMin, texelUvMax))
+            {
+                hasTurningPoint = true;
+                break;
+            }
+        }
+
+        // Update curve direction at texel center using ψ gradient
+        float2 texelCenterBary;
+        float2 texelCenterUV = (texelUvMin + texelUvMax) * 0.5;
+        if (texToBary(tri, texelCenterUV, texelCenterBary))
+        {
+            float2 grad = psiGradient(psiQ, texelCenterBary);
+            if (length(grad) > 1e-6)
+            {
+                float2 localCurveDirBary = psiCurveDirection(psiQ, texelCenterBary);
+                float2 localCurveDir = float2(
+                    localCurveDirBary.x * tri.dTdu.x + localCurveDirBary.y * tri.dTdv.x,
+                    localCurveDirBary.x * tri.dTdu.y + localCurveDirBary.y * tri.dTdv.y
+                );
+                // Maintain consistent direction
+                if (dot(localCurveDir, curveDir) < 0)
+                    localCurveDir = -localCurveDir;
+                curveDir = localCurveDir;
+            }
+        }
 
         // DDA fallback for insufficient valid corners
         if (validCount < 2)
         {
-            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+            if (abs(curveDir.x) >= abs(curveDir.y))
             {
-                int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                int dx = (curveDir.x >= 0) ? 1 : -1;
                 if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
                 {
                     currentTexel.x += dx;
@@ -1125,7 +1482,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
                 else
                 {
-                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                    int dy = (curveDir.y >= 0) ? 1 : -1;
                     if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
                     {
                         currentTexel.y += dy;
@@ -1136,7 +1493,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             }
             else
             {
-                int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                int dy = (curveDir.y >= 0) ? 1 : -1;
                 if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
                 {
                     currentTexel.y += dy;
@@ -1144,7 +1501,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
                 else
                 {
-                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                    int dx = (curveDir.x >= 0) ? 1 : -1;
                     if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
                     {
                         currentTexel.x += dx;
@@ -1156,17 +1513,28 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             continue;
         }
 
+        // Scale threshold relative to ψ magnitude (Paper Section 4.2)
         float maxAbsPsi = max(max(abs(psi00), abs(psi10)), max(abs(psi01), abs(psi11)));
-        bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD;
+        float avgAbsPsi = (abs(psi00) + abs(psi10) + abs(psi01) + abs(psi11)) / float(validCount);
+        bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD * avgAbsPsi ||
+                             maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD * 0.001;
 
-        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, rayDirUV);
+        // At turning points, the curve changes direction - be more careful
+        if (hasTurningPoint)
+        {
+            // At turning points, trust the sign pattern less
+            // Use gradient direction as primary guide
+            psiDegenerate = true;
+        }
+
+        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, curveDir);
 
         // DDA fallback for no exit or degenerate ψ
         if (exitEdge == EDGE_NONE || psiDegenerate)
         {
-            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+            if (abs(curveDir.x) >= abs(curveDir.y))
             {
-                int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                int dx = (curveDir.x >= 0) ? 1 : -1;
                 if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
                 {
                     currentTexel.x += dx;
@@ -1174,7 +1542,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
                 else
                 {
-                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                    int dy = (curveDir.y >= 0) ? 1 : -1;
                     if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
                     {
                         currentTexel.y += dy;
@@ -1185,7 +1553,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             }
             else
             {
-                int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                int dy = (curveDir.y >= 0) ? 1 : -1;
                 if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
                 {
                     currentTexel.y += dy;
@@ -1193,7 +1561,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
                 else
                 {
-                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                    int dx = (curveDir.x >= 0) ? 1 : -1;
                     if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
                     {
                         currentTexel.x += dx;
