@@ -184,7 +184,8 @@ private:
     // Displacement-related members
     std::vector<DisplacementInfo> m_displacementInfo;
     bool                          m_hasDisplacement{ false };
-    VkSampler                     m_displacementSampler{};  // Sampler for RMIP and displacement textures
+    VkSampler                     m_displacementSampler{};  // Sampler for displacement textures (LINEAR filtering)
+    VkSampler                     m_rmipSampler{};          // Sampler for RMIP textures (NEAREST filtering - required for minmax queries)
 
     // Additional shader modules for displacement (if using separate shaders)
     VkShaderModule m_displacementIntersectionShader{};

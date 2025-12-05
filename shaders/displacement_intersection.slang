@@ -979,10 +979,38 @@ float sampleDisplacement(uint matIdx, float2 texUV)
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
 {
-    // TODO: Use RMIP for tight rectangular bounds per paper
-    // Currently using conservative global bounds
-    hMin = 0.0;
-    hMax = getDisplacementScale(matIdx);
+    // Use RMIP for tight rectangular bounds per paper Section 5 / Algorithm 2
+    // RMIP provides O(1) minmax queries over arbitrary axis-aligned rectangles
+
+    // Handle degenerate case (single point query)
+    float2 queryMin = texMin;
+    float2 queryMax = texMax;
+
+    // Ensure we have a valid rectangle (at least 1 texel)
+    float2 minSize = 1.0 / float2(texSize);
+    if (queryMax.x - queryMin.x < minSize.x)
+        queryMax.x = queryMin.x + minSize.x;
+    if (queryMax.y - queryMin.y < minSize.y)
+        queryMax.y = queryMin.y + minSize.y;
+
+    // Clamp to valid UV range
+    queryMin = clamp(queryMin, 0.0, 1.0);
+    queryMax = clamp(queryMax, 0.0, 1.0);
+
+    // Compute maxLevel from texture size (RMIP has maxLevel+1 levels per dimension)
+    uint maxLevel = uint(log2(float(texSize.x)));
+
+    // Query RMIP for displacement bounds over the rectangular region
+    // Returns float2(minDisp, maxDisp) in raw texture value range [0, 1]
+    float2 bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, queryMin, queryMax, maxLevel);
+
+    // Scale by displacement factor to get world-space displacement bounds
+    float scale = getDisplacementScale(matIdx);
+    hMin = bounds.x * scale;
+    hMax = bounds.y * scale;
+    if (false) {
+        hMax = scale;
+    }
 }
 
 //=============================================================================

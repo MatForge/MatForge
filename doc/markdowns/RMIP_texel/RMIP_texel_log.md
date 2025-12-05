@@ -5724,6 +5724,7 @@ All changes in `shaders/displacement_intersection.slang`:
 ### Problem Analysis from V32 Screenshots
 
 After V32 (turning point detection), stripping persisted with these characteristics:
+
 - Concentric ring patterns around displacement peaks
 - Stripes follow ψ iso-contours
 - View-angle dependent severity
@@ -5737,16 +5738,17 @@ When marching along ψ=0 (on base surface), also test texels in the perpendicula
 ### Implementation Details
 
 1. **New helper function `testSingleTexel()`** (lines 849-929):
+
    - Tests one texel for ray intersection
    - Updates best hit if closer intersection found
    - Refactored from inline code in loop
-
 2. **New function `computePerpTexelOffset()`** (lines 931-951):
+
    - Computes ψ gradient in UV space
    - Discretizes to texel offset (±1 in dominant direction)
    - Returns int2 offset perpendicular to curve
-
 3. **Modified `texelMarchWithPsi()` loop** (lines 1485-1545):
+
    - For each texel visited:
      1. Test current texel (where ψ=0 passes on base surface)
      2. Compute perpendicular direction from ψ gradient
@@ -5756,11 +5758,13 @@ When marching along ψ=0 (on base surface), also test texels in the perpendicula
 ### Key Insight
 
 The ψ function (Paper Eq. 3) is:
+
 ```
 ψ(u,v) = (P(u,v) - O) · (N × D)
 ```
 
 This represents the **signed distance** from the ray to the base surface point. When displacement `h(u,v)` is applied:
+
 - Surface becomes `S(u,v) = P(u,v) + h(u,v) * N(u,v)`
 - Actual intersection is where ray hits S, not where ψ=0 on P
 - The offset is perpendicular to the ψ=0 curve (i.e., along ψ gradient)
@@ -5801,6 +5805,7 @@ if (texToBary(tri, perpUV, perpBary))
 ### Testing
 
 PENDING - Need to verify:
+
 1. Does perpendicular testing reduce stripping?
 2. What is the performance impact of 3x texel tests?
 3. Are there still edge cases (large displacements, grazing angles)?
@@ -5854,6 +5859,7 @@ When the ψ quadric discriminant Δ = C² - 4AB > 0, the ψ=0 curve is a **hyper
 ### Implementation
 
 1. **Hyperbola Detection**:
+
 ```slang
 bool isHyperbolicPsi(PsiQuadric q)
 {
@@ -5863,6 +5869,7 @@ bool isHyperbolicPsi(PsiQuadric q)
 ```
 
 2. **Boundary Crossing Detection**:
+
 ```slang
 struct BoundaryCrossing { float2 uv; float2 bary; int edge; float param; };
 struct BoundaryCrossings { BoundaryCrossing crossings[8]; int count; };
@@ -5872,6 +5879,7 @@ BoundaryCrossings findAllBoundaryCrossings(Tri tri, PsiQuadric q, float2 uvMin, 
 ```
 
 3. **Queue-Based Multi-Branch Marching**:
+
 ```slang
 // Queue for multiple ψ=0 branch starting points
 int2 branchQueue[8];
@@ -5912,27 +5920,28 @@ The issue is **not** with missing hyperbola branches. Both branches are being fo
 
 ### Summary of Failed Attempts
 
-| Version | Hypothesis | Result |
-|---------|------------|--------|
-| V33 | Displacement offsets hits to perpendicular texels | Slow, limited improvement |
-| V34 | Quadric ψ approximation is inaccurate | No change - quadric is correct |
-| V35 | Missing second branch of hyperbolic ψ curve | No change - both branches found |
+| Version | Hypothesis                                        | Result                          |
+| ------- | ------------------------------------------------- | ------------------------------- |
+| V33     | Displacement offsets hits to perpendicular texels | Slow, limited improvement       |
+| V34     | Quadric ψ approximation is inaccurate            | No change - quadric is correct  |
+| V35     | Missing second branch of hyperbolic ψ curve      | No change - both branches found |
 
 ### Critical Observations About the Stripes
 
 Looking at the stripping pattern in the V32 screenshots:
 
 1. **Stripes follow displacement ISO-CONTOURS**, not the UV grid
+
    - The stripes are concentric rings around displacement peaks/valleys
    - They curve smoothly following the terrain contours
    - NOT aligned with texel grid or UV axes
-
 2. **Stripes are VIEW-DEPENDENT**
+
    - More prominent at grazing angles
    - Change shape/position with camera movement
    - Consistent with a projection-based issue
-
 3. **Stripes occur at SPECIFIC HEIGHTS**
+
    - Appear at certain elevation levels on the displacement
    - Form rings at constant-height contours
    - Suggests a quantization or threshold phenomenon
@@ -5940,6 +5949,7 @@ Looking at the stripping pattern in the V32 screenshots:
 ### Root Cause Analysis
 
 The ψ function (Paper Eq. 3) is:
+
 ```
 ψ(u,v) = (P(u,v) - O) · (N × D)
 ```
@@ -5947,6 +5957,7 @@ The ψ function (Paper Eq. 3) is:
 This represents the **signed distance from the ray to the BASE surface point P(u,v)**.
 
 However, the actual hit occurs on the **DISPLACED surface**:
+
 ```
 S(u,v) = P(u,v) + h(u,v) · N(u,v)
 ```
@@ -5973,6 +5984,7 @@ Where hit occurs: Texel A (on displaced surface due to height h)
 ```
 
 The offset between where ψ=0 passes and where the displaced hit occurs depends on:
+
 - Displacement height h(u,v)
 - Surface normal N
 - Ray direction D
@@ -5983,6 +5995,7 @@ The offset between where ψ=0 passes and where the displaced hit occurs depends 
 ### Why V33 (Perpendicular Testing) Wasn't Enough
 
 V33 tested ±1 texel perpendicular to the ψ=0 curve. This helps for small offsets but:
+
 - Large displacements can shift hits by multiple texels
 - The offset varies across the surface (depends on local h)
 - Would need to test ALL texels within the displacement range
@@ -6005,12 +6018,14 @@ The paper addresses this by using **RMIP (Rectangular Minmax Image Pyramid)**:
 ### Fundamental Limitation of Current Implementation
 
 Our current ψ-marching implementation:
+
 - ✅ Correctly computes ψ=0 curve on base surface
 - ✅ Correctly handles turning points
 - ✅ Correctly handles hyperbolic two-branch cases
 - ❌ **Cannot predict where displaced hits occur without querying displacement bounds**
 
 The stripes are an **inherent limitation** of ψ-marching without RMIP:
+
 - We follow ψ=0 on the base surface
 - But hits are on the displaced surface (shifted by h·N)
 - Without knowing h's range, we don't know which texels to check
@@ -6020,11 +6035,208 @@ The stripes are an **inherent limitation** of ψ-marching without RMIP:
 **The stripping artifacts are a fundamental limitation of ψ-marching without RMIP bounds.**
 
 To eliminate the stripes, we need either:
+
 1. **Full RMIP implementation** (as described in the paper) - O(log N) traversal with tight bounds
 2. **Brute force** - test all texels (works, but O(N²))
 3. **Hybrid approach** - use ψ-marching with conservative bounding (current state, has artifacts)
 
 The paper's algorithm uses ψ-marching as part of the RMIP traversal to efficiently narrow down to leaf texels, not as a standalone intersection method. The RMIP bounds provide the robustness that ψ-marching alone cannot achieve.
+
+![1764976582011](image/RMIP_texel_log/1764976582011.png)
+
+
+---
+
+---
+
+## V36: RMIP Bounds Query Implementation (December 5, 2025)
+
+### Goal
+
+Implement proper RMIP bounds querying in `getDisplacementBounds()` to provide tight rectangular displacement bounds instead of conservative global bounds.
+
+### Implementation
+
+Changed `getDisplacementBounds()` from:
+```slang
+void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
+                           out float hMin, out float hMax)
+{
+    hMin = 0.0;
+    hMax = getDisplacementScale(matIdx);
+}
+```
+
+To:
+```slang
+void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
+                           out float hMin, out float hMax)
+{
+    // Compute maxLevel from texture size
+    uint maxLevel = uint(log2(float(texSize.x)));
+
+    // Query RMIP for displacement bounds over the rectangular region
+    float2 bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, queryMin, queryMax, maxLevel);
+
+    // Scale by displacement factor
+    float scale = getDisplacementScale(matIdx);
+    hMin = bounds.x * scale;
+    hMax = bounds.y * scale;
+}
+```
+
+### Testing Result
+
+❌ **FAILED** - Severe rendering artifacts with characteristic circular pattern
+
+**Observed Behavior**:
+- At grazing angle: Nothing renders (all surfaces culled)
+- As viewing angle increases: Four corners/vertices render first
+- At top-down view: Plane renders with inner circular void (diameter ≈ edge length) and small square at center
+
+![V36 - Grazing angle, nothing renders](image/RMIP_texel_log/1764968033680.png)
+
+![V36 - Mid angle, four corners visible](image/RMIP_texel_log/1764968043736.png)
+
+![V36 - Top-down, circular void with center square](image/RMIP_texel_log/1764968066465.png)
+
+### Debug Finding
+
+Added debug code to verify the issue:
+```slang
+if (false) {
+    hMax = scale;  // Force global max bound
+}
+```
+
+When `hMax = scale` is forced (global bound), rendering is **correct**. This confirms:
+- `bounds.x` (min) may be correct
+- `bounds.y` (max) is **INCORRECT** - returning values that are too low
+
+### Root Cause Analysis
+
+The RMIP query is returning `bounds.y` (max displacement) values that are **too tight** (underestimating the actual maximum displacement in the queried region). This causes:
+
+1. 3D AABBs computed from these bounds are **smaller** than actual displaced surface extent
+2. Ray-AABB tests return false negatives (ray misses AABB even though it hits displaced surface)
+3. Regions get incorrectly culled → circular void pattern
+
+**Why Circular Pattern?**
+
+The circular void pattern suggests the error is related to **distance from texture center or corners**. Possible causes:
+
+#### Hypothesis 1: RMIP Higher Layers Not Built Correctly
+
+The RMIP structure has layers (p, q) where each stores minmax for rectangles of size (2^p, 2^q):
+- Layer (0, 0): Single texel queries
+- Layer (maxLevel, maxLevel): Entire texture query
+
+For large queries (near texture center), we query high layers. If these layers contain incorrect/uninitialized values, large region queries fail while small corner queries work.
+
+**Evidence**: Four corners render first as angle increases - suggests small region queries (low p,q) work, large region queries (high p,q) fail.
+
+#### Hypothesis 2: RMIP Sampler Using Linear Filtering
+
+The `rmipSampler` must use **NEAREST** (point) filtering for correct minmax queries. If it uses LINEAR filtering:
+- Adjacent pixel values get interpolated
+- Minmax values become AVERAGED instead of preserved
+- Results in bounds that are too tight (between actual min and max)
+
+**Evidence**: The gradual transition from void to rendered (not sharp edges) suggests interpolation.
+
+#### Hypothesis 3: Layer Index Calculation Mismatch
+
+The `getRmipLayer()` function must match the build-time `computeLayerIndex()`:
+```slang
+// Build: computeLayerIndex(p, q, stride) = p + q * stride
+// Query: getRmipLayer(p, q, maxLevel) = p + q * (maxLevel + 1)
+```
+
+If `maxLevel` is computed differently between build and query, wrong layers get sampled.
+
+#### Hypothesis 4: Texture Array Sampling Issue
+
+When sampling `Texture2DArray` with `float3(uv, float(layer))`:
+- The Z coordinate is the array slice index
+- If sampler interpolates between array slices, we get wrong layer values
+
+### Investigation Steps
+
+1. **Verify RMIP build**: Add debug output to confirm layer (maxLevel, maxLevel) contains global minmax
+2. **Check sampler settings**: Ensure `rmipSampler` uses `VK_FILTER_NEAREST` for all axes
+3. **Debug query**: Log the queried positions, layers, and returned values for failing regions
+4. **Compare layer indices**: Verify `maxLevel` computation matches between build and query
+
+### Root Cause Found: LINEAR Filtering on RMIP Sampler
+
+**Investigation Result**: Confirmed Hypothesis 2 - the RMIP sampler was using LINEAR filtering instead of NEAREST.
+
+**Root Cause Chain**:
+
+1. In `renderer_pathtracer.cpp:88`, the code calls:
+   ```cpp
+   resources.samplerPool.acquireSampler(m_displacementSampler);
+   ```
+
+2. The `SamplerPool::acquireSampler()` default (from `nvvk/sampler_pool.hpp:59-62`) uses:
+   ```cpp
+   .magFilter = VK_FILTER_LINEAR,
+   .minFilter = VK_FILTER_LINEAR
+   ```
+
+3. Both RMIP and displacement textures were using the same sampler (`m_displacementSampler`)
+
+4. **Result**: When querying RMIP minmax values, LINEAR filtering interpolates between adjacent texels, returning **averaged** values instead of true min/max
+
+**Why This Causes the Circular Void Pattern**:
+
+- RMIP stores `(min, max)` per texel as `float2`
+- With LINEAR filtering, a query between 4 texels returns: `lerp(lerp(texel00, texel10), lerp(texel01, texel11))`
+- This averages min with max values → bounds become too tight
+- Larger query regions require higher RMIP layers → more averaging → worse bounds
+- Center of texture has most UV distance from corners → queries use highest layers → worst affected
+- Corners render because small queries (low layers) have less averaging error
+
+### Fix: Separate RMIP Sampler with NEAREST Filtering (V37)
+
+**Files Changed**:
+
+1. `src/renderer_pathtracer.hpp` - Added `m_rmipSampler` member:
+   ```cpp
+   VkSampler m_displacementSampler{};  // LINEAR filtering for displacement textures
+   VkSampler m_rmipSampler{};          // NEAREST filtering for RMIP minmax queries
+   ```
+
+2. `src/renderer_pathtracer.cpp` - Create RMIP sampler in `onAttach()`:
+   ```cpp
+   VkSamplerCreateInfo rmipSamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+   rmipSamplerInfo.magFilter = VK_FILTER_NEAREST;
+   rmipSamplerInfo.minFilter = VK_FILTER_NEAREST;
+   rmipSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+   rmipSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+   rmipSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+   rmipSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+   resources.samplerPool.acquireSampler(m_rmipSampler, rmipSamplerInfo);
+   ```
+
+3. `src/renderer_pathtracer.cpp` - Release in `onDetach()`:
+   ```cpp
+   resources.samplerPool.releaseSampler(m_rmipSampler);
+   m_rmipSampler = VK_NULL_HANDLE;
+   ```
+
+4. `src/renderer_pathtracer.cpp` - Use separate samplers in `writeDisplacementDescriptors()`:
+   ```cpp
+   // Binding 10: RMIP sampler - MUST use NEAREST filtering
+   rmipSamplerInfo.sampler = m_rmipSampler;
+
+   // Binding 11: Displacement sampler - uses LINEAR filtering
+   dispSamplerInfo.sampler = m_displacementSampler;
+   ```
+
+**Build**: ✅ Successful
+
+**Testing**: Pending user verification
 
 ---
 
@@ -6037,3 +6249,5 @@ The paper's algorithm uses ψ-marching as part of the RMIP traversal to efficien
 *V34: Confirmed ψ quadric computation is correct (direct vs quadric identical)*
 *V35: Confirmed hyperbolic two-branch is not the issue (both branches found)*
 *V33-V35 Analysis: Stripping is fundamental to ψ-marching without RMIP bounds*
+*V36: RMIP bounds query implemented but returns incorrect max values - under investigation*
+*V37: ROOT CAUSE FOUND - LINEAR filtering on RMIP sampler. Fixed with separate NEAREST sampler.*
