@@ -34,9 +34,9 @@ static const float NEWTON_EPS = 1e-6;
 // V24: Significantly increased iteration limits
 // At diagonal viewing angles, the ray passes through more UV regions
 // requiring more iterations to fully cover the ray's footprint
-static const int MAX_TRAVERSAL_ITERS = 1024;  // Was 512
-static const float MARCHING_SCALE = 2.0; // Was 8.0
-static const int MAX_STACK_SIZE = 32;  
+static const int MAX_TRAVERSAL_ITERS = 512;  // Was 128
+static const float MARCHING_SCALE = 8.0;
+static const int MAX_STACK_SIZE = 32;  // Was 32
 
 // V24: Increased triangle boundary tolerance
 // This helps with diagonal edge cases where u+v≈1

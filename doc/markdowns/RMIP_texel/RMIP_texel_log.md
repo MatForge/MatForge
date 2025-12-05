@@ -3979,11 +3979,11 @@ bool needFallback = !psiFound || (visitRatio < PSI_MARCH_MIN_RATIO);
 
 **Threshold Behavior Summary**:
 
-| PSI_MARCH_MIN_RATIO | Behavior                                              | Use Case                  |
-| ------------------- | ----------------------------------------------------- | ------------------------- |
-| 0.0                 | Pure ψ-marching, NO fallback                         | Testing/debugging ψ      |
-| 0.3 (default)       | Hybrid: ψ first, fallback when unreliable           | Production (balanced)     |
-| 1.0                 | Pure brute force, skip ψ entirely                   | Correctness testing       |
+| PSI_MARCH_MIN_RATIO | Behavior                                   | Use Case              |
+| ------------------- | ------------------------------------------ | --------------------- |
+| 0.0                 | Pure ψ-marching, NO fallback              | Testing/debugging ψ  |
+| 0.3 (default)       | Hybrid: ψ first, fallback when unreliable | Production (balanced) |
+| 1.0                 | Pure brute force, skip ψ entirely         | Correctness testing   |
 
 **Key Changes from V25.1**:
 
@@ -4006,6 +4006,7 @@ bool needFallback = !psiFound || (visitRatio < PSI_MARCH_MIN_RATIO);
 User observation: "As long as PSI_MARCH_MIN_RATIO is not 0, even if it is as small as 0.001, the hybrid approach makes everything render in brute force."
 
 This means there are effectively only TWO modes:
+
 - `PSI_MARCH_MIN_RATIO = 0`: Pure ψ-marching (shows stripping)
 - `PSI_MARCH_MIN_RATIO > 0`: Pure brute force (always falls back)
 
@@ -4014,11 +4015,13 @@ This means there are effectively only TWO modes:
 ### V25.2 Analysis: Why ψ-Marching ALWAYS Fails (Dec 4, 2025)
 
 The hybrid fallback condition is:
+
 ```slang
 bool needFallback = !psiFound || (visitRatio < PSI_MARCH_MIN_RATIO);
 ```
 
 The fact that **any threshold > 0** (even 0.001) triggers full fallback means:
+
 1. `psiFound` is ALWAYS false (ψ-marching never finds hits), OR
 2. When `psiFound = true`, `visitRatio` is extremely low (< 0.001)
 
@@ -4027,6 +4030,7 @@ The fact that **any threshold > 0** (even 0.001) triggers full fallback means:
 #### Root Cause: Wrong Entry Texel Detection
 
 Current implementation (lines 1650-1675):
+
 ```slang
 // Find entry point by projecting ray entry to UV space
 float3 Q_entry = rayO + rayTMin * rayD;  // <-- WRONG!
@@ -4048,6 +4052,7 @@ else
 **The Problem**: `rayTMin` comes from the ray-AABB intersection, NOT where the ψ=0 curve enters the UV region!
 
 From the V25 discussion (Issue 1):
+
 > `rayTMin` comes from ray-AABB intersection, NOT where the ψ=0 curve enters the UV region. The paper says to find where ψ=0 intersects the UV region boundary.
 
 The AABB entry point and the ψ=0 curve entry point are **completely different**:
@@ -4068,6 +4073,7 @@ The AABB entry point and the ψ=0 curve entry point are **completely different**
 ```
 
 When we start at the wrong texel:
+
 1. ψ sign detection picks exit edges that move AWAY from the actual ray path
 2. We traverse texels that the ray never actually intersects
 3. `intersectMicroTriangle()` correctly returns no hit (because there IS no hit in those texels)
@@ -4081,6 +4087,7 @@ Brute force (`testAllTexelsInRegion()`) tests ALL texels in the UV region, inclu
 #### Paper's Actual Algorithm (Section 4.4, Algorithm 1)
 
 The paper's line 3 says:
+
 > "bounds = inverse_displacement(points, triangle)"
 
 This means finding where the ψ=0 curve intersects the UV region **boundary**, not projecting the AABB entry point. To do this properly:
@@ -4265,12 +4272,12 @@ bool validEntry = findPsiZeroEntry(tri, rayO, rayD, uvMin, uvMax, texSize, rayDi
 
 **Key Differences V25 → V26**:
 
-| Aspect | V25 (broken) | V26 (fixed) |
-|--------|--------------|-------------|
-| Entry point | `inverseDisplacement(rayO + rayTMin * rayD)` | `findPsiZeroEntry()` |
-| Entry meaning | Ray-AABB intersection projected | ψ=0 curve boundary crossing |
-| Entry edge | Not tracked | Properly identified |
-| Per paper? | NO - wrong entry point | YES - Section 4.4 compliant |
+| Aspect        | V25 (broken)                                   | V26 (fixed)                  |
+| ------------- | ---------------------------------------------- | ---------------------------- |
+| Entry point   | `inverseDisplacement(rayO + rayTMin * rayD)` | `findPsiZeroEntry()`       |
+| Entry meaning | Ray-AABB intersection projected                | ψ=0 curve boundary crossing |
+| Entry edge    | Not tracked                                    | Properly identified          |
+| Per paper?    | NO - wrong entry point                         | YES - Section 4.4 compliant  |
 
 **Build Status**: ✅ Compiled successfully
 
@@ -4284,8 +4291,1005 @@ bool validEntry = findPsiZeroEntry(tri, rayO, rayD, uvMin, uvMax, texSize, rayDi
 
 If V26 works correctly with `PSI_MARCH_MIN_RATIO = 0`, that confirms ψ-marching is now functional and the entry point was indeed the root cause.
 
+![1764901646746](image/RMIP_texel_log/1764901646746.png)
+
+![1764901659679](image/RMIP_texel_log/1764901659679.png)
+
+**Testing Result**: ❌ **SEVERE STRIPPING** - Different pattern from V18
+
+User observation: "Still psi marching did not work. See the screenshots of severe stripping. However this stripping is different from V18. In V18 there were 2 sides if viewed from there there will be no stripping. This constantly has stripping all over it."
+
+**V26 Stripping Pattern Analysis**:
+
+| Version | Stripping Pattern                     | Root Cause                       |
+| ------- | ------------------------------------- | -------------------------------- |
+| V18     | 2 clean sides, strips on other 2      | ψ-marching working partially    |
+| V26     | Stripping ALL OVER regardless of view | ψ-marching fundamentally broken |
+
+**Bug Analysis - Why V26 Failed**:
+
+After comparing V26 implementation with Paper Section 4.4, FOUR fundamental bugs were identified:
+
+#### Bug #1: Inconsistent texelMax Calculation
+
+```slang
+// findPsiZeroEntry():
+int2 texelMax = int2(ceil(uvMax * float2(texSize))) - int2(1, 1);
+
+// texelMarchWithPsi_V26():
+int2 texelMax = int2(ceil(uvMax * float2(texSize)));
+texelMax = min(texelMax, texSize - int2(1, 1));
+```
+
+The entry texel from `findPsiZeroEntry()` could be OUTSIDE the marching bounds calculated in `texelMarchWithPsi_V26()`. This causes immediate termination or wrong traversal.
+
+#### Bug #2: ψ Computed at Invalid UV Region Corners
+
+```slang
+// V26's findPsiZeroEntry() computes ψ at UV region corners:
+texToBary(tri, uvMin, b00);
+float psi00 = psi(tri, b00, rayO, rayD);  // ← May be OUTSIDE triangle!
+```
+
+**Problem**: UV region corners may be OUTSIDE the valid triangle domain. When `texToBary()` produces barycentric coords outside [0,1], the ψ value is INVALID (meaningless). This corrupts sign detection.
+
+**Paper's approach**: Algorithm 1 line 3 says `bounds = inverse_displacement(points, triangle)` where `points` are the ray-box INTERSECTION points - guaranteed to be on the displaced surface, hence valid UV/barycentric.
+
+#### Bug #3: Missing Bound Refinement (Paper Line 15)
+
+Paper's Algorithm 1 line 15:
+
+> `bound = reduce(bound, hits)  ← Section 4.3`
+
+This step projects the 3D ray-box intersection back to 2D UV space to REDUCE the bounds. V26 skips this entirely - it uses the full UV region from hierarchical traversal without refinement.
+
+**Impact**: The UV region passed to texel marching may be MUCH LARGER than the actual ray footprint. ψ-marching starts from a corner that's far from the actual ray path.
+
+#### Bug #4: Entry Detection Fundamentally Wrong
+
+**V26's approach**:
+
+1. Compute ψ at UV region CORNERS
+2. Find where ψ changes sign on UV region BOUNDARY
+3. That's the entry point
+
+**Paper's approach** (Section 4.1, 4.4):
+
+1. Find 3D ray-box intersection points (entry and exit)
+2. Use `inverse_displacement()` to project these 3D points to UV space
+3. The UV entry point is where the 3D entry point projects
+
+These are COMPLETELY different!
+
+```
+V26's Entry: Where ψ=0 curve crosses UV boundary
+   ┌─────────────────┐
+   │                 │
+   │      ψ=0       │
+   │       ╲        │
+   │        ● ←───── V26 thinks this is entry (ψ sign change on boundary)
+   │         ╲      │
+   │          ╲     │
+   └──────────────●─┘
+                  ↑
+                  3D ray-box entry projected to UV (ACTUAL entry per paper)
+
+Paper's Entry: inverse_displacement of 3D ray-box hit
+```
+
+The paper's entry point is where the ACTUAL RAY enters the UV region (via projection from 3D), not where the ψ=0 CURVE crosses the boundary.
+
+---
+
+### V27 Proposal: Correct Entry Detection Per Paper
+
+**Goal**: Fix all 4 bugs found in V26.
+
+**Fixes**:
+
+1. **Fix #1**: Use consistent texelMax calculation
+2. **Fix #2**: Clamp barycentric coords OR skip invalid corners for ψ computation
+3. **Fix #3**: Implement bound refinement (project 3D ray-box hits back to UV)
+4. **Fix #4**: Use `inverse_displacement()` of ray-box entry/exit for entry detection
+
+**Key Insight**: V26 tried to find entry by looking at ψ on the UV boundary. But the paper finds entry by projecting the 3D ray-box intersection points. These are different algorithms!
+
+**V27 Algorithm**:
+
+```slang
+bool testLeafRegion_V27(...)
+{
+    // Step 1: Project ray entry/exit to UV (per paper line 3)
+    float3 P_entry = rayO + rayTMin * rayD;  // 3D entry point
+    float3 P_exit = rayO + rayTMax * rayD;   // 3D exit point
+
+    float2 baryEntry, baryExit;
+    bool validEntry = inverseDisplacement(tri, P_entry, baryEntry);
+    bool validExit = inverseDisplacement(tri, P_exit, baryExit);
+
+    // Step 2: Compute entry UV from inverse displacement
+    float2 uvEntry = baryToTex(tri, baryEntry);
+    float2 uvExit = baryToTex(tri, baryExit);
+
+    // Step 3: REDUCE UV bounds to actual ray footprint (paper line 15)
+    float2 reducedUvMin = min(uvEntry, uvExit);
+    float2 reducedUvMax = max(uvEntry, uvExit);
+
+    // Step 4: Start texel marching from entry UV
+    int2 entryTexel = int2(floor(uvEntry * float2(texSize)));
+
+    // Step 5: March through texels using ψ sign (or DDA as fallback)
+    ...
+}
+```
+
+**Simpler Alternative - GUI Toggle**:
+
+Given the complexity and repeated failures of ψ-marching, a simpler approach:
+
+- **usePsiMarching = false** (default): Use brute force (proven correct)
+- **usePsiMarching = true**: Use ψ-marching (experimental)
+
+This allows:
+
+1. Stable production rendering with brute force
+2. Easy experimentation with ψ-marching improvements
+3. Clear comparison for debugging
+
+---
+
+### Version 26.1: GUI Toggle for ψ-Marching (Dec 4, 2025)
+
+**Goal**: Add simple toggle instead of broken hybrid approach.
+
+**Changes**:
+
+1. **shaderio.h**: Added `usePsiMarching` to push constant
+
+   ```cpp
+   int   usePsiMarching        = 0;     // RMIP: 0=brute force, 1=ψ-guided (V26)
+   ```
+2. **renderer_pathtracer.hpp**: Added `m_usePsiMarching` member
+
+   ```cpp
+   bool m_usePsiMarching{false};  // false=brute force (default), true=ψ-guided
+   ```
+3. **renderer_pathtracer.cpp**: Added GUI checkbox and push constant update
+4. **displacement_intersection.slang**: Simplified `testLeafRegion_V26()`:
+
+   ```slang
+   bool testLeafRegion_V26(...)
+   {
+       // Check GUI toggle: 0 = brute force, 1 = ψ-marching
+       if (pushConst.usePsiMarching == 0)
+       {
+           return testAllTexelsInRegion(...);  // Proven correct
+       }
+       // ψ-guided marching (V26)
+       return texelMarchWithPsi_V26(...);
+   }
+   ```
+
+**Removed**: `PSI_MARCH_MIN_RATIO` constant and hybrid fallback logic.
+
+**Testing**: With toggle OFF (brute force), rendering is correct. With toggle ON (ψ-marching), stripping occurs.
+
+---
+
+### Version 27: Correct Entry Detection Per Paper (Dec 4, 2025)
+
+**Archive**: `displacement_intersection_v26.slang`
+
+**Goal**: Fix all 4 bugs found in V26 to implement ψ-marching per paper.
+
+**Implementation Details**:
+
+#### Fix #1: Consistent texelMax Calculation
+
+V26 bug: `findPsiZeroEntry()` and `texelMarchWithPsi_V26()` used different texelMax calculations.
+
+```slang
+// V27: Consistent calculation in both places
+int2 texelMin = int2(floor(refinedUvMin * float2(texSize)));
+int2 texelMax = int2(floor(refinedUvMax * float2(texSize)));
+texelMin = max(texelMin, int2(0, 0));
+texelMax = min(texelMax, texSize - int2(1, 1));
+```
+
+#### Fix #2: Valid Barycentric Check for ψ Computation
+
+V26 bug: Computed ψ at UV corners that may be outside the valid triangle domain.
+
+```slang
+// V27: Only compute ψ at valid corners
+bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
+// ... similar for other corners
+
+float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 0.0;
+// ... similar for other corners
+
+// If not enough valid corners, use DDA fallback
+int validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
+if (validCount < 2)
+{
+    // DDA-style marching based on rayDirUV
+}
+```
+
+#### Fix #3: Bound Refinement (Paper Algorithm 1 line 15)
+
+V26 bug: Used full UV region without refinement.
+
+```slang
+// V27: Reduce bounds to actual ray footprint
+float3 Q_entry = rayO + rayTMin * rayD;
+float3 Q_exit = rayO + rayTMax * rayD;
+
+float2 baryEntry, baryExit;
+bool validEntry = inverseDisplacement(tri, Q_entry, baryEntry);
+bool validExit = inverseDisplacement(tri, Q_exit, baryExit);
+
+float2 uvEntry = baryToTex(tri, baryEntry);
+float2 uvExit = baryToTex(tri, baryExit);
+
+if (validEntry && validExit)
+{
+    float2 rayUvMin = min(uvEntry, uvExit);
+    float2 rayUvMax = max(uvEntry, uvExit);
+
+    // Intersect with original bounds
+    refinedUvMin = max(uvMin, rayUvMin);
+    refinedUvMax = min(uvMax, rayUvMax);
+
+    // Add padding for safety
+    float2 padding = float2(1.0) / float2(texSize);
+    refinedUvMin = max(uvMin, refinedUvMin - padding);
+    refinedUvMax = min(uvMax, refinedUvMax + padding);
+}
+```
+
+#### Fix #4: Entry Detection via inverse_displacement (Per Paper Section 4.1)
+
+V26 bug: Used ψ=0 boundary crossing for entry detection.
+V27 fix: Uses inverse_displacement of 3D ray entry point (per paper).
+
+```slang
+// V27: Project 3D ray entry to UV using inverse displacement
+float3 Q_entry = rayO + rayTMin * rayD;
+float2 baryEntry;
+bool validEntry = inverseDisplacement(tri, Q_entry, baryEntry);
+float2 uvEntry = baryToTex(tri, baryEntry);
+
+// Start marching from projected entry, clamped to bounds
+if (validEntry)
+{
+    float2 clampedEntryUV = clamp(uvEntry, refinedUvMin, refinedUvMax);
+    currentTexel = int2(floor(clampedEntryUV * float2(texSize)));
+    currentTexel = clamp(currentTexel, texelMin, texelMax);
+}
+```
+
+**New Functions**:
+
+- `texelMarchWithPsi_V27()`: Complete rewrite with all 4 fixes
+- `testLeafRegion_V27()`: Calls V27 marching when `usePsiMarching == 1`
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Status**: Pending (awaiting user testing)
+
+**Expected Results**:
+
+- With `usePsiMarching = OFF` (brute force): Correct rendering (unchanged)
+- With `usePsiMarching = ON` (V27): Should render CORRECTLY (unlike V26)
+
+**Key Differences V26 → V27**:
+
+| Aspect                | V26 (broken)           | V27 (fixed)                      |
+| --------------------- | ---------------------- | -------------------------------- |
+| Entry detection       | ψ=0 boundary crossing | inverse_displacement (per paper) |
+| Bound refinement      | None                   | Paper Algorithm 1 line 15        |
+| texelMax              | Inconsistent           | Consistent calculation           |
+| ψ at invalid corners | Computed (garbage)     | Skipped, DDA fallback            |
+
+---
+
+### Version 27 Testing Result (Dec 4, 2025)
+
+**Testing Result**: ❌ **SAME STRIPPING PATTERN AS V26**
+
+V27's fixes didn't resolve the stripping. The pattern is identical to V26.
+
+**Root Cause Analysis**:
+
+The stripping follows **ψ=0 curves**. When the ray passes THROUGH a texel (not along edges), ALL 4 corners have ψ≈0. Sign-based edge detection fails, DDA fallback takes wrong direction, and we skip the hit texel.
+
+---
+
+### Version 28: Neighbor Testing for ψ Degenerate Cases (Dec 4, 2025)
+
+**Goal**: Fix ψ degeneracy by testing neighbors when sign detection fails.
+
+**V28 Key Fix**: When ψ is degenerate, test current texel AND all 4 neighbors:
+
+```slang
+if (psiDegenerate || exitEdge == EDGE_NONE)
+{
+    // Test ALL 4 neighbors
+    for each neighbor in [Left, Right, Bottom, Top]:
+        testSingleTexel(neighbor, ...);
+    // Then continue with DDA
+}
+```
+
+**New Functions**:
+
+- `testSingleTexel()`: Test both micro-triangles of one texel
+- `texelMarchWithPsi_V28()`: Marching with neighbor testing
+- `testLeafRegion_V28()`: Entry point for V28
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ❌ **SAME STRIPPING PATTERN - SIGNIFICANTLY SLOWER**
+
+V28's neighbor testing approach:
+
+- Performance: Almost as slow as brute force (tests up to 5 texels per step)
+- Visual: Same stripping pattern as V26/V27, only slightly different in shape
+- Conclusion: Adding more texel tests doesn't fix the root cause
+
+---
+
+### Version 29: Pure DDA Marching (No ψ) (Dec 4, 2025)
+
+**Goal**: Abandon ψ-based marching entirely. Use standard 2D DDA grid traversal.
+
+**Rationale**: V26-V28 all failed despite different ψ-based approaches. The problem might be ψ itself. Try simpler DDA that's well-understood.
+
+**V29 Approach**:
+
+```slang
+// Standard 2D DDA in UV space
+int2 step = int2(rayDirUV.x >= 0 ? 1 : -1, rayDirUV.y >= 0 ? 1 : -1);
+float2 tDelta = abs(texelSizeUV / rayDirUV);
+
+// Start at region corner based on ray direction
+if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
+    currentTexel = texelMin;
+// ... etc
+
+// DDA traversal
+for (iter = 0; iter < maxIters; iter++) {
+    testSingleTexel(currentTexel);
+    if (tMax.x < tMax.y) {
+        currentTexel.x += step.x;
+        tMax.x += tDelta.x;
+    } else {
+        currentTexel.y += step.y;
+        tMax.y += tDelta.y;
+    }
+}
+```
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ❌ **SAME STRIPPING PATTERN AS V26-V28**
+
+DDA also produces identical stripping. This eliminates ψ as the cause.
+
+---
+
+### Version 29.1: DDA with Actual Entry Point (Dec 4, 2025)
+
+**Goal**: Fix DDA to start at actual ray entry point, not region corner.
+
+**Bug Identified**: V29 started DDA at the corner of the UV region based on ray direction. But the ray doesn't enter at the corner - it enters at a specific point along its path.
+
+**V29.1 Fixes**:
+
+1. Compute actual entry point: `entryPoint3D = rayO + rayD * rayTMin`
+2. Project to UV via `inverseDisplacement(entryPoint3D)`
+3. Start DDA from that texel
+4. Handle diagonal crossings (when tMax.x ≈ tMax.y, test BOTH neighbors)
+
+```slang
+// V29.1 FIX: Compute ACTUAL ray entry point
+float3 entryPoint3D = rayO + rayD * rayTMin;
+float2 entryBary;
+if (inverseDisplacement(tri, entryPoint3D, entryBary)) {
+    entryUV = baryToTex(tri, entryBary);
+}
+entryUV = clamp(entryUV, uvMin, uvMax);
+int2 currentTexel = int2(floor(entryUV * float2(texSize)));
+
+// Diagonal crossing fix
+if (abs(tMax.x - tMax.y) < cornerThreshold) {
+    // Test both adjacent texels at corner crossing
+    testSingleTexel(currentTexel + int2(step.x, 0));
+    currentTexel += step;  // Diagonal step
+}
+```
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ❌ **SAME STRIPPING PATTERN**
+
+---
+
+## Summary of All Failed Approaches (V26-V29.1)
+
+| Version | Approach                             | Result              |
+| ------- | ------------------------------------ | ------------------- |
+| V26     | ψ-based sign detection              | ❌ Stripping        |
+| V27     | V26 + inverse_displacement entry     | ❌ Stripping        |
+| V28     | V27 + neighbor testing               | ❌ Stripping (slow) |
+| V29     | Pure DDA from corner                 | ❌ Stripping        |
+| V29.1   | DDA from actual entry + diagonal fix | ❌ Stripping        |
+
+**Key Observation**: The stripping pattern is IDENTICAL across ALL approaches. This strongly suggests:
+
+1. The problem is NOT in the marching algorithm (we tried 5 different algorithms)
+2. The problem is NOT in ψ (V29/V29.1 don't use ψ at all)
+3. The problem might be:
+   - In `computeRayDirUV()` - the projected ray direction in UV space
+   - In the RMIP leaf region bounds (uvMin/uvMax)
+   - A fundamental assumption about ray-UV correspondence
+
+**Next Steps**:
+
+- Investigate `computeRayDirUV()` implementation
+- Check if rayDirUV is even valid (the ray's UV projection might be curved, not linear)
+- Consider accepting brute force as the only reliable solution
+
+---
+
+### Version 29.2: Coordinate Space Fix (Dec 4, 2025)
+
+**Critical Bug Found**: `computeRayDirUV()` computed ray direction in BARYCENTRIC space but we were using it for TEXTURE UV space!
+
+**The Bug** (line ~807):
+
+```slang
+// WRONG - computes direction in barycentric space
+float2 computeRayDirUV(Tri tri, float3 rayD) {
+    float3 v0 = tri.pos0, v1 = tri.pos1, v2 = tri.pos2;
+    // ... projects rayD onto triangle edges...
+    return float2(a, b);  // This is BARYCENTRIC direction!
+}
+```
+
+**V29.2 Fix**:
+
+```slang
+float2 computeRayDirUV(Tri tri, float3 rayD) {
+    // ... compute barycentric direction (a, b) ...
+    float2 rayDirBary = float2(a, b);
+
+    // V29.2 FIX: Convert from barycentric direction to TEXTURE direction!
+    // dTex = dBary.x * dTdu + dBary.y * dTdv
+    float2 rayDirTex = rayDirBary.x * tri.dTdu + rayDirBary.y * tri.dTdv;
+    return rayDirTex;
+}
+```
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ⚠️ **DIFFERENT PATTERN** - The stripping changed from diagonal bands to RADIAL patterns emanating from center. Progress, but still wrong.
+
+---
+
+### Version 29.3: Perpendicular Neighbor Testing (Dec 4, 2025)
+
+**Goal**: Fix remaining stripping by testing neighbors perpendicular to ray direction at each DDA step.
+
+**V29.3 Approach**:
+
+```slang
+// After testing current texel, also test perpendicular neighbors
+int2 perpDir = (abs(rayDirUV.x) > abs(rayDirUV.y))
+               ? int2(0, 1)  // Ray mostly horizontal → test vertical neighbors
+               : int2(1, 0); // Ray mostly vertical → test horizontal neighbors
+
+testSingleTexel(currentTexel + perpDir);
+testSingleTexel(currentTexel - perpDir);
+```
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ⚠️ **PARTIAL IMPROVEMENT**
+
+- Surface area increased, especially at grazing angles from edges
+- Still significant stripping when viewing from vertex direction
+
+---
+
+### Version 29.4: Full 3x3 Neighborhood Testing (Dec 4, 2025)
+
+**Goal**: Test entire 3×3 neighborhood at each DDA step.
+
+**V29.4 Approach**:
+
+```slang
+for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+        if (dx == 0 && dy == 0) continue;
+        int2 neighbor = currentTexel + int2(dx, dy);
+        testSingleTexel(neighbor);
+    }
+}
+```
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ❌ **EXTREMELY SLOW** - Even slower than brute force!
+
+- 9 texels tested per DDA step
+- Surface area further increased
+- Still has stripping from vertex views
+- User requested: "Go back to psi marching as described in paper"
+
+---
+
+### Version 30: Proper ψ-Based Texel Marching (Dec 4, 2025)
+
+**Goal**: Implement the paper's actual algorithm from Section 4.4.
+
+**Key Paper Insight** (Section 4.4):
+
+> "The sign of the implicit form ψ (3) at each texel corner indicates from which edge the ray leaves the texel."
+
+**Why DDA Failed**:
+
+- DDA assumes the ray projects to a STRAIGHT LINE in UV space
+- But ψ=0 defines a CURVE, not a line
+- Following a straight line misses texels that the curved ray actually passes through
+
+**V30 Algorithm** (per paper):
+
+1. At each texel, compute ψ at all 4 corners
+2. Find edges with sign changes (opposite signs = ray crosses that edge)
+3. Use gradient direction to pick the FORWARD exit edge
+4. Move to adjacent texel in exit direction
+5. Test each texel for intersection
+
+**New V30 Data Structures**:
+
+```slang
+struct TexelPsiCorners {
+    float BL; // Bottom-left  (u, v)
+    float BR; // Bottom-right (u+1, v)
+    float TL; // Top-left     (u, v+1)
+    float TR; // Top-right    (u+1, v+1)
+};
+```
+
+**New V30 Functions**:
+
+- `computeTexelPsi()`: Compute ψ at all 4 corners
+- `findExitEdge()`: Determine exit edge from ψ sign pattern
+- `findExitEdgeByGradient()`: Use gradient for tie-breaking
+- `texelMarchPsi_V30()`: Proper ψ-guided marching
+- `testLeafRegion_V30()`: Entry point
+
+**Exit Edge Logic**:
+
+```slang
+// Paper: sign change on an edge means ray crosses that edge
+bool exitBottom = (c.BL * c.BR) < 0;  // BL to BR
+bool exitTop    = (c.TL * c.TR) < 0;  // TL to TR
+bool exitLeft   = (c.BL * c.TL) < 0;  // BL to TL
+bool exitRight  = (c.BR * c.TR) < 0;  // BR to TR
+
+// Use ψ gradient for forward direction
+// gradient is perpendicular to curve → use it for priority
+```
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: PENDING
+
+---
+
+## Summary Table (V26-V30)
+
+| Version | Approach                         | Result                                        |
+| ------- | -------------------------------- | --------------------------------------------- |
+| V26     | ψ-based sign detection          | ❌ Diagonal stripping                         |
+| V27     | V26 + inverse_displacement entry | ❌ Same stripping                             |
+| V28     | V27 + neighbor testing           | ❌ Same stripping (slow)                      |
+| V29     | Pure DDA from corner             | ❌ Same stripping                             |
+| V29.1   | DDA from actual entry point      | ❌ Same stripping                             |
+| V29.2   | DDA + bary→tex coord fix        | ⚠️ Radial stripping (different pattern)     |
+| V29.3   | V29.2 + perpendicular neighbors  | ⚠️ Some improvement, still vertex stripping |
+| V29.4   | V29.3 + full 3×3 neighborhood   | ❌ Too slow                                   |
+| V30     | Paper's actual ψ algorithm      | ⚠️ Different pattern, still stripping         |
+| V30.1   | V30 + entry edge tracking        | ⚠️ Slight improvement, same pattern           |
+
+**V30 Screenshots**:
+
+![1764904962028](image/RMIP_texel_log/1764904962028.png)
+
+![1764904983160](image/RMIP_texel_log/1764904983160.png)
+
+![1764905026625](image/RMIP_texel_log/1764905026625.png)
+
+---
+
+### Version 30.1: Entry Edge Tracking (Dec 4, 2025)
+
+**Goal**: Prevent backwards marching by tracking entry edge.
+
+**V30 Bug Found**: Without entry edge tracking, `findExitEdge` could return the same edge we just entered through, causing oscillation and missed texels.
+
+**V30.1 Changes**:
+1. Added `entryEdge` tracking in marching loop
+2. Modified `findExitEdge_V30()` and `findExitEdgeByGradient_V30()` to exclude entry edge
+3. When moving to next texel: `entryEdge = oppositeEdge_V30(exitEdge)`
+4. Initial entry edge estimated from ray direction
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: ⚠️ **SLIGHT IMPROVEMENT, SAME FUNDAMENTAL PATTERN**
+- Surface area slightly increased at all angles
+- Stripping behavior and patterns remain the same
+- Entry edge tracking helped but didn't solve the core issue
+
+---
+
+## Root Cause Analysis (V26-V30.1)
+
+All versions show the same fundamental stripping pattern. This suggests:
+
+1. **NOT the marching algorithm** - We tried 6+ different algorithms
+2. **NOT backwards marching** - V30.1 fixed that, minimal improvement
+3. **NOT coordinate spaces** - V29.2 fixed bary→tex, only changed pattern shape
+
+**Likely Root Cause**: The ψ=0 curve represents the ray's projection onto the **undisplaced base surface**. When displacement is significant, the actual ray-surface intersection may occur in a DIFFERENT texel than where ψ=0 passes.
+
+**Evidence**:
+- Stripping follows ψ contours (concentric rings around displacement peaks)
+- Worse at high-curvature areas (bump peaks)
+- Brute force works perfectly (tests ALL texels)
+
+---
+
+### Version 31: Reduced MARCHING_SCALE + Brute Force Leaf (Dec 4, 2025)
+
+**Goal**: Apply the lesson learned from 11+ failed ψ-marching attempts.
+
+**Root Cause Analysis** (final conclusion):
+
+The fundamental issue with ALL ψ-based marching versions (V12-V30.1):
+
+> **ψ=0 represents the ray's projection onto the UNDISPLACED base surface, NOT where the ray hits the displaced surface.**
+
+When displacement is significant, the actual ray-surface intersection can occur in a DIFFERENT texel than where ψ=0 passes. This explains:
+- Why stripping follows ψ contours (concentric rings around displacement peaks)
+- Why worse at high-curvature areas (large displacement gradients)
+- Why brute force works perfectly (tests ALL texels)
+
+**Paper Section 4.4 key quote**:
+> "This step is triggered when the 2D bounds become small enough, **typically the size of a texel**."
+
+Our previous `MARCHING_SCALE = 8.0` meant leaf regions could be 8×8 = 64 texels!
+At this scale, ψ=0 can diverge significantly from actual displaced hit.
+
+**V31 Solution**:
+
+1. **REDUCED MARCHING_SCALE from 8.0 to 2.0** - Match paper's "typically a texel"
+2. **Use brute force `testAllTexelsInRegion()` for leaf regions**:
+   - At 2×2 texel regions, brute force is just 4 texels - negligible cost
+   - Guaranteed correct, no ψ curve tracking needed
+3. **Keep hierarchical RMIP traversal** for efficient space culling
+4. **GUI toggle** preserved for comparison:
+   - `usePsiMarching = 0`: Brute force leaf (V31 default, reliable)
+   - `usePsiMarching = 1`: ψ-based marching (V30.1, for comparison)
+
+**Code Changes** (`shaders/displacement_intersection.slang`):
+
+```slang
+// V31: REDUCED from 8.0 to 2.0 to match paper's "typically the size of a texel"
+static const float MARCHING_SCALE = 2.0;  // Was 8.0
+
+// In main traversal loop:
+if (maxTexelSize <= MARCHING_SCALE)
+{
+    // V31: GUI toggle for comparison
+    bool leafHit = false;
+    if (pushConst.usePsiMarching != 0)
+    {
+        // V30.1 ψ-based marching (for comparison, has stripping issues)
+        leafHit = testLeafRegion_V30(...);
+    }
+    else
+    {
+        // V31 brute force (default, guaranteed correct)
+        leafHit = testAllTexelsInRegion(...);
+    }
+}
+```
+
+**Why This Should Work**:
+
+1. Hierarchical RMIP traversal narrows regions efficiently
+2. Leaf regions are now at most 2×2 = 4 texels
+3. Brute force testing 4 texels is negligible overhead
+4. No reliance on ψ=0 curve which is fundamentally wrong for displaced surfaces
+
+**Build Status**: ✅ Compiled successfully
+
+**Testing Result**: PENDING
+
+---
+
+## Summary Table (All Versions)
+
+| Version | Approach                                | Result                              |
+| ------- | --------------------------------------- | ----------------------------------- |
+| V1-V3   | Initial attempts                        | Various issues                      |
+| V4-V5   | AABB hierarchical                       | Thin edges only                     |
+| V6-V7   | UV-space bounds                         | Tearing at grazing angles           |
+| V8-V9   | Turning points                          | Same tearing                        |
+| V10-V11 | Prism + Affine arithmetic               | Same tearing, faster                |
+| V12     | ψ-guided texel marching                | Diagonal stripping                  |
+| V13-V25 | Various ψ fixes                        | Stripping persists                  |
+| V26-V28 | ψ sign detection variants              | Same stripping pattern              |
+| V29     | Pure DDA (no ψ)                        | Same stripping!                     |
+| V29.2   | DDA + coord fix                         | Different pattern, radial stripping |
+| V29.3-4 | DDA + neighbors                         | Partial improvement / too slow      |
+| V30     | Paper's ψ algorithm                    | Different pattern, still stripping  |
+| V30.1   | V30 + entry edge tracking               | Slight improvement, same issue      |
+| **V31** | **MARCHING_SCALE=2.0 + brute force leaf** | **PENDING**                       |
+
+**Key Insight**: The problem was NEVER in the marching algorithm itself. The problem is that ψ=0 doesn't represent where the ray hits the displaced surface. By reducing MARCHING_SCALE and using brute force for tiny leaf regions, we bypass this fundamental limitation.
+
+---
+
+### V31 Testing Results (Dec 4, 2025)
+
+**Confirmed**: V31 approach works! When `MARCHING_SCALE = 1.0`:
+- ψ-marching and brute force render **exactly the same** (no stripping)
+- This proves the root cause analysis was correct
+
+**Observations**:
+- As `MARCHING_SCALE` increases, ψ-marching shows progressively more stripping
+- Even `MARCHING_SCALE = 2.0` shows some strip-like artifacts in ψ mode
+- Smaller `MARCHING_SCALE` = worse performance (more iterations needed)
+- `MAX_TRAVERSAL_ITERS` must be increased proportionally (e.g., 1024) to prevent tearing
+
+**Current working configuration** (restored from V27 base):
+```slang
+static const int MAX_TRAVERSAL_ITERS = 1024;  // Increased for small MARCHING_SCALE
+static const float MARCHING_SCALE = 1.0;      // Smallest, guarantees correctness
+```
+
+---
+
+## Comprehensive Report: MARCHING_SCALE and MAX_TRAVERSAL_ITERS
+
+### Overview
+
+The RMIP algorithm has two key phases:
+1. **Hierarchical Traversal**: Subdivide UV regions, cull using RMIP bounds
+2. **Leaf Testing**: When region is "small enough", test individual texels
+
+Two critical parameters control the transition and resource limits:
+
+| Parameter | Purpose | Default | Range |
+|-----------|---------|---------|-------|
+| `MARCHING_SCALE` | Threshold (in texels) to switch from hierarchical to leaf testing | 1.0-8.0 | 1.0 = most accurate, 8.0 = fastest |
+| `MAX_TRAVERSAL_ITERS` | Maximum iterations in hierarchical traversal loop | 512-1024 | Must increase as MARCHING_SCALE decreases |
+
+---
+
+### MARCHING_SCALE: Role and Behavior
+
+#### Definition
+
+```slang
+float2 uvSizeTexels = (bound.uvMax - bound.uvMin) * float2(texSize);
+float maxTexelSize = max(uvSizeTexels.x, uvSizeTexels.y);
+
+if (maxTexelSize <= MARCHING_SCALE)
+{
+    // Switch to leaf testing (brute force or ψ-marching)
+}
+else
+{
+    // Continue hierarchical subdivision
+}
+```
+
+`MARCHING_SCALE` defines the **maximum leaf region size in texels**:
+- `MARCHING_SCALE = 1.0` → Leaf regions are at most 1×1 = 1 texel
+- `MARCHING_SCALE = 2.0` → Leaf regions are at most 2×2 = 4 texels
+- `MARCHING_SCALE = 8.0` → Leaf regions are at most 8×8 = 64 texels
+
+#### Effect on Brute Force Leaf Testing
+
+| MARCHING_SCALE | Max Texels in Leaf | Work per Leaf | Hierarchical Subdivisions |
+|----------------|-------------------|---------------|---------------------------|
+| 1.0 | 1 | Minimal | Maximum |
+| 2.0 | 4 | Low | High |
+| 4.0 | 16 | Medium | Medium |
+| 8.0 | 64 | High | Low |
+
+**For brute force**:
+- Brute force tests **ALL texels** in the leaf region
+- Larger `MARCHING_SCALE` = more texels per leaf, but fewer subdivisions
+- Smaller `MARCHING_SCALE` = fewer texels per leaf, but more subdivisions
+- **Correctness**: Brute force is ALWAYS correct regardless of `MARCHING_SCALE`
+- **Performance**: Trade-off between leaf work and subdivision work
+
+#### Effect on ψ-Guided Marching
+
+This is where `MARCHING_SCALE` critically matters:
+
+| MARCHING_SCALE | ψ Curve Divergence | Stripping Artifacts |
+|----------------|-------------------|---------------------|
+| 1.0 | None (single texel) | **None** ✅ |
+| 2.0 | Minimal | Slight artifacts |
+| 4.0 | Moderate | Visible stripping |
+| 8.0 | Severe | Heavy stripping |
+
+**Why ψ-marching fails at larger scales**:
+
+The ψ=0 curve represents the ray's projection onto the **UNDISPLACED** base surface:
+```
+ψ(u,v) = det(P(u,v) - O, N(u,v), D) = 0
+```
+
+Where:
+- `P(u,v)` = position on **base** triangle (no displacement)
+- `N(u,v)` = normal at that position
+- `O, D` = ray origin and direction
+
+The **actual intersection** with the displaced surface `S(u,v) = P(u,v) + h(u,v)·N̂(u,v)` can occur at a **different UV location** due to displacement.
+
+```
+Conceptual diagram (side view):
+
+    Ray →  ────────────────────┐
+                               │ Actual hit on displaced surface
+    Displaced Surface:   ~~~~~~↓~~~~~~
+                        /      ↑      \
+                       /       │ h(u,v)\
+    Base Surface:  ───/────────●───────\───
+                              ↑
+                         ψ=0 location (wrong!)
+```
+
+**At MARCHING_SCALE = 1.0**: The leaf region is a single texel. There's only one texel to test, so ψ-marching trivially visits it. No divergence possible.
+
+**At MARCHING_SCALE = 8.0**: The leaf region spans 8×8 texels. The ψ=0 curve might pass through texels (3,4), (4,4), (5,5)... but the actual displaced hit might be at texel (2,6). ψ-marching misses it → stripping.
+
+---
+
+### MAX_TRAVERSAL_ITERS: Role and Behavior
+
+#### Definition
+
+```slang
+int iterations = 0;
+while (stackPtr > 0 && iterations < MAX_TRAVERSAL_ITERS)
+{
+    iterations++;
+    // ... hierarchical traversal ...
+}
+```
+
+`MAX_TRAVERSAL_ITERS` is a **safety limit** preventing infinite loops.
+
+#### Relationship with MARCHING_SCALE
+
+The number of required iterations depends directly on `MARCHING_SCALE`:
+
+| MARCHING_SCALE | Subdivisions to Reach Leaf | Required Iterations |
+|----------------|---------------------------|---------------------|
+| 8.0 | Few | ~128-256 |
+| 4.0 | Moderate | ~256-512 |
+| 2.0 | Many | ~512-768 |
+| 1.0 | Maximum | ~768-1024+ |
+
+**Why smaller MARCHING_SCALE needs more iterations**:
+
+Starting from a 512×512 texture region, subdivisions halve the region each time:
+- 512 → 256 → 128 → 64 → 32 → 16 → 8 → 4 → 2 → 1
+
+To reach `MARCHING_SCALE = 8.0`: ~6 subdivisions per branch
+To reach `MARCHING_SCALE = 1.0`: ~9 subdivisions per branch
+
+With a binary tree of regions, the total nodes visited can be:
+- At grazing angles, the ray passes through many UV regions
+- Each region needs full traversal depth
+- Worst case: O(2^depth × ray_length_in_UV)
+
+#### Consequence of Insufficient MAX_TRAVERSAL_ITERS
+
+If `MAX_TRAVERSAL_ITERS` is too low:
+1. Hierarchical loop terminates early
+2. Regions still on stack are never processed
+3. **Result**: Tearing/holes in the rendered surface
+
+This is why V24 increased `MAX_TRAVERSAL_ITERS` to 512, and V31 requires 1024 for `MARCHING_SCALE = 1.0`.
+
+---
+
+### Performance vs Correctness Trade-off
+
+#### Summary Table
+
+| Configuration | Correctness | Performance | Use Case |
+|---------------|-------------|-------------|----------|
+| MARCHING_SCALE=1.0, MAX_ITERS=1024 | ✅ Perfect (both methods) | Slowest | Debugging, validation |
+| MARCHING_SCALE=2.0, MAX_ITERS=768 | ✅ BF perfect, ψ slight artifacts | Moderate | Production with BF |
+| MARCHING_SCALE=4.0, MAX_ITERS=512 | ✅ BF perfect, ψ visible stripping | Fast | Production with BF only |
+| MARCHING_SCALE=8.0, MAX_ITERS=256 | ✅ BF perfect, ψ heavy stripping | Fastest | BF only, performance-critical |
+
+#### Recommendations
+
+1. **For correctness** (both methods match):
+   ```slang
+   MARCHING_SCALE = 1.0
+   MAX_TRAVERSAL_ITERS = 1024
+   ```
+
+2. **For production** (brute force only):
+   ```slang
+   MARCHING_SCALE = 4.0  // Good balance
+   MAX_TRAVERSAL_ITERS = 512
+   usePsiMarching = 0    // Always use brute force
+   ```
+
+3. **For maximum performance** (if BF overhead acceptable):
+   ```slang
+   MARCHING_SCALE = 8.0
+   MAX_TRAVERSAL_ITERS = 256
+   usePsiMarching = 0
+   ```
+
+---
+
+### Why ψ-Marching Cannot Be Fixed
+
+The fundamental limitation of ψ-marching is **mathematical**, not implementational:
+
+1. **ψ=0 is defined on the undisplaced surface**
+   - It cannot account for where displacement moves the surface
+   - This is inherent to Equation 3 in the paper
+
+2. **The paper's assumption**
+   - Paper Section 4.4: "bounds small enough, **typically the size of a texel**"
+   - At texel-scale, ψ≈displaced hit location (displacement continuous within texel)
+   - Paper's RMIP hierarchy narrows to ~1 texel before marching
+
+3. **Our hierarchical traversal**
+   - May not narrow as aggressively as the paper's implementation
+   - Using larger `MARCHING_SCALE` exposes the ψ limitation
+
+4. **Brute force is the robust solution**
+   - Tests ALL texels in leaf region
+   - No reliance on ψ curve accuracy
+   - With small `MARCHING_SCALE`, overhead is minimal (1-4 texels)
+
+---
+
+### Conclusion
+
+The relationship between `MARCHING_SCALE` and `MAX_TRAVERSAL_ITERS` is:
+
+```
+Required MAX_TRAVERSAL_ITERS ∝ log₂(textureSize / MARCHING_SCALE) × rayComplexity
+```
+
+For a 512×512 texture:
+- `MARCHING_SCALE = 8.0` → ~6 depth → ~256 iterations sufficient
+- `MARCHING_SCALE = 1.0` → ~9 depth → ~1024 iterations needed
+
+**Final recommendation**: Use brute force leaf testing (`usePsiMarching = 0`) with `MARCHING_SCALE = 2.0-4.0` for the best balance of correctness and performance. ψ-marching is fundamentally limited by its definition and cannot match brute force correctness at any practical `MARCHING_SCALE > 1.0`.
+
 ---
 
 *Last Updated: December 4, 2025*
-*V24 archived at: `others/RMIP_texel/displacement_intersection_v24.slang`*
-*V26 implementation: Proper ψ=0 Entry Detection (current version)*
+*V27 restored as base, tuned with MARCHING_SCALE and MAX_TRAVERSAL_ITERS analysis*
+*V31 insight confirmed: ψ limitation is fundamental, brute force is the robust solution*

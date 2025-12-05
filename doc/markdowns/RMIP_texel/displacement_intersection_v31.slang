@@ -1,25 +1,31 @@
 /*
- * RMIP V27 - Correct Entry Detection Per Paper (inverse_displacement of ray-box hits)
+ * RMIP V31 - Reduced MARCHING_SCALE + Brute Force Leaf Testing
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
- * Reference: "Tessellation-Free Displacement Mapping for Ray Tracing" (Thonat et al. 2021)
  *
- * V27 Changes (fixes V26's 4 bugs):
- * 1. Fix #1: Consistent texelMax calculation between entry detection and marching
- * 2. Fix #2: Handle invalid barycentric coords (corners outside triangle) properly
- * 3. Fix #3: Implement bound refinement (Paper Algorithm 1 line 15)
- * 4. Fix #4: Use inverse_displacement of ray entry/exit for entry detection
- *            (Paper Section 4.1), NOT ψ=0 boundary crossing like V26
+ * V31 Root Cause Analysis (after 11+ failed ψ-marching versions V12-V30.1):
+ * =========================================================================
+ * The fundamental issue: ψ=0 represents the ray's projection onto the
+ * UNDISPLACED base surface, NOT where the ray hits the displaced surface!
  *
- * V26's mistake: Tried to find entry where ψ=0 crosses UV boundary.
- * Paper's approach: Use inverse_displacement to project 3D ray-box entry to UV.
+ * When displacement is significant, the actual ray-surface intersection
+ * can occur in a DIFFERENT texel than where ψ=0 passes. This is why all
+ * ψ-guided marching versions showed stripping artifacts - they followed
+ * the wrong curve.
+ *
+ * Paper Section 4.4 says texel marching is for "bounds small enough,
+ * typically the size of a texel". At such small scales (1-2 texels),
+ * the ψ=0 curve and actual displaced hit are in same/adjacent texels.
+ *
+ * V31 Solution:
+ * 1. REDUCED MARCHING_SCALE from 8.0 to 2.0 (paper: "typically a texel")
+ * 2. Use brute force testAllTexelsInRegion() for leaf regions
+ *    - At 2x2 texel regions, brute force is just 4 texels - negligible cost
+ *    - Guaranteed correct, no ψ curve tracking needed
+ * 3. Keep hierarchical RMIP traversal for efficient space culling
  *
  * Modes (GUI Toggle):
- *    - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
- *    - pushConst.usePsiMarching = 1: ψ-guided marching (V27)
- *
- * Key Equations from Paper:
- * - Eq 2: (P(u,v) - Q) × N(u,v) = 0 (displacement inversion)
- * - Eq 3: ψ(u,v) = det(P-O, N, D) = (P-O)·(N×D) = 0 (implicit ray projection)
+ *    - pushConst.usePsiMarching = 0: Brute force for leaf (reliable, V31 default)
+ *    - pushConst.usePsiMarching = 1: ψ-based marching (V30.1, for comparison)
  */
 
 #include "shaderio.h"
@@ -34,9 +40,15 @@ static const float NEWTON_EPS = 1e-6;
 // V24: Significantly increased iteration limits
 // At diagonal viewing angles, the ray passes through more UV regions
 // requiring more iterations to fully cover the ray's footprint
-static const int MAX_TRAVERSAL_ITERS = 1024;  // Was 512
-static const float MARCHING_SCALE = 2.0; // Was 8.0
-static const int MAX_STACK_SIZE = 32;  
+static const int MAX_TRAVERSAL_ITERS = 512;  // Was 128
+
+// V31: REDUCED from 8.0 to 2.0 to match paper's "typically the size of a texel"
+// At larger scales, ψ=0 diverges from actual displaced hit → stripping artifacts
+// With MARCHING_SCALE=2.0, leaf regions are at most 2x2=4 texels, and brute
+// force testing is efficient while ψ=0 ≈ displaced hit at this scale
+static const float MARCHING_SCALE = 2.0;  // Was 8.0
+
+static const int MAX_STACK_SIZE = 32;  // Was 32
 
 // V24: Increased triangle boundary tolerance
 // This helps with diagonal edge cases where u+v≈1
@@ -484,7 +496,7 @@ float2 psiGrad(Tri tri, float2 bary, float3 rayO, float3 rayD)
 //=============================================================================
 float2 computeRayDirUV(Tri tri, float3 rayD)
 {
-    // Triangle normal (average of vertex normals or from edge cross product)
+    // Triangle normal (from edge cross product)
     float3 edge1 = tri.v1 - tri.v0;
     float3 edge2 = tri.v2 - tri.v0;
     float3 N = normalize(cross(edge1, edge2));
@@ -492,7 +504,7 @@ float2 computeRayDirUV(Tri tri, float3 rayD)
     // Project ray direction onto tangent plane
     float3 D_proj = rayD - dot(rayD, N) * N;
 
-    // Gram matrix components
+    // Gram matrix components (for barycentric coordinates)
     float g00 = dot(tri.dPdu, tri.dPdu);
     float g01 = dot(tri.dPdu, tri.dPdv);
     float g11 = dot(tri.dPdv, tri.dPdv);
@@ -501,19 +513,27 @@ float2 computeRayDirUV(Tri tri, float3 rayD)
     float b0 = dot(D_proj, tri.dPdu);
     float b1 = dot(D_proj, tri.dPdv);
 
-    // Solve 2x2 system: G * rayDirUV = b
+    // Solve 2x2 system: G * rayDirBary = b
+    // This gives ray direction in BARYCENTRIC space
     float det = g00 * g11 - g01 * g01;
+    float2 rayDirBary;
     if (abs(det) < 1e-10)
     {
         // Degenerate case: use a simple approximation
-        return float2(b0, b1);
+        rayDirBary = float2(b0, b1);
+    }
+    else
+    {
+        rayDirBary.x = (g11 * b0 - g01 * b1) / det;
+        rayDirBary.y = (g00 * b1 - g01 * b0) / det;
     }
 
-    float2 rayDirUV;
-    rayDirUV.x = (g11 * b0 - g01 * b1) / det;
-    rayDirUV.y = (g00 * b1 - g01 * b0) / det;
+    // V29.2 FIX: Convert from barycentric direction to TEXTURE direction!
+    // Texture coords: tex = t0 + u*dTdu + v*dTdv (where u,v are barycentric)
+    // So: d(tex)/dt = dTdu * (du/dt) + dTdv * (dv/dt) = dTdu * rayDirBary.x + dTdv * rayDirBary.y
+    float2 rayDirTex = rayDirBary.x * tri.dTdu + rayDirBary.y * tri.dTdv;
 
-    return rayDirUV;
+    return rayDirTex;
 }
 
 //=============================================================================
@@ -2516,6 +2536,884 @@ bool testLeafRegion_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
+// V28: Single Texel Test Helper
+// Tests both micro-triangles of a single texel
+//=============================================================================
+bool testSingleTexel(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                     int2 texel, int2 texSize,
+                     float rayTMin, float rayTMax,
+                     inout float bestT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    // Initialize out parameters
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    // Compute UV coordinates for texel corners
+    float2 uv00 = float2(texel) / float2(texSize);
+    float2 uv10 = float2(texel + int2(1, 0)) / float2(texSize);
+    float2 uv01 = float2(texel + int2(0, 1)) / float2(texSize);
+    float2 uv11 = float2(texel + int2(1, 1)) / float2(texSize);
+
+    // Convert to barycentric
+    float2 b00, b10, b01, b11;
+    texToBary(tri, uv00, b00);
+    texToBary(tri, uv10, b10);
+    texToBary(tri, uv01, b01);
+    texToBary(tri, uv11, b11);
+
+    // Check validity
+    bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
+    bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
+    bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
+    bool valid11 = b11.x >= -BARY_EPS && b11.y >= -BARY_EPS && b11.x + b11.y <= 1.0 + BARY_EPS;
+
+    if (!valid00 && !valid10 && !valid01 && !valid11)
+        return false;
+
+    // Clamp barycentric coordinates
+    b00 = clampBary(b00);
+    b10 = clampBary(b10);
+    b01 = clampBary(b01);
+    b11 = clampBary(b11);
+
+    bool found = false;
+    float microT;
+    float2 microBary;
+    float3 microNormal;
+
+    // Triangle 1: b00, b10, b01
+    float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
+    if (area1 > 1e-6)
+    {
+        if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
+                                   rayTMin, min(rayTMax, bestT),
+                                   microT, microBary, microNormal))
+        {
+            if (microT < bestT)
+            {
+                bestT = microT;
+                hitBary = microBary;
+                hitGeoNormal = microNormal;
+                found = true;
+            }
+        }
+    }
+
+    // Triangle 2: b10, b11, b01
+    float w11 = 1.0 - b11.x - b11.y;
+    if (w11 >= -BARY_EPS)
+    {
+        float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
+        if (area2 > 1e-6)
+        {
+            if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
+                                       rayTMin, min(rayTMax, bestT),
+                                       microT, microBary, microNormal))
+            {
+                if (microT < bestT)
+                {
+                    bestT = microT;
+                    hitBary = microBary;
+                    hitGeoNormal = microNormal;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    return found;
+}
+
+//=============================================================================
+// V28: ψ-Guided Texel Marching with Neighbor Testing for Degenerate Cases
+//
+// Key fix: When ψ≈0 at all texel corners (ray passes through texel center),
+// sign-based edge detection fails. Instead of DDA fallback, we test ALL 4
+// neighbors to ensure we don't miss the hit.
+//
+// This addresses the stripping pattern seen in V26/V27 which follows ψ=0 curves.
+//=============================================================================
+bool texelMarchWithPsi_V28(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                           float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                           int2 texSize, float2 rayDirUV,
+                           out float hitT, out float2 hitBary, out float3 hitGeoNormal,
+                           out int texelsVisited)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+    texelsVisited = 0;
+
+    // Consistent texel bounds calculation
+    int2 texelMin = int2(floor(uvMin * float2(texSize)));
+    int2 texelMax = int2(floor(uvMax * float2(texSize)));
+    texelMin = max(texelMin, int2(0, 0));
+    texelMax = min(texelMax, texSize - int2(1, 1));
+
+    if (any(texelMin > texelMax))
+        return false;
+
+    // Track visited texels to avoid retesting
+    // Use a simple approach: mark tested in an array (for small regions)
+    // For larger regions, this is less efficient but still correct
+    int regionWidth = texelMax.x - texelMin.x + 1;
+    int regionHeight = texelMax.y - texelMin.y + 1;
+    int regionSize = regionWidth * regionHeight;
+
+    // Find entry texel using ray direction (simpler than inverse_displacement)
+    int2 currentTexel;
+    if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
+        currentTexel = texelMin;
+    else if (rayDirUV.x >= 0 && rayDirUV.y < 0)
+        currentTexel = int2(texelMin.x, texelMax.y);
+    else if (rayDirUV.x < 0 && rayDirUV.y >= 0)
+        currentTexel = int2(texelMax.x, texelMin.y);
+    else
+        currentTexel = texelMax;
+
+    // Determine initial entry edge
+    int entryEdge = EDGE_NONE;
+    if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+        entryEdge = (rayDirUV.x >= 0) ? EDGE_LEFT : EDGE_RIGHT;
+    else
+        entryEdge = (rayDirUV.y >= 0) ? EDGE_BOTTOM : EDGE_TOP;
+
+    float bestT = rayTMax + 1.0;
+    bool found = false;
+
+    // Maximum iterations
+    int maxIters = regionSize + 8;
+
+    for (int iter = 0; iter < maxIters; iter++)
+    {
+        // Check bounds
+        if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
+            currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
+        {
+            break;
+        }
+
+        texelsVisited++;
+
+        // Test current texel
+        float2 tempBary;
+        float3 tempNormal;
+        if (testSingleTexel(tri, matIdx, rayO, rayD, currentTexel, texSize,
+                            rayTMin, rayTMax, bestT, tempBary, tempNormal))
+        {
+            hitT = bestT;
+            hitBary = tempBary;
+            hitGeoNormal = tempNormal;
+            found = true;
+        }
+
+        // Compute ψ at texel corners for exit edge detection
+        float2 uv00 = float2(currentTexel) / float2(texSize);
+        float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
+        float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
+        float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
+
+        float2 b00, b10, b01, b11;
+        texToBary(tri, uv00, b00);
+        texToBary(tri, uv10, b10);
+        texToBary(tri, uv01, b01);
+        texToBary(tri, uv11, b11);
+
+        float psi00 = psi(tri, b00, rayO, rayD);
+        float psi10 = psi(tri, b10, rayO, rayD);
+        float psi01 = psi(tri, b01, rayO, rayD);
+        float psi11 = psi(tri, b11, rayO, rayD);
+
+        // Check for ψ degeneracy
+        float maxAbsPsi = max(max(abs(psi00), abs(psi10)), max(abs(psi01), abs(psi11)));
+        bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD;
+
+        if (psiDegenerate)
+        {
+            //=================================================================
+            // V28 FIX: When ψ is degenerate, test ALL 4 neighbors
+            // This is the key difference from V27 which just used DDA fallback
+            //=================================================================
+            int2 neighbors[4] = {
+                int2(currentTexel.x - 1, currentTexel.y),  // Left
+                int2(currentTexel.x + 1, currentTexel.y),  // Right
+                int2(currentTexel.x, currentTexel.y - 1),  // Bottom
+                int2(currentTexel.x, currentTexel.y + 1)   // Top
+            };
+
+            for (int n = 0; n < 4; n++)
+            {
+                int2 neighbor = neighbors[n];
+                if (neighbor.x >= texelMin.x && neighbor.x <= texelMax.x &&
+                    neighbor.y >= texelMin.y && neighbor.y <= texelMax.y)
+                {
+                    if (testSingleTexel(tri, matIdx, rayO, rayD, neighbor, texSize,
+                                        rayTMin, rayTMax, bestT, tempBary, tempNormal))
+                    {
+                        hitT = bestT;
+                        hitBary = tempBary;
+                        hitGeoNormal = tempNormal;
+                        found = true;
+                    }
+                    texelsVisited++;
+                }
+            }
+
+            // After testing neighbors, move in DDA direction
+            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+            {
+                int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                currentTexel.x += dx;
+                entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
+            }
+            else
+            {
+                int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                currentTexel.y += dy;
+                entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
+            }
+            continue;
+        }
+
+        // Normal ψ-guided exit edge detection
+        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, rayDirUV);
+
+        if (exitEdge == EDGE_NONE)
+        {
+            // Also test neighbors when no clear exit edge
+            int2 neighbors[4] = {
+                int2(currentTexel.x - 1, currentTexel.y),
+                int2(currentTexel.x + 1, currentTexel.y),
+                int2(currentTexel.x, currentTexel.y - 1),
+                int2(currentTexel.x, currentTexel.y + 1)
+            };
+
+            for (int n = 0; n < 4; n++)
+            {
+                int2 neighbor = neighbors[n];
+                if (neighbor.x >= texelMin.x && neighbor.x <= texelMax.x &&
+                    neighbor.y >= texelMin.y && neighbor.y <= texelMax.y)
+                {
+                    if (testSingleTexel(tri, matIdx, rayO, rayD, neighbor, texSize,
+                                        rayTMin, rayTMax, bestT, tempBary, tempNormal))
+                    {
+                        hitT = bestT;
+                        hitBary = tempBary;
+                        hitGeoNormal = tempNormal;
+                        found = true;
+                    }
+                    texelsVisited++;
+                }
+            }
+
+            // DDA fallback for movement
+            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+            {
+                int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                currentTexel.x += dx;
+                entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
+            }
+            else
+            {
+                int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                currentTexel.y += dy;
+                entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
+            }
+            continue;
+        }
+
+        // Move to adjacent texel based on exit edge
+        switch (exitEdge)
+        {
+            case EDGE_LEFT:   currentTexel.x--; break;
+            case EDGE_RIGHT:  currentTexel.x++; break;
+            case EDGE_BOTTOM: currentTexel.y--; break;
+            case EDGE_TOP:    currentTexel.y++; break;
+        }
+
+        entryEdge = getOppositeEdge(exitEdge);
+    }
+
+    return found;
+}
+
+//=============================================================================
+// V28: Leaf Region Tester with Neighbor Testing for Degenerate Cases
+//=============================================================================
+bool testLeafRegion_V28(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                        int2 texSize,
+                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    // Check GUI toggle: 0 = brute force, 1 = ψ-marching (V28)
+    if (pushConst.usePsiMarching == 0)
+    {
+        return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
+                                     uvMin, uvMax, rayTMin, rayTMax,
+                                     texSize, hitT, hitBary, hitGeoNormal);
+    }
+
+    // V28 ψ-guided marching with neighbor testing
+    float2 rayDirUV = computeRayDirUV(tri, rayD);
+    int texelsVisited = 0;
+
+    return texelMarchWithPsi_V28(tri, matIdx, rayO, rayD,
+                                 uvMin, uvMax, rayTMin, rayTMax,
+                                 texSize, rayDirUV,
+                                 hitT, hitBary, hitGeoNormal,
+                                 texelsVisited);
+}
+
+//=============================================================================
+// V29: Pure 2D DDA Texel Marching (No ψ)
+//
+// Standard DDA ray marching through a 2D texel grid.
+// No ψ computation at all - just follow the projected ray line.
+//
+// This approach is simpler and well-understood compared to ψ-based marching.
+//=============================================================================
+bool texelMarchDDA_V29(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                       float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                       int2 texSize, float2 rayDirUV,
+                       out float hitT, out float2 hitBary, out float3 hitGeoNormal,
+                       out int texelsVisited)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+    texelsVisited = 0;
+
+    // Texel bounds for this UV region
+    int2 texelMin = int2(floor(uvMin * float2(texSize)));
+    int2 texelMax = int2(floor(uvMax * float2(texSize)));
+    texelMin = max(texelMin, int2(0, 0));
+    texelMax = min(texelMax, texSize - int2(1, 1));
+
+    if (any(texelMin > texelMax))
+        return false;
+
+    int regionWidth = texelMax.x - texelMin.x + 1;
+    int regionHeight = texelMax.y - texelMin.y + 1;
+
+    // V29 FIX: Compute ACTUAL ray entry point instead of starting at region corner
+    // 1. Find 3D entry point using rayTMin
+    float3 entryPoint3D = rayO + rayD * rayTMin;
+
+    // 2. Project entry point to UV using inverse displacement
+    float2 entryBary;
+    float2 entryUV;
+    if (inverseDisplacement(tri, entryPoint3D, entryBary))
+    {
+        entryUV = baryToTex(tri, entryBary);
+    }
+    else
+    {
+        // Fallback: use region corner based on ray direction (old behavior)
+        if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
+            entryUV = uvMin;
+        else if (rayDirUV.x >= 0 && rayDirUV.y < 0)
+            entryUV = float2(uvMin.x, uvMax.y);
+        else if (rayDirUV.x < 0 && rayDirUV.y >= 0)
+            entryUV = float2(uvMax.x, uvMin.y);
+        else
+            entryUV = uvMax;
+    }
+
+    // Clamp entry UV to region bounds
+    entryUV = clamp(entryUV, uvMin, uvMax);
+
+    // 3. Find start texel from actual entry UV
+    int2 currentTexel = int2(floor(entryUV * float2(texSize)));
+    currentTexel = clamp(currentTexel, texelMin, texelMax);
+
+    // DDA setup
+    int2 step = int2(
+        rayDirUV.x >= 0 ? 1 : -1,
+        rayDirUV.y >= 0 ? 1 : -1
+    );
+
+    // Distance in "UV parameter t" to cross one texel
+    float2 texelSizeUV = float2(1.0) / float2(texSize);
+    float2 tDelta = abs(texelSizeUV / (rayDirUV + float2(1e-10)));
+
+    // Distance to first texel boundary from entry UV
+    float2 nextBoundary;
+    if (step.x > 0)
+        nextBoundary.x = (float(currentTexel.x + 1)) * texelSizeUV.x;
+    else
+        nextBoundary.x = float(currentTexel.x) * texelSizeUV.x;
+    if (step.y > 0)
+        nextBoundary.y = (float(currentTexel.y + 1)) * texelSizeUV.y;
+    else
+        nextBoundary.y = float(currentTexel.y) * texelSizeUV.y;
+
+    float2 tMax = abs((nextBoundary - entryUV) / (rayDirUV + float2(1e-10)));
+
+    float bestT = rayTMax + 1.0;
+    bool found = false;
+
+    // V29.3: Wide DDA - test perpendicular neighbors at each step
+    // The ray might intersect texels adjacent to the DDA line
+    int maxIters = (regionWidth + regionHeight) * 2 + 4;
+
+    for (int iter = 0; iter < maxIters; iter++)
+    {
+        // Check bounds
+        if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
+            currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
+        {
+            break;
+        }
+
+        texelsVisited++;
+
+        // Test current texel
+        float2 tempBary;
+        float3 tempNormal;
+        if (testSingleTexel(tri, matIdx, rayO, rayD, currentTexel, texSize,
+                            rayTMin, rayTMax, bestT, tempBary, tempNormal))
+        {
+            hitT = bestT;
+            hitBary = tempBary;
+            hitGeoNormal = tempNormal;
+            found = true;
+        }
+
+        // V29.4: Test full 3x3 neighborhood around current texel
+        // For near-perpendicular rays, the UV footprint is very wide
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue; // Already tested current texel
+
+                int2 neighbor = currentTexel + int2(dx, dy);
+                if (neighbor.x >= texelMin.x && neighbor.x <= texelMax.x &&
+                    neighbor.y >= texelMin.y && neighbor.y <= texelMax.y)
+                {
+                    if (testSingleTexel(tri, matIdx, rayO, rayD, neighbor, texSize,
+                                        rayTMin, rayTMax, bestT, tempBary, tempNormal))
+                    {
+                        hitT = bestT;
+                        hitBary = tempBary;
+                        hitGeoNormal = tempNormal;
+                        found = true;
+                    }
+                }
+            }
+        }
+
+        // DDA step: move to next texel
+        if (tMax.x < tMax.y)
+        {
+            currentTexel.x += step.x;
+            tMax.x += tDelta.x;
+        }
+        else
+        {
+            currentTexel.y += step.y;
+            tMax.y += tDelta.y;
+        }
+    }
+
+    return found;
+}
+
+//=============================================================================
+// V29: Leaf Region Tester with Pure DDA Marching
+//=============================================================================
+bool testLeafRegion_V29(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                        int2 texSize,
+                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    // Check GUI toggle: 0 = brute force, 1 = DDA marching (V29)
+    if (pushConst.usePsiMarching == 0)
+    {
+        return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
+                                     uvMin, uvMax, rayTMin, rayTMax,
+                                     texSize, hitT, hitBary, hitGeoNormal);
+    }
+
+    // V29: Pure DDA marching (no ψ)
+    float2 rayDirUV = computeRayDirUV(tri, rayD);
+    int texelsVisited = 0;
+
+    return texelMarchDDA_V29(tri, matIdx, rayO, rayD,
+                             uvMin, uvMax, rayTMin, rayTMax,
+                             texSize, rayDirUV,
+                             hitT, hitBary, hitGeoNormal,
+                             texelsVisited);
+}
+
+//=============================================================================
+// V30: Proper ψ-based Texel Marching (Paper Section 4.4)
+//
+// Key insight from paper: "The sign of the implicit form ψ at each texel
+// corner indicates from which edge the ray leaves the texel."
+//
+// Unlike DDA which assumes a straight line in UV space, ψ=0 defines a CURVE.
+// We follow this curve by computing ψ at texel corners and finding sign changes.
+//=============================================================================
+
+// Compute ψ values at all 4 corners of a texel
+struct TexelPsiCorners
+{
+    float BL; // Bottom-left  (u, v)
+    float BR; // Bottom-right (u+1, v)
+    float TL; // Top-left     (u, v+1)
+    float TR; // Top-right    (u+1, v+1)
+};
+
+TexelPsiCorners computeTexelPsi(Tri tri, int2 texel, int2 texSize, float3 rayO, float3 rayD)
+{
+    TexelPsiCorners corners;
+
+    float2 texelSizeUV = float2(1.0) / float2(texSize);
+
+    // UV coordinates of texel corners
+    float2 uvBL = float2(texel) * texelSizeUV;
+    float2 uvBR = float2(texel.x + 1, texel.y) * texelSizeUV;
+    float2 uvTL = float2(texel.x, texel.y + 1) * texelSizeUV;
+    float2 uvTR = float2(texel.x + 1, texel.y + 1) * texelSizeUV;
+
+    // Convert to barycentric
+    float2 baryBL, baryBR, baryTL, baryTR;
+    texToBary(tri, uvBL, baryBL);
+    texToBary(tri, uvBR, baryBR);
+    texToBary(tri, uvTL, baryTL);
+    texToBary(tri, uvTR, baryTR);
+
+    // Compute ψ at each corner
+    corners.BL = psi(tri, baryBL, rayO, rayD);
+    corners.BR = psi(tri, baryBR, rayO, rayD);
+    corners.TL = psi(tri, baryTL, rayO, rayD);
+    corners.TR = psi(tri, baryTR, rayO, rayD);
+
+    return corners;
+}
+
+// V30.1: Get opposite edge (entry edge when moving to next texel)
+// Uses existing edge constants from V12 (lines 530-534):
+//   EDGE_NONE=-1, EDGE_LEFT=0, EDGE_RIGHT=1, EDGE_BOTTOM=2, EDGE_TOP=3
+int oppositeEdge_V30(int edge)
+{
+    switch (edge)
+    {
+        case EDGE_BOTTOM: return EDGE_TOP;
+        case EDGE_TOP:    return EDGE_BOTTOM;
+        case EDGE_LEFT:   return EDGE_RIGHT;
+        case EDGE_RIGHT:  return EDGE_LEFT;
+        default:          return EDGE_NONE;
+    }
+}
+
+// V30.1: Find exit edge based on ψ sign changes
+// Uses existing constants: EDGE_NONE=-1, EDGE_LEFT=0, EDGE_RIGHT=1, EDGE_BOTTOM=2, EDGE_TOP=3
+// Now takes entryEdge to avoid going backwards!
+int findExitEdge_V30(TexelPsiCorners c, int entryEdge)
+{
+    // Check each edge for sign change (opposite signs = ray crosses edge)
+    bool crossBottom = (c.BL * c.BR) < 0;  // BL to BR
+    bool crossTop    = (c.TL * c.TR) < 0;  // TL to TR
+    bool crossLeft   = (c.BL * c.TL) < 0;  // BL to TL
+    bool crossRight  = (c.BR * c.TR) < 0;  // BR to TR
+
+    // V30.1: Exclude entry edge from consideration
+    if (entryEdge == EDGE_BOTTOM) crossBottom = false;
+    if (entryEdge == EDGE_TOP)    crossTop = false;
+    if (entryEdge == EDGE_LEFT)   crossLeft = false;
+    if (entryEdge == EDGE_RIGHT)  crossRight = false;
+
+    // Count remaining crossings
+    int numCrossings = (crossBottom ? 1 : 0) + (crossTop ? 1 : 0) +
+                       (crossLeft ? 1 : 0) + (crossRight ? 1 : 0);
+
+    // If exactly one crossing, that's our exit
+    if (numCrossings == 1)
+    {
+        if (crossBottom) return EDGE_BOTTOM;
+        if (crossTop)    return EDGE_TOP;
+        if (crossLeft)   return EDGE_LEFT;
+        if (crossRight)  return EDGE_RIGHT;
+    }
+
+    // Multiple crossings: use ψ sum to pick direction
+    float sumPsi = c.BL + c.BR + c.TL + c.TR;
+
+    if (sumPsi > 0)
+    {
+        // Ray trending toward negative ψ side
+        if (crossRight)  return EDGE_RIGHT;
+        if (crossTop)    return EDGE_TOP;
+        if (crossBottom) return EDGE_BOTTOM;
+        if (crossLeft)   return EDGE_LEFT;
+    }
+    else
+    {
+        // Ray trending toward positive ψ side
+        if (crossLeft)   return EDGE_LEFT;
+        if (crossBottom) return EDGE_BOTTOM;
+        if (crossTop)    return EDGE_TOP;
+        if (crossRight)  return EDGE_RIGHT;
+    }
+
+    return EDGE_NONE;
+}
+
+// V30.1: Find exit edge using ray direction in UV space for tie-breaking
+// Now takes entryEdge to avoid going backwards!
+int findExitEdgeByGradient_V30(TexelPsiCorners c, float2 rayDirUV, int entryEdge)
+{
+    // Determine which edges have sign changes
+    bool crossBottom = (c.BL * c.BR) < 0;
+    bool crossTop    = (c.TL * c.TR) < 0;
+    bool crossLeft   = (c.BL * c.TL) < 0;
+    bool crossRight  = (c.BR * c.TR) < 0;
+
+    // V30.1: Exclude entry edge from consideration
+    if (entryEdge == EDGE_BOTTOM) crossBottom = false;
+    if (entryEdge == EDGE_TOP)    crossTop = false;
+    if (entryEdge == EDGE_LEFT)   crossLeft = false;
+    if (entryEdge == EDGE_RIGHT)  crossRight = false;
+
+    // Use ray direction to prioritize exits
+    // rayDirUV.x > 0 means ray moves in +U direction (toward right)
+    // rayDirUV.y > 0 means ray moves in +V direction (toward top)
+
+    if (abs(rayDirUV.x) > abs(rayDirUV.y))
+    {
+        // Ray moves primarily in U direction
+        if (rayDirUV.x > 0)
+        {
+            if (crossRight)  return EDGE_RIGHT;
+            if (rayDirUV.y > 0 && crossTop)    return EDGE_TOP;
+            if (rayDirUV.y <= 0 && crossBottom) return EDGE_BOTTOM;
+            if (crossTop)    return EDGE_TOP;
+            if (crossBottom) return EDGE_BOTTOM;
+        }
+        else
+        {
+            if (crossLeft)   return EDGE_LEFT;
+            if (rayDirUV.y > 0 && crossTop)    return EDGE_TOP;
+            if (rayDirUV.y <= 0 && crossBottom) return EDGE_BOTTOM;
+            if (crossTop)    return EDGE_TOP;
+            if (crossBottom) return EDGE_BOTTOM;
+        }
+    }
+    else
+    {
+        // Ray moves primarily in V direction
+        if (rayDirUV.y > 0)
+        {
+            if (crossTop)    return EDGE_TOP;
+            if (rayDirUV.x > 0 && crossRight)  return EDGE_RIGHT;
+            if (rayDirUV.x <= 0 && crossLeft)  return EDGE_LEFT;
+            if (crossRight)  return EDGE_RIGHT;
+            if (crossLeft)   return EDGE_LEFT;
+        }
+        else
+        {
+            if (crossBottom) return EDGE_BOTTOM;
+            if (rayDirUV.x > 0 && crossRight)  return EDGE_RIGHT;
+            if (rayDirUV.x <= 0 && crossLeft)  return EDGE_LEFT;
+            if (crossRight)  return EDGE_RIGHT;
+            if (crossLeft)   return EDGE_LEFT;
+        }
+    }
+
+    return EDGE_NONE;
+}
+
+bool texelMarchPsi_V30(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                       float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                       int2 texSize,
+                       out float hitT, out float2 hitBary, out float3 hitGeoNormal,
+                       out int texelsVisited)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+    texelsVisited = 0;
+
+    // Texel bounds for this UV region
+    int2 texelMin = int2(floor(uvMin * float2(texSize)));
+    int2 texelMax = int2(floor(uvMax * float2(texSize)));
+    texelMin = max(texelMin, int2(0, 0));
+    texelMax = min(texelMax, texSize - int2(1, 1));
+
+    if (any(texelMin > texelMax))
+        return false;
+
+    int regionWidth = texelMax.x - texelMin.x + 1;
+    int regionHeight = texelMax.y - texelMin.y + 1;
+
+    // Find starting texel from ray entry point
+    float3 entryPoint3D = rayO + rayD * rayTMin;
+    float2 entryBary;
+    float2 entryUV;
+
+    if (inverseDisplacement(tri, entryPoint3D, entryBary))
+    {
+        entryUV = baryToTex(tri, entryBary);
+    }
+    else
+    {
+        // Fallback: find texel with smallest |ψ| at center
+        float minPsi = 1e10;
+        entryUV = (uvMin + uvMax) * 0.5;
+
+        for (int ty = texelMin.y; ty <= min(texelMin.y + 2, texelMax.y); ty++)
+        {
+            for (int tx = texelMin.x; tx <= min(texelMin.x + 2, texelMax.x); tx++)
+            {
+                float2 centerUV = (float2(tx, ty) + 0.5) / float2(texSize);
+                float2 centerBary;
+                texToBary(tri, centerUV, centerBary);
+                float p = abs(psi(tri, centerBary, rayO, rayD));
+                if (p < minPsi)
+                {
+                    minPsi = p;
+                    entryUV = centerUV;
+                }
+            }
+        }
+    }
+
+    entryUV = clamp(entryUV, uvMin, uvMax);
+    int2 currentTexel = int2(floor(entryUV * float2(texSize)));
+    currentTexel = clamp(currentTexel, texelMin, texelMax);
+
+    // V30.1: Track entry edge to avoid going backwards
+    // For the starting texel, determine entry edge from ray direction
+    float2 rayDirUV = computeRayDirUV(tri, rayD);
+    int entryEdge = EDGE_NONE;
+
+    // Estimate initial entry edge based on ray direction
+    // Ray enters from the opposite side of where it's heading
+    if (abs(rayDirUV.x) > abs(rayDirUV.y))
+    {
+        entryEdge = (rayDirUV.x > 0) ? EDGE_LEFT : EDGE_RIGHT;
+    }
+    else
+    {
+        entryEdge = (rayDirUV.y > 0) ? EDGE_BOTTOM : EDGE_TOP;
+    }
+
+    // Track visited texels to avoid infinite loops
+    const int MAX_VISITS = 256;
+    int visitCount = 0;
+
+    float bestT = rayTMax + 1.0;
+    bool found = false;
+
+    int maxIters = regionWidth * regionHeight + 4;
+
+    for (int iter = 0; iter < maxIters && visitCount < MAX_VISITS; iter++)
+    {
+        // Check bounds
+        if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
+            currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
+        {
+            break;
+        }
+
+        texelsVisited++;
+        visitCount++;
+
+        // Test current texel for intersection
+        float2 tempBary;
+        float3 tempNormal;
+        if (testSingleTexel(tri, matIdx, rayO, rayD, currentTexel, texSize,
+                            rayTMin, rayTMax, bestT, tempBary, tempNormal))
+        {
+            hitT = bestT;
+            hitBary = tempBary;
+            hitGeoNormal = tempNormal;
+            found = true;
+            // Continue to find closer hits
+        }
+
+        // Compute ψ at all 4 corners of this texel
+        TexelPsiCorners corners = computeTexelPsi(tri, currentTexel, texSize, rayO, rayD);
+
+        // V30.1: Find exit edge, excluding the entry edge
+        int exitEdge = findExitEdgeByGradient_V30(corners, rayDirUV, entryEdge);
+
+        if (exitEdge == EDGE_NONE)
+        {
+            // No clear exit from gradient method - try sign-based
+            exitEdge = findExitEdge_V30(corners, entryEdge);
+        }
+
+        if (exitEdge == EDGE_NONE)
+        {
+            // No exit found - march complete
+            return found;
+        }
+
+        // Move to next texel based on exit edge
+        // Using existing constants: EDGE_LEFT=0, EDGE_RIGHT=1, EDGE_BOTTOM=2, EDGE_TOP=3
+        int2 nextTexel = currentTexel;
+        if (exitEdge == EDGE_BOTTOM)      nextTexel.y -= 1;
+        else if (exitEdge == EDGE_TOP)    nextTexel.y += 1;
+        else if (exitEdge == EDGE_LEFT)   nextTexel.x -= 1;
+        else if (exitEdge == EDGE_RIGHT)  nextTexel.x += 1;
+
+        // Check if next texel is valid
+        if (nextTexel.x < texelMin.x || nextTexel.x > texelMax.x ||
+            nextTexel.y < texelMin.y || nextTexel.y > texelMax.y)
+        {
+            break;
+        }
+
+        // V30.1: Update entry edge for next texel (opposite of exit edge)
+        entryEdge = oppositeEdge_V30(exitEdge);
+        currentTexel = nextTexel;
+    }
+
+    return found;
+}
+
+//=============================================================================
+// V30: Leaf Region Tester with Proper ψ-Based Marching
+//=============================================================================
+bool testLeafRegion_V30(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                        int2 texSize,
+                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    // Check GUI toggle: 0 = brute force, 1 = ψ marching (V30)
+    if (pushConst.usePsiMarching == 0)
+    {
+        return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
+                                     uvMin, uvMax, rayTMin, rayTMax,
+                                     texSize, hitT, hitBary, hitGeoNormal);
+    }
+
+    // V30: Proper ψ-based marching per paper Section 4.4
+    int texelsVisited = 0;
+
+    return texelMarchPsi_V30(tri, matIdx, rayO, rayD,
+                             uvMin, uvMax, rayTMin, rayTMax,
+                             texSize,
+                             hitT, hitBary, hitGeoNormal,
+                             texelsVisited);
+}
+
+//=============================================================================
 // Tessellate UV region (V11 fallback method)
 //=============================================================================
 bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
@@ -2763,26 +3661,43 @@ void intersectionMain()
 
         if (maxTexelSize <= MARCHING_SCALE)
         {
-            // V27: ψ-marching with CORRECT entry detection (Per Paper Section 4.1)
-            // V26 bug: used ψ=0 boundary crossing which is WRONG
-            // V27 fix: uses inverse_displacement of ray entry/exit (per paper)
-            // Also fixes: consistent texelMax, valid bary check, bound refinement
+            // V31: Use brute force for leaf regions (guaranteed correct)
+            // With MARCHING_SCALE=2.0, this is at most 2×2=4 texels - negligible cost
+            //
+            // Why not ψ-guided marching? After 11+ failed versions (V12-V30.1):
+            // ψ=0 represents ray projection onto UNDISPLACED surface, not where
+            // the ray actually hits the displaced surface. At larger scales this
+            // causes stripping. With MARCHING_SCALE=2.0, brute force is both
+            // correct and efficient.
             float hitT;
             float2 hitBary;
             float3 hitGeoNormal;
 
-            if (testLeafRegion_V27(tri, matIdx, rayOrigin, rayDir,
-                                   bound.uvMin, bound.uvMax,
-                                   rayTMin, min(rayTMax, bestT),
-                                   texSize, hitT, hitBary, hitGeoNormal))
+            // V31: GUI toggle for comparison
+            bool leafHit = false;
+            if (pushConst.usePsiMarching != 0)
             {
-                if (hitT < bestT)
-                {
-                    bestT = hitT;
-                    bestBary = hitBary;
-                    bestGeoNormal = hitGeoNormal;
-                    foundHit = true;
-                }
+                // V30.1 ψ-based marching (for comparison, has stripping issues)
+                leafHit = testLeafRegion_V30(tri, matIdx, rayOrigin, rayDir,
+                                             bound.uvMin, bound.uvMax,
+                                             rayTMin, min(rayTMax, bestT),
+                                             texSize, hitT, hitBary, hitGeoNormal);
+            }
+            else
+            {
+                // V31 brute force (default, guaranteed correct)
+                leafHit = testAllTexelsInRegion(tri, matIdx, rayOrigin, rayDir,
+                                                bound.uvMin, bound.uvMax,
+                                                rayTMin, min(rayTMax, bestT),
+                                                texSize, hitT, hitBary, hitGeoNormal);
+            }
+
+            if (leafHit && hitT < bestT)
+            {
+                bestT = hitT;
+                bestBary = hitBary;
+                bestGeoNormal = hitGeoNormal;
+                foundHit = true;
             }
             continue;
         }

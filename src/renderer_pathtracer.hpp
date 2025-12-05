@@ -112,7 +112,7 @@ public:
 
   bool m_useBoundedVNDF{true};  // Toggle for bounded VNDF GGX sampling
 
-  bool m_usePsiMarching{false};  // RMIP: false=brute force (default), true=ψ-guided texel marching (V26)
+  bool m_usePsiMarching{true};  // RMIP: false=brute force (default), true=ψ-guided texel marching (V26)
 
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
