@@ -1,11 +1,12 @@
 /*
- * RMIP Displacement Intersection Shader (V34 - Direct Psi Diagnostic)
+ * RMIP Displacement Intersection Shader (V35 - Two-Branch Hyperbolic Marching)
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
  *
- * V34 Changes:
- * - Reverted V33 perpendicular testing (slow, didn't help)
- * - Switched from evalPsiQuadric() to direct psi() to verify quadric accuracy
- * - This is a diagnostic version to test if quadric computation is the issue
+ * V35 Changes:
+ * - Detect hyperbolic ψ curves (discriminant C² - 4AB > 0)
+ * - Find all boundary crossings to identify both branches
+ * - Use queue-based marching to process both branches
+ * - For hyperbola with 4+ boundary crossings, march from multiple start points
  *
  * Key Equations from Paper:
  * - Eq 2: (P(u,v) - Q) × N(u,v) = 0 (displacement inversion)
@@ -671,6 +672,144 @@ float2 psiCurveDirection(PsiQuadric q, float2 bary)
     // Curve direction is perpendicular to gradient
     // Rotate 90 degrees: (gx, gy) → (-gy, gx)
     return float2(-grad.y, grad.x);
+}
+
+//=============================================================================
+// V35: Hyperbolic ψ Curve Detection and Boundary Crossing
+// For a quadric ψ = A*u² + B*v² + C*uv + D*u + E*v + F:
+// - Discriminant Δ = C² - 4AB
+// - If Δ > 0: hyperbola (TWO separate branches!)
+// - If Δ = 0: parabola
+// - If Δ < 0: ellipse
+//=============================================================================
+
+// Check if ψ quadric is hyperbolic (has two branches)
+bool isHyperbolicPsi(PsiQuadric q)
+{
+    float discriminant = q.C * q.C - 4.0 * q.A * q.B;
+    return discriminant > 1e-6;  // Use small threshold for numerical stability
+}
+
+// Find ψ=0 crossings on a line segment in barycentric space
+// Line from bary0 to bary1, parameterized as bary(t) = bary0 + t*(bary1-bary0), t ∈ [0,1]
+// Returns number of crossings (0, 1, or 2) and their t values
+int findPsiCrossingsOnSegment(PsiQuadric q, float2 bary0, float2 bary1, out float t0, out float t1)
+{
+    t0 = -1.0;
+    t1 = -1.0;
+
+    // ψ(bary0 + t*d) where d = bary1 - bary0
+    // = A*(u0+t*du)² + B*(v0+t*dv)² + C*(u0+t*du)*(v0+t*dv) + D*(u0+t*du) + E*(v0+t*dv) + F
+    // Expanding: a*t² + b*t + c = 0
+    float2 d = bary1 - bary0;
+    float u0 = bary0.x, v0 = bary0.y;
+    float du = d.x, dv = d.y;
+
+    float a = q.A * du * du + q.B * dv * dv + q.C * du * dv;
+    float b = 2.0 * q.A * u0 * du + 2.0 * q.B * v0 * dv + q.C * (u0 * dv + v0 * du) + q.D * du + q.E * dv;
+    float c = q.A * u0 * u0 + q.B * v0 * v0 + q.C * u0 * v0 + q.D * u0 + q.E * v0 + q.F;
+
+    float r0, r1;
+    int numRoots = solveQuadratic(a, b, c, r0, r1);
+
+    int count = 0;
+    if (numRoots >= 1 && r0 >= 0.0 && r0 <= 1.0)
+    {
+        t0 = r0;
+        count++;
+    }
+    if (numRoots >= 2 && r1 >= 0.0 && r1 <= 1.0 && abs(r1 - r0) > 1e-6)
+    {
+        if (count == 0)
+            t0 = r1;
+        else
+            t1 = r1;
+        count++;
+    }
+
+    return count;
+}
+
+// Structure to hold boundary crossing information
+struct BoundaryCrossing
+{
+    float2 uv;      // UV coordinate of crossing
+    float2 bary;    // Barycentric coordinate of crossing
+    int edge;       // Which edge (LEFT, RIGHT, BOTTOM, TOP)
+    float param;    // Parameter along edge (0 to 1)
+};
+
+struct BoundaryCrossings
+{
+    BoundaryCrossing crossings[8];  // Up to 8 crossings (4 edges × 2 per edge for hyperbola)
+    int count;
+};
+
+// Find all ψ=0 crossings on the UV region boundary
+BoundaryCrossings findAllBoundaryCrossings(Tri tri, PsiQuadric q, float2 uvMin, float2 uvMax)
+{
+    BoundaryCrossings result;
+    result.count = 0;
+
+    // Get barycentric coords of the 4 corners
+    float2 baryBL, baryBR, baryTL, baryTR;  // Bottom-Left, Bottom-Right, Top-Left, Top-Right
+    texToBary(tri, float2(uvMin.x, uvMin.y), baryBL);
+    texToBary(tri, float2(uvMax.x, uvMin.y), baryBR);
+    texToBary(tri, float2(uvMin.x, uvMax.y), baryTL);
+    texToBary(tri, float2(uvMax.x, uvMax.y), baryTR);
+
+    float t0, t1;
+    int numCrossings;
+
+    // Left edge: uvMin.x, uvMin.y → uvMin.x, uvMax.y (baryBL → baryTL)
+    numCrossings = findPsiCrossingsOnSegment(q, baryBL, baryTL, t0, t1);
+    for (int i = 0; i < numCrossings && result.count < 8; i++)
+    {
+        float t = (i == 0) ? t0 : t1;
+        result.crossings[result.count].uv = float2(uvMin.x, uvMin.y + t * (uvMax.y - uvMin.y));
+        result.crossings[result.count].bary = baryBL + t * (baryTL - baryBL);
+        result.crossings[result.count].edge = EDGE_LEFT;
+        result.crossings[result.count].param = t;
+        result.count++;
+    }
+
+    // Right edge: uvMax.x, uvMin.y → uvMax.x, uvMax.y (baryBR → baryTR)
+    numCrossings = findPsiCrossingsOnSegment(q, baryBR, baryTR, t0, t1);
+    for (int i = 0; i < numCrossings && result.count < 8; i++)
+    {
+        float t = (i == 0) ? t0 : t1;
+        result.crossings[result.count].uv = float2(uvMax.x, uvMin.y + t * (uvMax.y - uvMin.y));
+        result.crossings[result.count].bary = baryBR + t * (baryTR - baryBR);
+        result.crossings[result.count].edge = EDGE_RIGHT;
+        result.crossings[result.count].param = t;
+        result.count++;
+    }
+
+    // Bottom edge: uvMin.x, uvMin.y → uvMax.x, uvMin.y (baryBL → baryBR)
+    numCrossings = findPsiCrossingsOnSegment(q, baryBL, baryBR, t0, t1);
+    for (int i = 0; i < numCrossings && result.count < 8; i++)
+    {
+        float t = (i == 0) ? t0 : t1;
+        result.crossings[result.count].uv = float2(uvMin.x + t * (uvMax.x - uvMin.x), uvMin.y);
+        result.crossings[result.count].bary = baryBL + t * (baryBR - baryBL);
+        result.crossings[result.count].edge = EDGE_BOTTOM;
+        result.crossings[result.count].param = t;
+        result.count++;
+    }
+
+    // Top edge: uvMin.x, uvMax.y → uvMax.x, uvMax.y (baryTL → baryTR)
+    numCrossings = findPsiCrossingsOnSegment(q, baryTL, baryTR, t0, t1);
+    for (int i = 0; i < numCrossings && result.count < 8; i++)
+    {
+        float t = (i == 0) ? t0 : t1;
+        result.crossings[result.count].uv = float2(uvMin.x + t * (uvMax.x - uvMin.x), uvMax.y);
+        result.crossings[result.count].bary = baryTL + t * (baryTR - baryTL);
+        result.crossings[result.count].edge = EDGE_TOP;
+        result.crossings[result.count].param = t;
+        result.count++;
+    }
+
+    return result;
 }
 
 //=============================================================================
@@ -1350,7 +1489,7 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
 //=============================================================================
 // ψ-Guided Texel Marching (Paper Section 4.4)
-// Enhanced with turning point detection (Paper Section 4.2)
+// V35: Enhanced with two-branch handling for hyperbolic ψ curves
 //=============================================================================
 bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
@@ -1364,8 +1503,10 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     // Compute ψ quadric coefficients (Paper Section 4.2)
     PsiQuadric psiQ = computePsiQuadric(tri, rayO, rayD);
 
+    // V35: Check if ψ is hyperbolic (has two branches)
+    bool isHyperbolic = isHyperbolicPsi(psiQ);
+
     // Find turning points (Paper Section 4.2, Eq. 4-5)
-    // These are where ψ_u = 0 or ψ_v = 0 intersects ψ = 0
     TurningPoints tpBary = findTurningPoints(psiQ);
     TurningPoints tpUV = turningPointsToUV(tri, tpBary);
 
@@ -1380,8 +1521,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     float2 uvEntry = baryToTex(tri, baryEntry);
     float2 uvExit = baryToTex(tri, baryExit);
 
-    // Bound refinement (Paper Algorithm 1 line 15)
-    // Also expand bounds to include turning points (Paper Section 4.2)
+    // Bound refinement
     float2 refinedUvMin = uvMin;
     float2 refinedUvMax = uvMax;
 
@@ -1390,8 +1530,6 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
         float2 rayUvMin = min(uvEntry, uvExit);
         float2 rayUvMax = max(uvEntry, uvExit);
 
-        // Expand bounds to include any turning points within the region
-        // This ensures the bounding rectangle contains the entire ψ curve
         for (int i = 0; i < tpUV.count; i++)
         {
             if (turningPointInRegion(tpUV.points[i], uvMin, uvMax))
@@ -1414,9 +1552,23 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     if (any(texelMin > texelMax))
         return false;
 
-    // Find entry texel using inverse displacement or ray direction
+    // V35: For hyperbolic curves, find all boundary crossings to get multiple start points
+    BoundaryCrossings boundaryCrossings;
+    boundaryCrossings.count = 0;
+    if (isHyperbolic)
+    {
+        boundaryCrossings = findAllBoundaryCrossings(tri, psiQ, refinedUvMin, refinedUvMax);
+    }
+
+    // V35: Use a queue for multiple starting points (handles both branches of hyperbola)
+    struct MarchState { int2 texel; int entryEdge; float2 curveDir; };
+    MarchState queue[8];
+    int queueHead = 0;
+    int queueTail = 0;
+
+    // Primary starting point from inverse displacement
+    float2 curveDir = rayDirUV;
     int2 currentTexel;
-    float2 curveDir = rayDirUV;  // Initial curve direction estimate
 
     if (validEntry)
     {
@@ -1424,19 +1576,14 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
         currentTexel = int2(floor(clampedEntryUV * float2(texSize)));
         currentTexel = clamp(currentTexel, texelMin, texelMax);
 
-        // Use ψ gradient for initial curve direction (Paper Section 4.2)
-        // Curve direction is perpendicular to gradient
         float2 grad = psiGradient(psiQ, baryEntry);
         if (length(grad) > 1e-6)
         {
-            // Convert barycentric gradient to UV direction
             float2 curveDirBary = psiCurveDirection(psiQ, baryEntry);
-            // Transform to UV space (approximate)
             curveDir = float2(
                 curveDirBary.x * tri.dTdu.x + curveDirBary.y * tri.dTdv.x,
                 curveDirBary.x * tri.dTdu.y + curveDirBary.y * tri.dTdv.y
             );
-            // Ensure we're going from entry toward exit
             if (validExit && dot(curveDir, uvExit - uvEntry) < 0)
                 curveDir = -curveDir;
         }
@@ -1458,6 +1605,47 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
         entryEdge = (curveDir.x >= 0) ? EDGE_LEFT : EDGE_RIGHT;
     else
         entryEdge = (curveDir.y >= 0) ? EDGE_BOTTOM : EDGE_TOP;
+
+    // V35: For hyperbolic curves with 4+ boundary crossings, add additional start points
+    // Each pair of crossings represents one branch
+    if (isHyperbolic && boundaryCrossings.count >= 4)
+    {
+        // Add alternate starting points from boundary crossings
+        // Skip crossings that are close to the primary entry point
+        for (int i = 0; i < boundaryCrossings.count && queueTail < 8; i++)
+        {
+            BoundaryCrossing bc = boundaryCrossings.crossings[i];
+            int2 bcTexel = int2(floor(bc.uv * float2(texSize)));
+            bcTexel = clamp(bcTexel, texelMin, texelMax);
+
+            // Skip if this is the same texel as primary start or already queued
+            bool isDuplicate = all(bcTexel == currentTexel);
+            for (int j = 0; j < queueTail && !isDuplicate; j++)
+            {
+                if (all(queue[j].texel == bcTexel))
+                    isDuplicate = true;
+            }
+
+            if (!isDuplicate)
+            {
+                // Compute curve direction at this crossing
+                float2 bcCurveDir = psiCurveDirection(psiQ, bc.bary);
+                float2 bcCurveDirUV = float2(
+                    bcCurveDir.x * tri.dTdu.x + bcCurveDir.y * tri.dTdv.x,
+                    bcCurveDir.x * tri.dTdu.y + bcCurveDir.y * tri.dTdv.y
+                );
+                // Direction should point INTO the region
+                float2 regionCenter = (refinedUvMin + refinedUvMax) * 0.5;
+                if (dot(bcCurveDirUV, regionCenter - bc.uv) < 0)
+                    bcCurveDirUV = -bcCurveDirUV;
+
+                queue[queueTail].texel = bcTexel;
+                queue[queueTail].entryEdge = bc.edge;
+                queue[queueTail].curveDir = bcCurveDirUV;
+                queueTail++;
+            }
+        }
+    }
 
     float bestT = rayTMax + 1.0;
     bool found = false;
@@ -1697,6 +1885,114 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             case EDGE_TOP:    currentTexel.y++; break;
         }
         entryEdge = getOppositeEdge(exitEdge);
+    }
+
+    // V35: Process additional starting points from the queue (for hyperbolic curves)
+    while (queueHead < queueTail)
+    {
+        MarchState state = queue[queueHead++];
+        currentTexel = state.texel;
+        entryEdge = state.entryEdge;
+        curveDir = state.curveDir;
+
+        // March from this starting point
+        for (int iter = 0; iter < maxIters; iter++)
+        {
+            if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
+                currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
+                break;
+
+            float2 uv00 = float2(currentTexel) / float2(texSize);
+            float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
+            float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
+            float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
+
+            float2 b00, b10, b01, b11;
+            texToBary(tri, uv00, b00);
+            texToBary(tri, uv10, b10);
+            texToBary(tri, uv01, b01);
+            texToBary(tri, uv11, b11);
+
+            float2 b00_orig = b00, b10_orig = b10, b01_orig = b01, b11_orig = b11;
+
+            bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
+            bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
+            bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
+            bool valid11 = b11.x >= -BARY_EPS && b11.y >= -BARY_EPS && b11.x + b11.y <= 1.0 + BARY_EPS;
+
+            if (valid00 || valid10 || valid01 || valid11)
+            {
+                b00 = clampBary(b00);
+                b10 = clampBary(b10);
+                b01 = clampBary(b01);
+                b11 = clampBary(b11);
+
+                float microT;
+                float2 microBary;
+                float3 microNormal;
+
+                float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
+                if (area1 > 1e-6)
+                {
+                    if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
+                                               rayTMin, min(rayTMax, bestT),
+                                               microT, microBary, microNormal))
+                    {
+                        if (microT < bestT)
+                        {
+                            bestT = microT;
+                            hitT = microT;
+                            hitBary = microBary;
+                            hitGeoNormal = microNormal;
+                            found = true;
+                        }
+                    }
+                }
+
+                float w11 = 1.0 - b11.x - b11.y;
+                if (w11 >= -BARY_EPS)
+                {
+                    float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
+                    if (area2 > 1e-6)
+                    {
+                        if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
+                                                   rayTMin, min(rayTMax, bestT),
+                                                   microT, microBary, microNormal))
+                        {
+                            if (microT < bestT)
+                            {
+                                bestT = microT;
+                                hitT = microT;
+                                hitBary = microBary;
+                                hitGeoNormal = microNormal;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Compute ψ at corners and find exit edge
+            float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 1e30;
+            float psi10 = valid10 ? psi(tri, b10_orig, rayO, rayD) : 1e30;
+            float psi01 = valid01 ? psi(tri, b01_orig, rayO, rayD) : 1e30;
+            float psi11 = valid11 ? psi(tri, b11_orig, rayO, rayD) : 1e30;
+
+            int validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
+            if (validCount < 2) break;
+
+            int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, curveDir);
+            if (exitEdge == EDGE_NONE) break;
+
+            switch (exitEdge)
+            {
+                case EDGE_LEFT:   currentTexel.x--; break;
+                case EDGE_RIGHT:  currentTexel.x++; break;
+                case EDGE_BOTTOM: currentTexel.y--; break;
+                case EDGE_TOP:    currentTexel.y++; break;
+            }
+            entryEdge = getOppositeEdge(exitEdge);
+        }
     }
 
     return found;

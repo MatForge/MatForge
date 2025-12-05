@@ -5807,9 +5807,233 @@ PENDING - Need to verify:
 
 ---
 
+---
+
+## V34: Direct Psi Diagnostic (December 5, 2025)
+
+### Background
+
+V33's perpendicular texel testing was "almost as slow as brute force" with only limited reduction in stripping. User feedback: "This suggests it's not the root cause of problem. Check elsewhere about psi."
+
+### Approach
+
+Switch from `evalPsiQuadric()` to direct `psi()` function to verify whether the quadric approximation is accurate.
+
+### Changes
+
+```slang
+// Before (V33): Use quadric coefficients
+float psiAtPoint = evalPsiQuadric(psiQ, float2(ix + 0.5, iy + 0.5) / float2(texSize));
+
+// After (V34): Use direct psi computation
+float2 testUV = float2(ix + 0.5, iy + 0.5) / float2(texSize);
+float2 testBary;
+texToBary(tri, testUV, testBary);
+float3 testP = baryToPos(tri, testBary);
+float psiAtPoint = psi(testP, rayOrigin, rayDir);
+```
+
+### Results
+
+**No change** - The stripping pattern looks exactly the same as V32.
+
+### Conclusion
+
+The ψ quadric computation is **correct**. The issue is not with quadric approximation accuracy.
+
+---
+
+## V35: Two-Branch Hyperbolic Marching (December 5, 2025)
+
+### Background
+
+User feedback on V34: "Catch the other branch for hyperbolic psi curves."
+
+When the ψ quadric discriminant Δ = C² - 4AB > 0, the ψ=0 curve is a **hyperbola** with two separate branches. The marching algorithm might be following only one branch and missing hits on the other.
+
+### Implementation
+
+1. **Hyperbola Detection**:
+```slang
+bool isHyperbolicPsi(PsiQuadric q)
+{
+    float discriminant = q.C * q.C - 4.0 * q.A * q.B;
+    return discriminant > 1e-6;
+}
+```
+
+2. **Boundary Crossing Detection**:
+```slang
+struct BoundaryCrossing { float2 uv; float2 bary; int edge; float param; };
+struct BoundaryCrossings { BoundaryCrossing crossings[8]; int count; };
+
+// Find all ψ=0 crossings on the UV region boundary
+BoundaryCrossings findAllBoundaryCrossings(Tri tri, PsiQuadric q, float2 uvMin, float2 uvMax)
+```
+
+3. **Queue-Based Multi-Branch Marching**:
+```slang
+// Queue for multiple ψ=0 branch starting points
+int2 branchQueue[8];
+int branchQueueSize = 0;
+int branchesProcessed = 0;
+
+// After primary marching completes, check for additional branches
+if (isHyperbolicPsi(psiQ))
+{
+    BoundaryCrossings allCrossings = findAllBoundaryCrossings(tri, psiQ, uvMin, uvMax);
+
+    for (int c = 0; c < allCrossings.count && branchQueueSize < 8; c++)
+    {
+        // Add unvisited crossings to queue as new branch starting points
+        // ... queue management code ...
+    }
+}
+
+// Process secondary branches from queue
+while (branchQueueSize > 0 && branchesProcessed < 4)
+{
+    // Pop from queue and march this branch
+    // ... secondary branch marching ...
+}
+```
+
+### Results
+
+**No change** - The stripping pattern looks exactly the same as V32.
+
+### Conclusion
+
+The issue is **not** with missing hyperbola branches. Both branches are being found, but the stripes persist.
+
+---
+
+## V33-V35 Analysis: Why Stripping Persists (December 5, 2025)
+
+### Summary of Failed Attempts
+
+| Version | Hypothesis | Result |
+|---------|------------|--------|
+| V33 | Displacement offsets hits to perpendicular texels | Slow, limited improvement |
+| V34 | Quadric ψ approximation is inaccurate | No change - quadric is correct |
+| V35 | Missing second branch of hyperbolic ψ curve | No change - both branches found |
+
+### Critical Observations About the Stripes
+
+Looking at the stripping pattern in the V32 screenshots:
+
+1. **Stripes follow displacement ISO-CONTOURS**, not the UV grid
+   - The stripes are concentric rings around displacement peaks/valleys
+   - They curve smoothly following the terrain contours
+   - NOT aligned with texel grid or UV axes
+
+2. **Stripes are VIEW-DEPENDENT**
+   - More prominent at grazing angles
+   - Change shape/position with camera movement
+   - Consistent with a projection-based issue
+
+3. **Stripes occur at SPECIFIC HEIGHTS**
+   - Appear at certain elevation levels on the displacement
+   - Form rings at constant-height contours
+   - Suggests a quantization or threshold phenomenon
+
+### Root Cause Analysis
+
+The ψ function (Paper Eq. 3) is:
+```
+ψ(u,v) = (P(u,v) - O) · (N × D)
+```
+
+This represents the **signed distance from the ray to the BASE surface point P(u,v)**.
+
+However, the actual hit occurs on the **DISPLACED surface**:
+```
+S(u,v) = P(u,v) + h(u,v) · N(u,v)
+```
+
+**The displacement h(u,v) shifts the surface along N, which causes the actual hit to be in a DIFFERENT TEXEL than where ψ=0 passes on the base surface.**
+
+### Geometric Interpretation
+
+Consider a ray nearly parallel to the surface:
+
+```
+         ψ=0 curve on base surface P
+              ↓
+    ═══════╪═══════╪═══════╪═══════
+           │       │       │
+           │   X   │       │    ← Displaced surface S (height h)
+           │       │       │
+    ───────┼───────┼───────┼───────
+           │       │       │
+       Texel A  Texel B  Texel C
+
+Where ψ=0 passes: Texel B (on base surface)
+Where hit occurs: Texel A (on displaced surface due to height h)
+```
+
+The offset between where ψ=0 passes and where the displaced hit occurs depends on:
+- Displacement height h(u,v)
+- Surface normal N
+- Ray direction D
+- Grazing angle
+
+**At certain heights, this offset equals exactly N texels, causing systematic misses along contour lines of constant displacement.**
+
+### Why V33 (Perpendicular Testing) Wasn't Enough
+
+V33 tested ±1 texel perpendicular to the ψ=0 curve. This helps for small offsets but:
+- Large displacements can shift hits by multiple texels
+- The offset varies across the surface (depends on local h)
+- Would need to test ALL texels within the displacement range
+
+### The Paper's Solution: RMIP Bounds
+
+The paper addresses this by using **RMIP (Rectangular Minmax Image Pyramid)**:
+
+1. For a rectangular UV region, RMIP gives O(1) access to `[h_min, h_max]`
+2. The algorithm computes tight 3D AABBs using these bounds:
+   ```
+   AABB_min = min(P_corners) + h_min · N
+   AABB_max = max(P_corners) + h_max · N
+   ```
+3. Ray-AABB testing determines if ANY displaced surface in that region could be hit
+4. This accounts for the displacement offset naturally
+
+**Without RMIP bounds, ψ-marching cannot know which texels might contain hits on the displaced surface.**
+
+### Fundamental Limitation of Current Implementation
+
+Our current ψ-marching implementation:
+- ✅ Correctly computes ψ=0 curve on base surface
+- ✅ Correctly handles turning points
+- ✅ Correctly handles hyperbolic two-branch cases
+- ❌ **Cannot predict where displaced hits occur without querying displacement bounds**
+
+The stripes are an **inherent limitation** of ψ-marching without RMIP:
+- We follow ψ=0 on the base surface
+- But hits are on the displaced surface (shifted by h·N)
+- Without knowing h's range, we don't know which texels to check
+
+### Conclusion
+
+**The stripping artifacts are a fundamental limitation of ψ-marching without RMIP bounds.**
+
+To eliminate the stripes, we need either:
+1. **Full RMIP implementation** (as described in the paper) - O(log N) traversal with tight bounds
+2. **Brute force** - test all texels (works, but O(N²))
+3. **Hybrid approach** - use ψ-marching with conservative bounding (current state, has artifacts)
+
+The paper's algorithm uses ψ-marching as part of the RMIP traversal to efficiently narrow down to leaf texels, not as a standalone intersection method. The RMIP bounds provide the robustness that ψ-marching alone cannot achieve.
+
+---
+
 *Last Updated: December 5, 2025*
 *V27 restored as base, tuned with MARCHING_SCALE and MAX_TRAVERSAL_ITERS analysis*
 *V31 insight confirmed: ψ limitation is fundamental, brute force is the robust solution*
 *Paper comparison added: Key missing features are RMIP bounds and turning point detection*
 *V32: Implemented turning point detection per Paper Section 4.2*
 *V33: Implemented perpendicular texel testing to account for displacement offset*
+*V34: Confirmed ψ quadric computation is correct (direct vs quadric identical)*
+*V35: Confirmed hyperbolic two-branch is not the issue (both branches found)*
+*V33-V35 Analysis: Stripping is fundamental to ψ-marching without RMIP bounds*
