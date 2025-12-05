@@ -1,6 +1,11 @@
 /*
- * RMIP Displacement Intersection Shader (Cleaned V28)
+ * RMIP Displacement Intersection Shader (V34 - Direct Psi Diagnostic)
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
+ *
+ * V34 Changes:
+ * - Reverted V33 perpendicular testing (slow, didn't help)
+ * - Switched from evalPsiQuadric() to direct psi() to verify quadric accuracy
+ * - This is a diagnostic version to test if quadric computation is the issue
  *
  * Key Equations from Paper:
  * - Eq 2: (P(u,v) - Q) × N(u,v) = 0 (displacement inversion)
@@ -842,6 +847,115 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
 }
 
 //=============================================================================
+// Single Texel Testing Helper (V33 - Perpendicular Testing Fix)
+// Tests one texel and updates the best hit if intersection found.
+// Returns true if a new best hit was found.
+//=============================================================================
+bool testSingleTexel(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                     int2 texel, int2 texSize, float rayTMin, float rayTMax,
+                     inout float bestT, out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    float2 uv00 = float2(texel) / float2(texSize);
+    float2 uv10 = float2(texel + int2(1, 0)) / float2(texSize);
+    float2 uv01 = float2(texel + int2(0, 1)) / float2(texSize);
+    float2 uv11 = float2(texel + int2(1, 1)) / float2(texSize);
+
+    float2 b00, b10, b01, b11;
+    texToBary(tri, uv00, b00);
+    texToBary(tri, uv10, b10);
+    texToBary(tri, uv01, b01);
+    texToBary(tri, uv11, b11);
+
+    bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
+    bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
+    bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
+    bool valid11 = b11.x >= -BARY_EPS && b11.y >= -BARY_EPS && b11.x + b11.y <= 1.0 + BARY_EPS;
+
+    if (!(valid00 || valid10 || valid01 || valid11))
+        return false;
+
+    b00 = clampBary(b00);
+    b10 = clampBary(b10);
+    b01 = clampBary(b01);
+    b11 = clampBary(b11);
+
+    bool found = false;
+    float microT;
+    float2 microBary;
+    float3 microNormal;
+
+    // Triangle 1: b00, b10, b01
+    float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
+    if (area1 > 1e-6)
+    {
+        if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
+                                   rayTMin, min(rayTMax, bestT),
+                                   microT, microBary, microNormal))
+        {
+            if (microT < bestT)
+            {
+                bestT = microT;
+                hitT = microT;
+                hitBary = microBary;
+                hitGeoNormal = microNormal;
+                found = true;
+            }
+        }
+    }
+
+    // Triangle 2: b10, b11, b01
+    float w11 = 1.0 - b11.x - b11.y;
+    if (w11 >= -BARY_EPS)
+    {
+        float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
+        if (area2 > 1e-6)
+        {
+            if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
+                                       rayTMin, min(rayTMax, bestT),
+                                       microT, microBary, microNormal))
+            {
+                if (microT < bestT)
+                {
+                    bestT = microT;
+                    hitT = microT;
+                    hitBary = microBary;
+                    hitGeoNormal = microNormal;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    return found;
+}
+
+// Compute perpendicular offset direction (gradient direction in texel space)
+// This is the direction where displacement might shift the actual hit away from ψ=0
+int2 computePerpTexelOffset(PsiQuadric psiQ, Tri tri, float2 texelCenterBary)
+{
+    float2 grad = psiGradient(psiQ, texelCenterBary);
+    if (length(grad) < 1e-6)
+        return int2(0, 0);
+
+    // Convert barycentric gradient to UV space gradient
+    // grad_uv = J^T * grad_bary where J is the Jacobian dBary/dUV
+    float2 gradUV = float2(
+        grad.x * tri.dTdu.x + grad.y * tri.dTdv.x,
+        grad.x * tri.dTdu.y + grad.y * tri.dTdv.y
+    );
+
+    // Discretize to texel offset
+    if (abs(gradUV.x) >= abs(gradUV.y))
+        return int2(gradUV.x > 0 ? 1 : -1, 0);
+    else
+        return int2(0, gradUV.y > 0 ? 1 : -1);
+}
+
+//=============================================================================
 // Ray-AABB Intersection
 //=============================================================================
 bool rayAABBIntersect(float3 rayO, float3 rayD, float3 aabbMin, float3 aabbMax,
@@ -1373,6 +1487,7 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
         bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
         bool valid11 = b11.x >= -BARY_EPS && b11.y >= -BARY_EPS && b11.x + b11.y <= 1.0 + BARY_EPS;
 
+        // V34: Test current texel only (reverted V33 perpendicular testing - it was slow and didn't help)
         if (valid00 || valid10 || valid01 || valid11)
         {
             b00 = clampBary(b00);
@@ -1427,12 +1542,12 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             }
         }
 
-        // Compute ψ at valid corners using quadric for efficiency
-        // Use NaN-safe values for invalid corners to avoid false crossings
-        float psi00 = valid00 ? evalPsiQuadric(psiQ, b00_orig) : 1e30;
-        float psi10 = valid10 ? evalPsiQuadric(psiQ, b10_orig) : 1e30;
-        float psi01 = valid01 ? evalPsiQuadric(psiQ, b01_orig) : 1e30;
-        float psi11 = valid11 ? evalPsiQuadric(psiQ, b11_orig) : 1e30;
+        // V34: Use DIRECT psi function instead of quadric to verify accuracy
+        // The quadric is a polynomial approximation that may have numerical issues
+        float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 1e30;
+        float psi10 = valid10 ? psi(tri, b10_orig, rayO, rayD) : 1e30;
+        float psi01 = valid01 ? psi(tri, b01_orig, rayO, rayD) : 1e30;
+        float psi11 = valid11 ? psi(tri, b11_orig, rayO, rayD) : 1e30;
 
         int validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
 

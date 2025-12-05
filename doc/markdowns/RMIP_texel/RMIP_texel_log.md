@@ -5719,8 +5719,97 @@ All changes in `shaders/displacement_intersection.slang`:
 
 ---
 
+## Version 33: Perpendicular Texel Testing (Dec 5, 2025)
+
+### Problem Analysis from V32 Screenshots
+
+After V32 (turning point detection), stripping persisted with these characteristics:
+- Concentric ring patterns around displacement peaks
+- Stripes follow ψ iso-contours
+- View-angle dependent severity
+
+**Root Cause Identified**: ψ=0 represents where the ray projects onto the **BASE** surface, but the actual intersection happens on the **DISPLACED** surface. Displacement shifts the hit location **perpendicular** to the ψ=0 curve.
+
+### Fix: Test Perpendicular Neighbors
+
+When marching along ψ=0 (on base surface), also test texels in the perpendicular direction (ψ gradient direction) because that's where displacement shifts the actual hit.
+
+### Implementation Details
+
+1. **New helper function `testSingleTexel()`** (lines 849-929):
+   - Tests one texel for ray intersection
+   - Updates best hit if closer intersection found
+   - Refactored from inline code in loop
+
+2. **New function `computePerpTexelOffset()`** (lines 931-951):
+   - Computes ψ gradient in UV space
+   - Discretizes to texel offset (±1 in dominant direction)
+   - Returns int2 offset perpendicular to curve
+
+3. **Modified `texelMarchWithPsi()` loop** (lines 1485-1545):
+   - For each texel visited:
+     1. Test current texel (where ψ=0 passes on base surface)
+     2. Compute perpendicular direction from ψ gradient
+     3. Test texel at `currentTexel + perpOffset`
+     4. Test texel at `currentTexel - perpOffset`
+
+### Key Insight
+
+The ψ function (Paper Eq. 3) is:
+```
+ψ(u,v) = (P(u,v) - O) · (N × D)
+```
+
+This represents the **signed distance** from the ray to the base surface point. When displacement `h(u,v)` is applied:
+- Surface becomes `S(u,v) = P(u,v) + h(u,v) * N(u,v)`
+- Actual intersection is where ray hits S, not where ψ=0 on P
+- The offset is perpendicular to the ψ=0 curve (i.e., along ψ gradient)
+
+### Code Changes
+
+```slang
+// V33: Test current texel AND perpendicular neighbors
+float2 perpUV = (float2(currentTexel) + 0.5) / float2(texSize);
+float2 perpBary;
+if (texToBary(tri, perpUV, perpBary))
+{
+    int2 perpOffset = computePerpTexelOffset(psiQ, tri, perpBary);
+
+    // Test perpendicular neighbor in + direction
+    if (perpOffset.x != 0 || perpOffset.y != 0)
+    {
+        int2 perpTexel1 = currentTexel + perpOffset;
+        // ... test perpTexel1 ...
+
+        int2 perpTexel2 = currentTexel - perpOffset;
+        // ... test perpTexel2 ...
+    }
+}
+```
+
+### Build Status
+
+✅ **Compiled successfully**
+
+### Expected Impact
+
+- Tests 3 texels per ψ-marching step instead of 1 (current + 2 perpendicular)
+- Should catch displaced hits that are shifted off the ψ=0 curve
+- May increase hit rate at expense of more texel tests
+- Still more efficient than brute force (tests band around curve, not all texels)
+
+### Testing
+
+PENDING - Need to verify:
+1. Does perpendicular testing reduce stripping?
+2. What is the performance impact of 3x texel tests?
+3. Are there still edge cases (large displacements, grazing angles)?
+
+---
+
 *Last Updated: December 5, 2025*
 *V27 restored as base, tuned with MARCHING_SCALE and MAX_TRAVERSAL_ITERS analysis*
 *V31 insight confirmed: ψ limitation is fundamental, brute force is the robust solution*
 *Paper comparison added: Key missing features are RMIP bounds and turning point detection*
 *V32: Implemented turning point detection per Paper Section 4.2*
+*V33: Implemented perpendicular texel testing to account for displacement offset*
