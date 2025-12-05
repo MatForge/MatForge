@@ -1,25 +1,14 @@
 /*
- * RMIP V27 - Correct Entry Detection Per Paper (inverse_displacement of ray-box hits)
+ * RMIP Displacement Intersection Shader (Cleaned V28)
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
- * Reference: "Tessellation-Free Displacement Mapping for Ray Tracing" (Thonat et al. 2021)
- *
- * V27 Changes (fixes V26's 4 bugs):
- * 1. Fix #1: Consistent texelMax calculation between entry detection and marching
- * 2. Fix #2: Handle invalid barycentric coords (corners outside triangle) properly
- * 3. Fix #3: Implement bound refinement (Paper Algorithm 1 line 15)
- * 4. Fix #4: Use inverse_displacement of ray entry/exit for entry detection
- *            (Paper Section 4.1), NOT ψ=0 boundary crossing like V26
- *
- * V26's mistake: Tried to find entry where ψ=0 crosses UV boundary.
- * Paper's approach: Use inverse_displacement to project 3D ray-box entry to UV.
- *
- * Modes (GUI Toggle):
- *    - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
- *    - pushConst.usePsiMarching = 1: ψ-guided marching (V27)
  *
  * Key Equations from Paper:
  * - Eq 2: (P(u,v) - Q) × N(u,v) = 0 (displacement inversion)
  * - Eq 3: ψ(u,v) = det(P-O, N, D) = (P-O)·(N×D) = 0 (implicit ray projection)
+ *
+ * Modes (GUI Toggle):
+ *    - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
+ *    - pushConst.usePsiMarching = 1: ψ-guided marching (experimental)
  */
 
 #include "shaderio.h"
@@ -28,46 +17,36 @@
 #include "nvshaders/constants.h.slang"
 #include "rmip_common.h.slang"
 
+//=============================================================================
+// Constants
+//=============================================================================
 static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
-
-// V24: Significantly increased iteration limits
-// At diagonal viewing angles, the ray passes through more UV regions
-// requiring more iterations to fully cover the ray's footprint
-static const int MAX_TRAVERSAL_ITERS = 1024;  // Was 512
-static const float MARCHING_SCALE = 2.0; // Was 8.0
-static const int MAX_STACK_SIZE = 32;  
-
-// V24: Increased triangle boundary tolerance
-// This helps with diagonal edge cases where u+v≈1
-static const float BARY_EPS = 0.05;  // Was 0.01 in many places
-
-// V26: Threshold for detecting ψ degeneracy at texel corners
-// When all ψ values are below this, sign detection becomes unreliable
+static const int MAX_TRAVERSAL_ITERS = 1024;
+static const float MARCHING_SCALE = 2.0;
+static const int MAX_STACK_SIZE = 32;
+static const float BARY_EPS = 0.05;
 static const float PSI_NEAR_ZERO_THRESHOLD = 0.01;
 
-// Displacement textures
+//=============================================================================
+// Texture Bindings
+//=============================================================================
 [[vk::binding(9, 1)]] Texture2D<float> displacementMaps[8];
 [[vk::binding(11, 1)]] SamplerState displacementSampler;
-
-// RMIP textures
 [[vk::binding(8, 1)]] Texture2DArray<float2> rmipMaps[8];
 [[vk::binding(10, 1)]] SamplerState rmipSampler;
-
-// Per-material displacement factors from glTF's KHR_materials_displacement.displacementGeometryFactor
 [[vk::binding(12, 1)]] StructuredBuffer<float> displacementFactors;
 
 [[vk::push_constant]] ConstantBuffer<PathtracePushConstant> pushConst;
 
-// Helper to get displacement scale for a material
+//=============================================================================
+// Helper Functions
+//=============================================================================
 float getDisplacementScale(uint matIdx)
 {
     return displacementFactors[matIdx];
 }
 
-//=============================================================================
-// Helper: Pack UV and Normal for hit attributes
-//=============================================================================
 uint packUV(float2 uv)
 {
     uint x = uint(saturate(uv.x) * 65535.0);
@@ -100,7 +79,7 @@ struct DisplacementHitAttributes
 };
 
 //=============================================================================
-// Triangle data structure
+// Triangle Data Structure
 //=============================================================================
 struct Tri
 {
@@ -174,40 +153,23 @@ float2 clampBary(float2 bary)
 
 //=============================================================================
 // Bounding Prism Structure (Paper Section 3, Fig 2c)
-//
-// A prism is formed by extruding the base triangle along displacement normals:
-// - 6 vertices total: 3 bottom + 3 top
-// - Bottom vertices: P_i + h_min * N_i
-// - Top vertices: P_i + h_max * N_i
-// - 5 faces: bottom cap, top cap, 3 side quads
-//
-// Key property: ALL points inside the prism have valid inverse displacement!
-// This is why using prism instead of AABB prevents tearing.
 //=============================================================================
 struct Prism
 {
-    // Bottom triangle (displaced by h_min)
-    float3 b0, b1, b2;
-    // Top triangle (displaced by h_max)
-    float3 t0, t1, t2;
+    float3 b0, b1, b2;  // Bottom triangle (displaced by h_min)
+    float3 t0, t1, t2;  // Top triangle (displaced by h_max)
 };
 
-// Construct prism from base triangle and displacement bounds
 Prism makePrism(Tri tri, float hMin, float hMax)
 {
     Prism prism;
-
-    // Normalized displacement directions at each vertex
     float3 n0 = normalize(tri.n0);
     float3 n1 = normalize(tri.n1);
     float3 n2 = normalize(tri.n2);
 
-    // Bottom vertices (minimum displacement)
     prism.b0 = tri.v0 + n0 * hMin;
     prism.b1 = tri.v1 + n1 * hMin;
     prism.b2 = tri.v2 + n2 * hMin;
-
-    // Top vertices (maximum displacement)
     prism.t0 = tri.v0 + n0 * hMax;
     prism.t1 = tri.v1 + n1 * hMax;
     prism.t2 = tri.v2 + n2 * hMax;
@@ -261,49 +223,33 @@ bool rayTriangleIntersect(float3 v0, float3 v1, float3 v2,
 }
 
 //=============================================================================
-// Ray-Quad Intersection (split into two triangles)
+// Ray-Quad Intersection
 //=============================================================================
 bool rayQuadIntersect(float3 q0, float3 q1, float3 q2, float3 q3,
-                      float3 rayO, float3 rayD,
-                      out float t)
+                      float3 rayO, float3 rayD, out float t)
 {
     float2 bary;
-
-    // Try first triangle: q0, q1, q2
     if (rayTriangleIntersect(q0, q1, q2, rayO, rayD, t, bary))
         return true;
-
-    // Try second triangle: q0, q2, q3
     if (rayTriangleIntersect(q0, q2, q3, rayO, rayD, t, bary))
         return true;
-
     t = 0;
     return false;
 }
 
 //=============================================================================
 // Ray-Prism Intersection (Paper Algorithm 1, line 2)
-//
-// A prism has 5 faces:
-// 1. Bottom triangular cap (b0, b1, b2)
-// 2. Top triangular cap (t0, t1, t2)
-// 3. Side quad 0: (b0, b1, t1, t0)
-// 4. Side quad 1: (b1, b2, t2, t1)
-// 5. Side quad 2: (b2, b0, t0, t2)
-//
-// Returns entry and exit t values for the ray through the prism.
 //=============================================================================
 bool rayPrismIntersect(Prism prism, float3 rayO, float3 rayD,
                        out float tEntry, out float tExit)
 {
     tEntry = 1e30;
     tExit = -1e30;
-
     float t;
     float2 bary;
     int hitCount = 0;
 
-    // 1. Bottom triangular cap
+    // Bottom cap
     if (rayTriangleIntersect(prism.b0, prism.b1, prism.b2, rayO, rayD, t, bary))
     {
         tEntry = min(tEntry, t);
@@ -311,7 +257,7 @@ bool rayPrismIntersect(Prism prism, float3 rayO, float3 rayD,
         hitCount++;
     }
 
-    // 2. Top triangular cap
+    // Top cap
     if (rayTriangleIntersect(prism.t0, prism.t1, prism.t2, rayO, rayD, t, bary))
     {
         tEntry = min(tEntry, t);
@@ -319,23 +265,19 @@ bool rayPrismIntersect(Prism prism, float3 rayO, float3 rayD,
         hitCount++;
     }
 
-    // 3. Side quad 0: vertices (b0, b1, t1, t0) - edge 0-1
+    // Side quads
     if (rayQuadIntersect(prism.b0, prism.b1, prism.t1, prism.t0, rayO, rayD, t))
     {
         tEntry = min(tEntry, t);
         tExit = max(tExit, t);
         hitCount++;
     }
-
-    // 4. Side quad 1: vertices (b1, b2, t2, t1) - edge 1-2
     if (rayQuadIntersect(prism.b1, prism.b2, prism.t2, prism.t1, rayO, rayD, t))
     {
         tEntry = min(tEntry, t);
         tExit = max(tExit, t);
         hitCount++;
     }
-
-    // 5. Side quad 2: vertices (b2, b0, t0, t2) - edge 2-0
     if (rayQuadIntersect(prism.b2, prism.b0, prism.t0, prism.t2, rayO, rayD, t))
     {
         tEntry = min(tEntry, t);
@@ -343,15 +285,10 @@ bool rayPrismIntersect(Prism prism, float3 rayO, float3 rayD,
         hitCount++;
     }
 
-    // Need at least entry and exit (2 hits for convex shape)
-    // But ray may originate inside prism (1 hit) or graze edge (0-1 hits)
     if (hitCount >= 1)
     {
-        // If only one hit, ray might start inside
         if (hitCount == 1)
         {
-            // Check if ray origin is inside prism
-            // For simplicity, assume ray starts outside and hits exit
             if (tEntry > 0)
             {
                 tExit = tEntry;
@@ -360,16 +297,12 @@ bool rayPrismIntersect(Prism prism, float3 rayO, float3 rayD,
         }
         return tEntry <= tExit && tExit > 0;
     }
-
     return false;
 }
 
 //=============================================================================
-// Inverse Displacement Mapping (Eq. 2 from paper)
-// Find (u,v) such that displacement line at (u,v) passes through point Q
+// Inverse Displacement Mapping (Paper Eq. 2)
 // Solves: (P(u,v) - Q) × N(u,v) = 0
-//
-// Key insight: This is guaranteed to converge for points inside the prism!
 //=============================================================================
 bool inverseDisplacement(Tri tri, float3 Q, out float2 bary)
 {
@@ -397,13 +330,12 @@ bool inverseDisplacement(Tri tri, float3 Q, out float2 bary)
         (d00 * d21 - d01 * d20) / denom
     );
 
-    // Newton iteration to refine
+    // Newton iteration
     for (int iter = 0; iter < MAX_NEWTON_ITERS; iter++)
     {
         float3 P = getP(tri, bary);
         float3 N = getN(tri, bary);
         float3 PmQ = P - Q;
-
         float3 F = cross(PmQ, N);
 
         if (length(F) < NEWTON_EPS)
@@ -443,7 +375,8 @@ bool inverseDisplacement(Tri tri, float3 Q, out float2 bary)
 }
 
 //=============================================================================
-// Implicit ray projection (Eq. 3): ψ(u,v) = det(P - O, N, D)
+// Implicit Ray Projection ψ (Paper Eq. 3)
+// ψ(u,v) = det(P - O, N, D) = (P - O) · (N × D)
 //=============================================================================
 float psi(Tri tri, float2 bary, float3 rayO, float3 rayD)
 {
@@ -453,223 +386,41 @@ float psi(Tri tri, float2 bary, float3 rayO, float3 rayD)
     return dot(P - rayO, NxD);
 }
 
-// Partial derivatives of psi (Eq. 4)
-float2 psiGrad(Tri tri, float2 bary, float3 rayO, float3 rayD)
-{
-    float3 P = getP(tri, bary);
-    float3 N = getN(tri, bary);
-    float3 NxD = cross(N, rayD);
-    float3 PmO = P - rayO;
-
-    float3 NuxD = cross(tri.dNdu, rayD);
-    float3 NvxD = cross(tri.dNdv, rayD);
-
-    float psi_u = dot(tri.dPdu, NxD) + dot(PmO, NuxD);
-    float psi_v = dot(tri.dPdv, NxD) + dot(PmO, NvxD);
-
-    return float2(psi_u, psi_v);
-}
-
 //=============================================================================
-// V18: Compute ray direction projected into texture (UV) space
-//
-// The ray has direction D in 3D world space. We want to know which direction
-// it's traveling in UV space - this determines how we march through texels.
-//
-// Method: Project D onto the triangle's tangent plane and express in UV coords.
-// - D_proj = D - (D·N)*N (project D onto tangent plane)
-// - Solve: D_proj ≈ rayDirUV.x * dPdu + rayDirUV.y * dPdv
-// - Use Gram matrix: G = [dPdu·dPdu  dPdu·dPdv; dPdv·dPdu  dPdv·dPdv]
-// - rayDirUV = G^(-1) * [D_proj·dPdu, D_proj·dPdv]
+// Compute Ray Direction in UV Space
 //=============================================================================
 float2 computeRayDirUV(Tri tri, float3 rayD)
 {
-    // Triangle normal (average of vertex normals or from edge cross product)
     float3 edge1 = tri.v1 - tri.v0;
     float3 edge2 = tri.v2 - tri.v0;
     float3 N = normalize(cross(edge1, edge2));
-
-    // Project ray direction onto tangent plane
     float3 D_proj = rayD - dot(rayD, N) * N;
 
-    // Gram matrix components
     float g00 = dot(tri.dPdu, tri.dPdu);
     float g01 = dot(tri.dPdu, tri.dPdv);
     float g11 = dot(tri.dPdv, tri.dPdv);
-
-    // Right-hand side
     float b0 = dot(D_proj, tri.dPdu);
     float b1 = dot(D_proj, tri.dPdv);
 
-    // Solve 2x2 system: G * rayDirUV = b
     float det = g00 * g11 - g01 * g01;
     if (abs(det) < 1e-10)
-    {
-        // Degenerate case: use a simple approximation
         return float2(b0, b1);
-    }
 
-    float2 rayDirUV;
-    rayDirUV.x = (g11 * b0 - g01 * b1) / det;
-    rayDirUV.y = (g00 * b1 - g01 * b0) / det;
-
-    return rayDirUV;
+    return float2(
+        (g11 * b0 - g01 * b1) / det,
+        (g00 * b1 - g01 * b0) / det
+    );
 }
 
 //=============================================================================
-// V12: Edge direction constants for ψ-guided texel marching (Section 4.4)
+// Texel Edge Constants (Paper Section 4.4)
 //=============================================================================
 static const int EDGE_NONE   = -1;
-static const int EDGE_LEFT   = 0;   // u decreases (texel to the left)
-static const int EDGE_RIGHT  = 1;   // u increases (texel to the right)
-static const int EDGE_BOTTOM = 2;   // v decreases (texel below)
-static const int EDGE_TOP    = 3;   // v increases (texel above)
+static const int EDGE_LEFT   = 0;
+static const int EDGE_RIGHT  = 1;
+static const int EDGE_BOTTOM = 2;
+static const int EDGE_TOP    = 3;
 
-//=============================================================================
-// V20: Find exit edge - SIMPLE case for 2 crossings (Section 4.4)
-//
-// Paper Section 4.4: "The sign of the implicit form ψ (3) at each texel corner
-// indicates from which edge the ray leaves the texel"
-//
-// Texel corners:
-//   (0,1)-----(1,1)
-//     |         |
-//     |  texel  |
-//     |         |
-//   (0,0)-----(1,0)
-//
-// If ψ changes sign across an edge, the ray curve ψ=0 crosses that edge.
-// The exit edge is where the ray LEAVES (not enters) the texel.
-//
-// V20 KEY INSIGHT: When numCrossings == 2 and we know the entry edge,
-// the exit is simply the OTHER crossing edge - NO DIRECTION NEEDED!
-// Direction is only used for first texel or when curve makes 3+ crossings.
-//=============================================================================
-int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEdge, float2 curveDir)
-{
-    // Check which edges have sign changes
-    bool crossLeft   = (psi00 * psi01 < 0.0);  // Left edge: between (0,0) and (0,1)
-    bool crossRight  = (psi10 * psi11 < 0.0);  // Right edge: between (1,0) and (1,1)
-    bool crossBottom = (psi00 * psi10 < 0.0);  // Bottom edge: between (0,0) and (1,0)
-    bool crossTop    = (psi01 * psi11 < 0.0);  // Top edge: between (0,1) and (1,1)
-
-    // Count crossings
-    int numCrossings = (crossLeft ? 1 : 0) + (crossRight ? 1 : 0) +
-                       (crossBottom ? 1 : 0) + (crossTop ? 1 : 0);
-
-    if (numCrossings == 0)
-    {
-        return EDGE_NONE;
-    }
-
-    if (numCrossings == 1)
-    {
-        // Only one edge - must be the exit
-        if (crossLeft)   return EDGE_LEFT;
-        if (crossRight)  return EDGE_RIGHT;
-        if (crossBottom) return EDGE_BOTTOM;
-        if (crossTop)    return EDGE_TOP;
-    }
-
-    // V20 FIX: When numCrossings == 2 and we know the entry, exit is the OTHER crossing
-    // This is the COMMON CASE and requires NO direction logic!
-    if (numCrossings == 2 && entryEdge != EDGE_NONE)
-    {
-        // Simple: return the crossing edge that's not the entry
-        if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-        if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-        if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-        if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-    }
-
-    // Only use direction for: first texel (entryEdge == EDGE_NONE) or 3+ crossings
-    // Use curveDir to pick the best exit
-
-    if (abs(curveDir.x) > abs(curveDir.y))
-    {
-        // Curve moves primarily horizontally in UV space
-        if (curveDir.x > 0)
-        {
-            // Moving right (+u): prefer RIGHT > TOP/BOTTOM > LEFT
-            if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-            if (curveDir.y > 0)
-            {
-                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-            }
-            else
-            {
-                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-            }
-            if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-        }
-        else
-        {
-            // Moving left (-u): prefer LEFT > TOP/BOTTOM > RIGHT
-            if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-            if (curveDir.y > 0)
-            {
-                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-            }
-            else
-            {
-                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-            }
-            if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-        }
-    }
-    else
-    {
-        // Curve moves primarily vertically in UV space
-        if (curveDir.y > 0)
-        {
-            // Moving up (+v): prefer TOP > LEFT/RIGHT > BOTTOM
-            if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-            if (curveDir.x > 0)
-            {
-                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-            }
-            else
-            {
-                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-            }
-            if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-        }
-        else
-        {
-            // Moving down (-v): prefer BOTTOM > LEFT/RIGHT > TOP
-            if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
-            if (curveDir.x > 0)
-            {
-                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-            }
-            else
-            {
-                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
-                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
-            }
-            if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
-        }
-    }
-
-    // Fallback: return any crossing edge (shouldn't reach here normally)
-    if (crossRight)  return EDGE_RIGHT;
-    if (crossTop)    return EDGE_TOP;
-    if (crossLeft)   return EDGE_LEFT;
-    if (crossBottom) return EDGE_BOTTOM;
-
-    return EDGE_NONE;
-}
-
-//=============================================================================
-// V12: Get the opposite edge (for determining entry edge when moving to adjacent texel)
-//=============================================================================
 int getOppositeEdge(int edge)
 {
     switch (edge)
@@ -683,338 +434,116 @@ int getOppositeEdge(int edge)
 }
 
 //=============================================================================
-// V26: Find where ψ=0 curve enters the UV region (Paper Section 4.4)
-//
-// The ψ=0 curve is where the ray projects onto the UV plane.
-// To find the correct entry texel, we must find where this curve crosses
-// the UV region boundary.
-//
-// Method:
-// 1. Evaluate ψ at the 4 corners of the UV region
-// 2. For each edge, if ψ changes sign, the curve crosses that edge
-// 3. Use ray direction in UV space to determine which crossing is ENTRY
-//    (the one the ray crosses first, based on rayDirUV)
-// 4. Use linear interpolation to find the exact crossing point
-//
-// Returns: true if entry found, with entryTexel and entryEdge set
+// Find Exit Edge using ψ signs (Paper Section 4.4)
 //=============================================================================
-bool findPsiZeroEntry(Tri tri, float3 rayO, float3 rayD,
-                      float2 uvMin, float2 uvMax, int2 texSize, float2 rayDirUV,
-                      out int2 entryTexel, out int entryEdge)
+int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEdge, float2 curveDir)
 {
-    entryTexel = int2(0, 0);
-    entryEdge = EDGE_NONE;
-
-    // Evaluate ψ at UV region corners
-    // Corner layout:
-    //   (uvMin.x, uvMax.y) = top-left (01)     (uvMax.x, uvMax.y) = top-right (11)
-    //   (uvMin.x, uvMin.y) = bottom-left (00)  (uvMax.x, uvMin.y) = bottom-right (10)
-    float2 b00, b10, b01, b11;
-    texToBary(tri, uvMin, b00);                           // bottom-left
-    texToBary(tri, float2(uvMax.x, uvMin.y), b10);        // bottom-right
-    texToBary(tri, float2(uvMin.x, uvMax.y), b01);        // top-left
-    texToBary(tri, uvMax, b11);                           // top-right
-
-    float psi00 = psi(tri, b00, rayO, rayD);
-    float psi10 = psi(tri, b10, rayO, rayD);
-    float psi01 = psi(tri, b01, rayO, rayD);
-    float psi11 = psi(tri, b11, rayO, rayD);
-
-    // Find which edges have ψ sign changes (curve crossings)
-    bool crossLeft   = (psi00 * psi01 < 0.0);  // Left edge: x = uvMin.x
-    bool crossRight  = (psi10 * psi11 < 0.0);  // Right edge: x = uvMax.x
-    bool crossBottom = (psi00 * psi10 < 0.0);  // Bottom edge: y = uvMin.y
-    bool crossTop    = (psi01 * psi11 < 0.0);  // Top edge: y = uvMax.y
+    bool crossLeft   = (psi00 * psi01 < 0.0);
+    bool crossRight  = (psi10 * psi11 < 0.0);
+    bool crossBottom = (psi00 * psi10 < 0.0);
+    bool crossTop    = (psi01 * psi11 < 0.0);
 
     int numCrossings = (crossLeft ? 1 : 0) + (crossRight ? 1 : 0) +
                        (crossBottom ? 1 : 0) + (crossTop ? 1 : 0);
 
     if (numCrossings == 0)
+        return EDGE_NONE;
+
+    if (numCrossings == 1)
     {
-        // ψ=0 curve doesn't cross this region - shouldn't happen if RMIP is correct
-        // Fall back to corner based on ray direction
-        if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
-        {
-            entryTexel = int2(floor(uvMin * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_LEFT : EDGE_BOTTOM;
-        }
-        else if (rayDirUV.x >= 0 && rayDirUV.y < 0)
-        {
-            entryTexel = int2(floor(float2(uvMin.x, uvMax.y - 0.001) * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_LEFT : EDGE_TOP;
-        }
-        else if (rayDirUV.x < 0 && rayDirUV.y >= 0)
-        {
-            entryTexel = int2(floor(float2(uvMax.x - 0.001, uvMin.y) * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_RIGHT : EDGE_BOTTOM;
-        }
-        else
-        {
-            entryTexel = int2(floor((uvMax - 0.001) * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_RIGHT : EDGE_TOP;
-        }
-        return false;  // Indicate fallback was used
+        if (crossLeft)   return EDGE_LEFT;
+        if (crossRight)  return EDGE_RIGHT;
+        if (crossBottom) return EDGE_BOTTOM;
+        if (crossTop)    return EDGE_TOP;
     }
 
-    // Determine which crossing is the ENTRY based on ray direction in UV space
-    // Entry edge is the one the ray crosses FIRST when traveling along rayDirUV
-    //
-    // If rayDirUV.x > 0: ray moves right, so LEFT edge is potential entry
-    // If rayDirUV.x < 0: ray moves left, so RIGHT edge is potential entry
-    // If rayDirUV.y > 0: ray moves up, so BOTTOM edge is potential entry
-    // If rayDirUV.y < 0: ray moves down, so TOP edge is potential entry
-
-    float2 entryUV = float2(0, 0);
-    bool foundEntry = false;
-
-    // Priority based on dominant direction
-    if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+    // When numCrossings == 2 and we know entry, exit is the OTHER crossing
+    if (numCrossings == 2 && entryEdge != EDGE_NONE)
     {
-        // Primarily horizontal movement
-        if (rayDirUV.x >= 0)
+        if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+        if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+        if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+        if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+    }
+
+    // Use curveDir for first texel or 3+ crossings
+    if (abs(curveDir.x) > abs(curveDir.y))
+    {
+        if (curveDir.x > 0)
         {
-            // Moving right: prefer LEFT, then BOTTOM/TOP
-            if (crossLeft)
+            if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+            if (curveDir.y > 0)
             {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
             }
-            else if (rayDirUV.y >= 0 && crossBottom)
+            else
             {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
             }
-            else if (rayDirUV.y < 0 && crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-            else if (crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
+            if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
         }
         else
         {
-            // Moving left: prefer RIGHT, then BOTTOM/TOP
-            if (crossRight)
+            if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+            if (curveDir.y > 0)
             {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
             }
-            else if (rayDirUV.y >= 0 && crossBottom)
+            else
             {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
+                if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+                if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
             }
-            else if (rayDirUV.y < 0 && crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-            else if (crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
+            if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
         }
     }
     else
     {
-        // Primarily vertical movement
-        if (rayDirUV.y >= 0)
+        if (curveDir.y > 0)
         {
-            // Moving up: prefer BOTTOM, then LEFT/RIGHT
-            if (crossBottom)
+            if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
+            if (curveDir.x > 0)
             {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
             }
-            else if (rayDirUV.x >= 0 && crossLeft)
+            else
             {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
             }
-            else if (rayDirUV.x < 0 && crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-            else if (crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
+            if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
         }
         else
         {
-            // Moving down: prefer TOP, then LEFT/RIGHT
-            if (crossTop)
+            if (crossBottom && entryEdge != EDGE_BOTTOM) return EDGE_BOTTOM;
+            if (curveDir.x > 0)
             {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
             }
-            else if (rayDirUV.x >= 0 && crossLeft)
+            else
             {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
+                if (crossLeft && entryEdge != EDGE_LEFT) return EDGE_LEFT;
+                if (crossRight && entryEdge != EDGE_RIGHT) return EDGE_RIGHT;
             }
-            else if (rayDirUV.x < 0 && crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-            else if (crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
+            if (crossTop && entryEdge != EDGE_TOP) return EDGE_TOP;
         }
     }
 
-    if (foundEntry)
-    {
-        // Convert entry UV to texel coordinates
-        entryTexel = int2(floor(entryUV * float2(texSize)));
-        // Clamp to valid range within the region
-        int2 texelMin = int2(floor(uvMin * float2(texSize)));
-        int2 texelMax = int2(ceil(uvMax * float2(texSize))) - int2(1, 1);
-        entryTexel = clamp(entryTexel, texelMin, texelMax);
-        return true;
-    }
-
-    return false;
+    // Fallback
+    if (crossRight)  return EDGE_RIGHT;
+    if (crossTop)    return EDGE_TOP;
+    if (crossLeft)   return EDGE_LEFT;
+    if (crossBottom) return EDGE_BOTTOM;
+    return EDGE_NONE;
 }
 
 //=============================================================================
-// Find turning points in a barycentric region
-//=============================================================================
-void findTurningPointsInRegion(Tri tri, float2 baryMin, float2 baryMax,
-                                float3 rayO, float3 rayD,
-                                out float2 turningPts[4], out int numTurning)
-{
-    numTurning = 0;
-
-    float2 grad00 = psiGrad(tri, float2(0, 0), rayO, rayD);
-    float2 grad10 = psiGrad(tri, float2(1, 0), rayO, rayD);
-    float2 grad01 = psiGrad(tri, float2(0, 1), rayO, rayD);
-
-    float a_u = grad00.x;
-    float b_u = grad10.x - grad00.x;
-    float c_u = grad01.x - grad00.x;
-
-    float a_v = grad00.y;
-    float b_v = grad10.y - grad00.y;
-    float c_v = grad01.y - grad00.y;
-
-    // ψ_u = 0 intersections with region
-    if (abs(c_u) > 1e-8)
-    {
-        float v = -(a_u + b_u * baryMin.x) / c_u;
-        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
-            turningPts[numTurning++] = float2(baryMin.x, v);
-
-        v = -(a_u + b_u * baryMax.x) / c_u;
-        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
-            turningPts[numTurning++] = float2(baryMax.x, v);
-    }
-    if (abs(b_u) > 1e-8)
-    {
-        float u = -(a_u + c_u * baryMin.y) / b_u;
-        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
-            turningPts[numTurning++] = float2(u, baryMin.y);
-
-        u = -(a_u + c_u * baryMax.y) / b_u;
-        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
-            turningPts[numTurning++] = float2(u, baryMax.y);
-    }
-
-    // ψ_v = 0 intersections
-    if (abs(c_v) > 1e-8)
-    {
-        float v = -(a_v + b_v * baryMin.x) / c_v;
-        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
-            turningPts[numTurning++] = float2(baryMin.x, v);
-
-        v = -(a_v + b_v * baryMax.x) / c_v;
-        if (v >= baryMin.y && v <= baryMax.y && numTurning < 4)
-            turningPts[numTurning++] = float2(baryMax.x, v);
-    }
-    if (abs(b_v) > 1e-8)
-    {
-        float u = -(a_v + c_v * baryMin.y) / b_v;
-        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
-            turningPts[numTurning++] = float2(u, baryMin.y);
-
-        u = -(a_v + c_v * baryMax.y) / b_v;
-        if (u >= baryMin.x && u <= baryMax.x && numTurning < 4)
-            turningPts[numTurning++] = float2(u, baryMax.y);
-    }
-}
-
-//=============================================================================
-// Sample displacement
+// Displacement Sampling and Bounds
 //=============================================================================
 float sampleDisplacement(uint matIdx, float2 texUV)
 {
@@ -1024,13 +553,14 @@ float sampleDisplacement(uint matIdx, float2 texUV)
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
 {
-    // Conservative global bounds using per-material displacement factor from glTF
+    // TODO: Use RMIP for tight rectangular bounds per paper
+    // Currently using conservative global bounds
     hMin = 0.0;
     hMax = getDisplacementScale(matIdx);
 }
 
 //=============================================================================
-// Ray-AABB intersection (for sub-regions in hierarchical traversal)
+// Ray-AABB Intersection
 //=============================================================================
 bool rayAABBIntersect(float3 rayO, float3 rayD, float3 aabbMin, float3 aabbMax,
                       out float tEntry, out float tExit)
@@ -1038,43 +568,26 @@ bool rayAABBIntersect(float3 rayO, float3 rayD, float3 aabbMin, float3 aabbMax,
     float3 invD = 1.0 / rayD;
     float3 t0 = (aabbMin - rayO) * invD;
     float3 t1 = (aabbMax - rayO) * invD;
-
     float3 tmin = min(t0, t1);
     float3 tmax = max(t0, t1);
-
     tEntry = max(max(tmin.x, tmin.y), tmin.z);
     tExit = min(min(tmax.x, tmax.y), tmax.z);
-
     return tEntry <= tExit && tExit > 0;
 }
 
 //=============================================================================
-// AFFINE ARITHMETIC STRUCTURES AND OPERATIONS
-// Reference: Appendix A of "Tessellation-Free Displacement Mapping" (Thonat 2021)
-//
-// An affine form represents: x = x_c + x_u*ε_u + x_v*ε_v + x_K*ε_K
-// where ε_u, ε_v, ε_K ∈ [-1, 1] are symbolic variables
+// Affine Arithmetic for Tight 3D Bounds
 //=============================================================================
-
-// Affine form for a scalar value
 struct AffineScalar
 {
-    float c;    // Center value
-    float u;    // Coefficient for ε_u (u texture coordinate)
-    float v;    // Coefficient for ε_v (v texture coordinate)
-    float k;    // Accumulated error (always >= 0)
+    float c, u, v, k;
 };
 
-// Affine form for a 3D vector
 struct AffineVec3
 {
-    float3 c;   // Center value
-    float3 u;   // Coefficient for ε_u
-    float3 v;   // Coefficient for ε_v
-    float3 k;   // Accumulated error (per-component, always >= 0)
+    float3 c, u, v, k;
 };
 
-// Create affine scalar from interval [a, b]
 AffineScalar affineFromInterval(float a, float b)
 {
     AffineScalar af;
@@ -1083,54 +596,6 @@ AffineScalar affineFromInterval(float a, float b)
     af.v = 0;
     af.k = (b - a) * 0.5;
     return af;
-}
-
-// Create affine scalar constant
-AffineScalar affineConst(float val)
-{
-    AffineScalar af;
-    af.c = val;
-    af.u = 0;
-    af.v = 0;
-    af.k = 0;
-    return af;
-}
-
-// Create affine vec3 constant
-AffineVec3 affineVec3Const(float3 val)
-{
-    AffineVec3 af;
-    af.c = val;
-    af.u = float3(0);
-    af.v = float3(0);
-    af.k = float3(0);
-    return af;
-}
-
-// Get interval [min, max] from affine scalar (Equation 13)
-float2 affineToInterval(AffineScalar af)
-{
-    float radius = abs(af.u) + abs(af.v) + af.k;
-    return float2(af.c - radius, af.c + radius);
-}
-
-// Get AABB from affine vec3 (Equation 13)
-void affineToAABB(AffineVec3 af, out float3 aabbMin, out float3 aabbMax)
-{
-    float3 radius = abs(af.u) + abs(af.v) + af.k;
-    aabbMin = af.c - radius;
-    aabbMax = af.c + radius;
-}
-
-// Affine addition: [x] + [y]
-AffineScalar affineAdd(AffineScalar x, AffineScalar y)
-{
-    AffineScalar r;
-    r.c = x.c + y.c;
-    r.u = x.u + y.u;
-    r.v = x.v + y.v;
-    r.k = x.k + y.k;
-    return r;
 }
 
 AffineVec3 affineVec3Add(AffineVec3 x, AffineVec3 y)
@@ -1143,117 +608,44 @@ AffineVec3 affineVec3Add(AffineVec3 x, AffineVec3 y)
     return r;
 }
 
-// Affine scalar multiplication: a * [x] where a is constant
-AffineScalar affineScale(float a, AffineScalar x)
+float2 affineToInterval(AffineScalar af)
 {
-    AffineScalar r;
-    r.c = a * x.c;
-    r.u = a * x.u;
-    r.v = a * x.v;
-    r.k = abs(a) * x.k;
-    return r;
+    float radius = abs(af.u) + abs(af.v) + af.k;
+    return float2(af.c - radius, af.c + radius);
 }
 
-AffineVec3 affineVec3Scale(float a, AffineVec3 x)
+void affineToAABB(AffineVec3 af, out float3 aabbMin, out float3 aabbMax)
 {
-    AffineVec3 r;
-    r.c = a * x.c;
-    r.u = a * x.u;
-    r.v = a * x.v;
-    r.k = abs(a) * x.k;
-    return r;
+    float3 radius = abs(af.u) + abs(af.v) + af.k;
+    aabbMin = af.c - radius;
+    aabbMax = af.c + radius;
 }
 
-// Affine vec3 scaled by constant vec3: a * [x] component-wise
-AffineVec3 affineVec3ScaleVec(float3 a, AffineVec3 x)
-{
-    AffineVec3 r;
-    r.c = a * x.c;
-    r.u = a * x.u;
-    r.v = a * x.v;
-    r.k = abs(a) * x.k;
-    return r;
-}
-
-// Affine multiplication: [x] * [y] (scalar)
-// This introduces approximation error!
-AffineScalar affineMul(AffineScalar x, AffineScalar y)
-{
-    AffineScalar r;
-    // Center term
-    r.c = x.c * y.c;
-    // Linear terms
-    r.u = x.u * y.c + x.c * y.u;
-    r.v = x.v * y.c + x.c * y.v;
-    // Error term: includes cross-products of symbolic variables
-    float x_rad = abs(x.u) + abs(x.v) + x.k;
-    float y_rad = abs(y.u) + abs(y.v) + y.k;
-    r.k = abs(x.k * y.c) + abs(x.c * y.k) + x_rad * y_rad;
-    return r;
-}
-
-// Affine vec3 * scalar: [v] * [s]
-AffineVec3 affineVec3MulScalar(AffineVec3 v, AffineScalar s)
-{
-    AffineVec3 r;
-    // Center term
-    r.c = v.c * s.c;
-    // Linear terms
-    r.u = v.u * s.c + v.c * s.u;
-    r.v = v.v * s.c + v.c * s.v;
-    // Error term
-    float3 v_rad = abs(v.u) + abs(v.v) + v.k;
-    float s_rad = abs(s.u) + abs(s.v) + s.k;
-    r.k = abs(v.k) * abs(s.c) + abs(v.c) * s.k + v_rad * s_rad;
-    return r;
-}
-
-// Affine dot product: [x] · [y] (vec3)
 AffineScalar affineVec3Dot(AffineVec3 x, AffineVec3 y)
 {
     AffineScalar r;
-    // Center
     r.c = dot(x.c, y.c);
-    // Linear terms
     r.u = dot(x.u, y.c) + dot(x.c, y.u);
     r.v = dot(x.v, y.c) + dot(x.c, y.v);
-    // Error (conservative)
     float3 x_rad = abs(x.u) + abs(x.v) + x.k;
     float3 y_rad = abs(y.u) + abs(y.v) + y.k;
     r.k = dot(abs(x.k), abs(y.c)) + dot(abs(x.c), y.k) + dot(x_rad, y_rad);
     return r;
 }
 
-// Affine squared length: ||[x]||²
-AffineScalar affineVec3LengthSq(AffineVec3 x)
-{
-    return affineVec3Dot(x, x);
-}
-
-// Affine reciprocal square root: 1/sqrt([x])
-// Uses Chebyshev approximation (Equation 14-15)
 AffineScalar affineRsqrt(AffineScalar x)
 {
     float2 interval = affineToInterval(x);
-    float a = max(interval.x, 1e-6);  // Clamp to avoid division by zero
+    float a = max(interval.x, 1e-6);
     float b = max(interval.y, a + 1e-6);
-
-    // f(x) = 1/sqrt(x), compute on interval [a, b]
     float fa = 1.0 / sqrt(a);
     float fb = 1.0 / sqrt(b);
-
-    // Linear approximation: f(x) ≈ α*x + γ
-    // Using Chebyshev: α = (fb - fa) / (b - a), γ = (fa + fb) / 2 - α * (a + b) / 2
     float alpha = (fb - fa) / (b - a);
     float mid = (a + b) * 0.5;
     float fmid = 1.0 / sqrt(mid);
-    float gamma = fmid;  // Simplified: evaluate at midpoint
-
-    // Error bound: max deviation from linear approximation
-    // For 1/sqrt, the function is convex, max error at endpoints or midpoint
+    float gamma = fmid;
     float delta = max(abs(fa - (alpha * a + gamma)), abs(fb - (alpha * b + gamma)));
     delta = max(delta, abs(fmid - (alpha * mid + gamma)));
-    // Add extra safety margin for convexity
     delta += 0.1 * abs(fa - fb);
 
     AffineScalar r;
@@ -1264,32 +656,32 @@ AffineScalar affineRsqrt(AffineScalar x)
     return r;
 }
 
-// Affine normalize: [x] / ||[x]||
+AffineVec3 affineVec3MulScalar(AffineVec3 v, AffineScalar s)
+{
+    AffineVec3 r;
+    r.c = v.c * s.c;
+    r.u = v.u * s.c + v.c * s.u;
+    r.v = v.v * s.c + v.c * s.v;
+    float3 v_rad = abs(v.u) + abs(v.v) + v.k;
+    float s_rad = abs(s.u) + abs(s.v) + s.k;
+    r.k = abs(v.k) * abs(s.c) + abs(v.c) * s.k + v_rad * s_rad;
+    return r;
+}
+
 AffineVec3 affineVec3Normalize(AffineVec3 x)
 {
-    AffineScalar lenSq = affineVec3LengthSq(x);
+    AffineScalar lenSq = affineVec3Dot(x, x);
     AffineScalar invLen = affineRsqrt(lenSq);
     return affineVec3MulScalar(x, invLen);
 }
 
 //=============================================================================
-// Compute 3D AABB using Affine Arithmetic (V11)
-//
-// Given a UV region and displacement bounds, compute tight 3D AABB.
-// This replaces the grid sampling approach in V10.1.
-//
-// The displaced surface is: S(u,v) = P(u,v) + h(u,v) * N̂(u,v)
-// - P(u,v) is linear in (u,v) → exact affine form
-// - N(u,v) is linear in (u,v) → exact affine form
-// - h is an interval → affine form with error
-// - N̂ = N/||N|| is non-linear → approximation error
-// - S = P + h*N̂ involves multiplication → accumulated error
+// Compute 3D AABB using Affine Arithmetic
 //=============================================================================
 bool computeUVRegionAABB_Affine(Tri tri, float2 uvMin, float2 uvMax,
                                  float hMin, float hMax,
                                  out float3 aabbMin, out float3 aabbMax)
 {
-    // Convert UV to barycentric center and half-size
     float2 uvCenter = (uvMin + uvMax) * 0.5;
     float2 uvHalfSize = (uvMax - uvMin) * 0.5;
 
@@ -1301,9 +693,6 @@ bool computeUVRegionAABB_Affine(Tri tri, float2 uvMin, float2 uvMax,
         return false;
     }
 
-    // Check if barycentric center is reasonably inside triangle
-    // V24: This tolerance is for region CENTERS, so keep it larger (0.5)
-    // A region might have center outside triangle but still overlap valid area
     float w = 1.0 - baryCenter.x - baryCenter.y;
     if (baryCenter.x < -0.5 || baryCenter.y < -0.5 || w < -0.5)
     {
@@ -1312,8 +701,6 @@ bool computeUVRegionAABB_Affine(Tri tri, float2 uvMin, float2 uvMax,
         return false;
     }
 
-    // Compute barycentric derivatives with respect to UV
-    // bary = T_uv^{-1} * (uv - t0) where T_uv = [dTdu, dTdv]
     float det = tri.dTdu.x * tri.dTdv.y - tri.dTdu.y * tri.dTdv.x;
     if (abs(det) < 1e-10)
     {
@@ -1322,46 +709,29 @@ bool computeUVRegionAABB_Affine(Tri tri, float2 uvMin, float2 uvMax,
         return false;
     }
 
-    // Jacobian of barycentric w.r.t. UV: d(bary)/d(uv)
-    float2 dBaryDu = float2(tri.dTdv.y, -tri.dTdu.y) / det;  // ∂bary/∂u_tex
-    float2 dBaryDv = float2(-tri.dTdv.x, tri.dTdu.x) / det;  // ∂bary/∂v_tex
+    float2 dBaryDu = float2(tri.dTdv.y, -tri.dTdu.y) / det;
+    float2 dBaryDv = float2(-tri.dTdv.x, tri.dTdu.x) / det;
+    float2 baryU = dBaryDu * uvHalfSize.x;
+    float2 baryV = dBaryDv * uvHalfSize.y;
 
-    // Affine form for barycentric coordinates
-    // bary = baryCenter + dBaryDu * ε_u * uvHalfSize.x + dBaryDv * ε_v * uvHalfSize.y
-    float2 baryU = dBaryDu * uvHalfSize.x;  // Coefficient for ε_u
-    float2 baryV = dBaryDv * uvHalfSize.y;  // Coefficient for ε_v
-
-    // Create affine form for position P(u,v) = P0 + bary.x * dPdu + bary.y * dPdv
-    // This is LINEAR in barycentric, so exact affine form
     AffineVec3 P;
     P.c = tri.v0 + baryCenter.x * tri.dPdu + baryCenter.y * tri.dPdv;
     P.u = baryU.x * tri.dPdu + baryU.y * tri.dPdv;
     P.v = baryV.x * tri.dPdu + baryV.y * tri.dPdv;
-    P.k = float3(0);  // Linear, no error
+    P.k = float3(0);
 
-    // Create affine form for normal N(u,v) = N0 + bary.x * dNdu + bary.y * dNdv
-    // Also LINEAR in barycentric
     AffineVec3 N;
     N.c = tri.n0 + baryCenter.x * tri.dNdu + baryCenter.y * tri.dNdv;
     N.u = baryU.x * tri.dNdu + baryU.y * tri.dNdv;
     N.v = baryV.x * tri.dNdu + baryV.y * tri.dNdv;
-    N.k = float3(0);  // Linear, no error
+    N.k = float3(0);
 
-    // Normalize N to get N̂ (non-linear operation, introduces error)
     AffineVec3 Nhat = affineVec3Normalize(N);
-
-    // Create affine form for height h ∈ [hMin, hMax]
-    // Height is independent of u,v (comes from RMIP), so it's an interval
     AffineScalar h = affineFromInterval(hMin, hMax);
-
-    // Compute displaced surface: S = P + h * N̂
     AffineVec3 hNhat = affineVec3MulScalar(Nhat, h);
     AffineVec3 S = affineVec3Add(P, hNhat);
 
-    // Extract AABB from affine form (Equation 13)
     affineToAABB(S, aabbMin, aabbMax);
-
-    // Add small padding for numerical robustness
     float3 padding = (aabbMax - aabbMin) * 0.02 + float3(0.001);
     aabbMin -= padding;
     aabbMax += padding;
@@ -1370,157 +740,7 @@ bool computeUVRegionAABB_Affine(Tri tri, float2 uvMin, float2 uvMax,
 }
 
 //=============================================================================
-// Helper: Add a sample point to AABB if the barycentric is valid
-//=============================================================================
-bool addSampleToAABB(Tri tri, float2 bary, float hMin, float hMax,
-                     inout float3 aabbMin, inout float3 aabbMax)
-{
-    // V24: Use BARY_EPS for consistent tolerance
-    float w = 1.0 - bary.x - bary.y;
-    if (bary.x < -BARY_EPS || bary.y < -BARY_EPS || w < -BARY_EPS)
-        return false;
-
-    bary = max(float2(0), bary);
-    if (bary.x + bary.y > 1.0)
-    {
-        float s = bary.x + bary.y;
-        bary /= s;
-    }
-
-    float3 P = getP(tri, bary);
-    float3 N = normalize(getN(tri, bary));
-
-    float3 pMin = P + N * hMin;
-    float3 pMax = P + N * hMax;
-
-    aabbMin = min(aabbMin, min(pMin, pMax));
-    aabbMax = max(aabbMax, max(pMin, pMax));
-    return true;
-}
-
-//=============================================================================
-// Compute 3D AABB for a UV region (for sub-regions in hierarchical traversal)
-// V10.1: Use AABB for sub-regions, prism only for initial full-triangle
-//=============================================================================
-bool computeUVRegionAABB(Tri tri, float2 uvMin, float2 uvMax,
-                          float hMin, float hMax,
-                          out float3 aabbMin, out float3 aabbMax)
-{
-    aabbMin = float3(1e30, 1e30, 1e30);
-    aabbMax = float3(-1e30, -1e30, -1e30);
-
-    int validSamples = 0;
-
-    // Sample grid within UV region
-    const int samples = 8;
-    float2 uvStep = (uvMax - uvMin) / float(samples);
-
-    for (int i = 0; i <= samples; i++)
-    {
-        for (int j = 0; j <= samples; j++)
-        {
-            float2 uv = uvMin + float2(i, j) * uvStep;
-            float2 bary;
-            if (!texToBary(tri, uv, bary))
-                continue;
-
-            if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
-                validSamples++;
-        }
-    }
-
-    // Sample triangle vertices if they fall within UV region
-    float2 triUVs[3] = { tri.t0, tri.t1, tri.t2 };
-    float2 triBary[3] = { float2(0, 0), float2(1, 0), float2(0, 1) };
-
-    for (int k = 0; k < 3; k++)
-    {
-        if (all(triUVs[k] >= uvMin - 0.001) && all(triUVs[k] <= uvMax + 0.001))
-        {
-            if (addSampleToAABB(tri, triBary[k], hMin, hMax, aabbMin, aabbMax))
-                validSamples++;
-        }
-    }
-
-    // Sample triangle edge intersections with UV rectangle edges
-    float2 triEdgeStart[3] = { tri.t0, tri.t1, tri.t2 };
-    float2 triEdgeEnd[3] = { tri.t1, tri.t2, tri.t0 };
-    float2 edgeBaryStart[3] = { float2(0, 0), float2(1, 0), float2(0, 1) };
-    float2 edgeBaryEnd[3] = { float2(1, 0), float2(0, 1), float2(0, 0) };
-
-    for (int e = 0; e < 3; e++)
-    {
-        float2 e0 = triEdgeStart[e];
-        float2 e1 = triEdgeEnd[e];
-        float2 b0 = edgeBaryStart[e];
-        float2 b1 = edgeBaryEnd[e];
-
-        // Left edge
-        if ((e0.x - uvMin.x) * (e1.x - uvMin.x) <= 0 && e1.x != e0.x)
-        {
-            float t = (uvMin.x - e0.x) / (e1.x - e0.x);
-            float v = e0.y + t * (e1.y - e0.y);
-            if (v >= uvMin.y && v <= uvMax.y)
-            {
-                float2 bary = b0 + t * (b1 - b0);
-                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
-                    validSamples++;
-            }
-        }
-
-        // Right edge
-        if ((e0.x - uvMax.x) * (e1.x - uvMax.x) <= 0 && e1.x != e0.x)
-        {
-            float t = (uvMax.x - e0.x) / (e1.x - e0.x);
-            float v = e0.y + t * (e1.y - e0.y);
-            if (v >= uvMin.y && v <= uvMax.y)
-            {
-                float2 bary = b0 + t * (b1 - b0);
-                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
-                    validSamples++;
-            }
-        }
-
-        // Bottom edge
-        if ((e0.y - uvMin.y) * (e1.y - uvMin.y) <= 0 && e1.y != e0.y)
-        {
-            float t = (uvMin.y - e0.y) / (e1.y - e0.y);
-            float u = e0.x + t * (e1.x - e0.x);
-            if (u >= uvMin.x && u <= uvMax.x)
-            {
-                float2 bary = b0 + t * (b1 - b0);
-                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
-                    validSamples++;
-            }
-        }
-
-        // Top edge
-        if ((e0.y - uvMax.y) * (e1.y - uvMax.y) <= 0 && e1.y != e0.y)
-        {
-            float t = (uvMax.y - e0.y) / (e1.y - e0.y);
-            float u = e0.x + t * (e1.x - e0.x);
-            if (u >= uvMin.x && u <= uvMax.x)
-            {
-                float2 bary = b0 + t * (b1 - b0);
-                if (addSampleToAABB(tri, bary, hMin, hMax, aabbMin, aabbMax))
-                    validSamples++;
-            }
-        }
-    }
-
-    if (validSamples == 0)
-        return false;
-
-    // Add padding
-    float3 padding = (aabbMax - aabbMin) * 0.05 + float3(0.001, 0.001, 0.001);
-    aabbMin -= padding;
-    aabbMax += padding;
-
-    return true;
-}
-
-//=============================================================================
-// Intersect micro-triangle
+// Micro-Triangle Intersection
 //=============================================================================
 bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
                             uint matIdx, float3 rayO, float3 rayD,
@@ -1565,12 +785,9 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
             float3 e2 = p2 - p0;
             hitGeoNormal = normalize(cross(e1, e2));
 
-            // Align micro-triangle normal with base surface normal direction
-            // The base surface normal (from vertex normals) defines the "outward" direction
             float3 baseNormal = normalize(N0 * w + N1 * triB.x + N2 * triB.y);
-            if (dot(hitGeoNormal, baseNormal) < 0) {
+            if (dot(hitGeoNormal, baseNormal) < 0)
                 hitGeoNormal = -hitGeoNormal;
-            }
 
             return true;
         }
@@ -1579,7 +796,7 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
 }
 
 //=============================================================================
-// UV Bound structure
+// UV Bound Structure
 //=============================================================================
 struct UVBound
 {
@@ -1588,7 +805,7 @@ struct UVBound
 };
 
 //=============================================================================
-// Check UV region overlap with triangle
+// Check UV Region Overlap with Triangle
 //=============================================================================
 bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
 {
@@ -1598,7 +815,6 @@ bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
     texToBary(tri, float2(uvMin.x, uvMax.y), bary01);
     texToBary(tri, uvMax, bary11);
 
-    // V24: Use consistent larger tolerance (BARY_EPS) for all edges including diagonal
     bool in00 = bary00.x >= -BARY_EPS && bary00.y >= -BARY_EPS && bary00.x + bary00.y <= 1.0 + BARY_EPS;
     bool in10 = bary10.x >= -BARY_EPS && bary10.y >= -BARY_EPS && bary10.x + bary10.y <= 1.0 + BARY_EPS;
     bool in01 = bary01.x >= -BARY_EPS && bary01.y >= -BARY_EPS && bary01.x + bary01.y <= 1.0 + BARY_EPS;
@@ -1607,7 +823,6 @@ bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
     if (in00 || in10 || in01 || in11)
         return true;
 
-    // Check if triangle vertices are inside UV region
     bool triV0InUV = all(tri.t0 >= uvMin) && all(tri.t0 <= uvMax);
     bool triV1InUV = all(tri.t1 >= uvMin) && all(tri.t1 <= uvMax);
     bool triV2InUV = all(tri.t2 >= uvMin) && all(tri.t2 <= uvMax);
@@ -1615,7 +830,6 @@ bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
     if (triV0InUV || triV1InUV || triV2InUV)
         return true;
 
-    // Check edge intersections
     float2 triEdges[3][2] = {
         { tri.t0, tri.t1 },
         { tri.t1, tri.t2 },
@@ -1626,7 +840,6 @@ bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
     {
         float2 eMin = min(triEdges[i][0], triEdges[i][1]);
         float2 eMax = max(triEdges[i][0], triEdges[i][1]);
-
         if (eMax.x >= uvMin.x && eMin.x <= uvMax.x &&
             eMax.y >= uvMin.y && eMin.y <= uvMax.y)
             return true;
@@ -1636,134 +849,7 @@ bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
 }
 
 //=============================================================================
-// Compute 3D bounding prism for a UV region
-// This is the key change from V9: use PRISM instead of AABB!
-//=============================================================================
-bool computeUVRegionPrism(Tri tri, float2 uvMin, float2 uvMax,
-                           float hMin, float hMax,
-                           out Prism prism)
-{
-    // We need to find the bounding prism for the UV region
-    // The prism is defined by the displaced triangle corners
-
-    // For a sub-region of the triangle, we need to find the vertices
-    // that bound that region and create a prism from them
-
-    // Sample grid to find barycentric bounds
-    float2 baryMin = float2(1e30, 1e30);
-    float2 baryMax = float2(-1e30, -1e30);
-    int validSamples = 0;
-
-    const int samples = 4;
-    float2 uvStep = (uvMax - uvMin) / float(samples);
-
-    for (int i = 0; i <= samples; i++)
-    {
-        for (int j = 0; j <= samples; j++)
-        {
-            float2 uv = uvMin + float2(i, j) * uvStep;
-            float2 bary;
-            if (!texToBary(tri, uv, bary))
-                continue;
-
-            // Check if inside triangle
-            float w = 1.0 - bary.x - bary.y;
-            if (bary.x < -0.02 || bary.y < -0.02 || w < -0.02)
-                continue;
-
-            baryMin = min(baryMin, bary);
-            baryMax = max(baryMax, bary);
-            validSamples++;
-        }
-    }
-
-    // Also check triangle vertices
-    float2 triBary[3] = { float2(0, 0), float2(1, 0), float2(0, 1) };
-    for (int k = 0; k < 3; k++)
-    {
-        float2 uv = baryToTex(tri, triBary[k]);
-        if (all(uv >= uvMin - 0.001) && all(uv <= uvMax + 0.001))
-        {
-            baryMin = min(baryMin, triBary[k]);
-            baryMax = max(baryMax, triBary[k]);
-            validSamples++;
-        }
-    }
-
-    if (validSamples == 0)
-    {
-        // Initialize prism with degenerate values before returning
-        prism.b0 = prism.b1 = prism.b2 = tri.v0;
-        prism.t0 = prism.t1 = prism.t2 = tri.v0;
-        return false;
-    }
-
-    // Clamp to valid triangle
-    baryMin = max(float2(0, 0), baryMin);
-    baryMax = min(float2(1, 1), baryMax);
-    if (baryMax.x + baryMax.y > 1.0)
-    {
-        // Clamp to u+v=1 edge
-        float sum = baryMax.x + baryMax.y;
-        baryMax = baryMax / sum;
-    }
-
-    // Create a triangle from the corners of the barycentric region
-    // For a rectangular barycentric region, we take 3 corners that form a valid triangle
-    float2 c0 = baryMin;
-    float2 c1 = float2(baryMax.x, baryMin.y);
-    float2 c2 = float2(baryMin.x, baryMax.y);
-
-    // Clamp each corner
-    c0 = clampBary(c0);
-    c1 = clampBary(c1);
-    c2 = clampBary(c2);
-
-    // Get positions and normals at these corners
-    float3 P0 = getP(tri, c0);
-    float3 P1 = getP(tri, c1);
-    float3 P2 = getP(tri, c2);
-
-    float3 N0 = normalize(getN(tri, c0));
-    float3 N1 = normalize(getN(tri, c1));
-    float3 N2 = normalize(getN(tri, c2));
-
-    // Create prism
-    prism.b0 = P0 + N0 * hMin;
-    prism.b1 = P1 + N1 * hMin;
-    prism.b2 = P2 + N2 * hMin;
-
-    prism.t0 = P0 + N0 * hMax;
-    prism.t1 = P1 + N1 * hMax;
-    prism.t2 = P2 + N2 * hMax;
-
-    return true;
-}
-
-// Forward declaration for V13 fallback
-bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                        int2 texSize,
-                        out float hitT, out float2 hitBary, out float3 hitGeoNormal);
-
-//=============================================================================
-// V21: Brute-Force Texel Testing (Replacing ψ-Guided Marching)
-//
-// V12-V20 used ψ-guided marching which had fundamental issues:
-// 1. Wrong entry texel detection (using AABB entry, not ψ=0 curve entry)
-// 2. Numerical precision issues near ψ≈0 causing wrong crossing counts
-// 3. Asymmetric fallback (+X/+Y only) missing texels in -X/-Y directions
-//
-// V21 Solution: Since hierarchical RMIP already narrows to small UV regions
-// (typically 2-8 texels wide), simply test ALL texels in the region.
-// This is robust, simple, and guaranteed correct.
-//
-// Algorithm:
-// 1. Convert UV bounds to texel coordinates
-// 2. Double loop over ALL texels in [texelMin, texelMax]
-// 3. For each texel, test its 2 micro-triangles for intersection
-// 4. Track the closest hit across all texels
-// 5. Return the best hit found
+// Brute Force Texel Testing (Reliable Fallback)
 //=============================================================================
 bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                            float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
@@ -1774,11 +860,8 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
 
-    // Convert UV bounds to texel coordinates
     int2 texelMin = int2(floor(uvMin * float2(texSize)));
     int2 texelMax = int2(ceil(uvMax * float2(texSize)));
-
-    // Clamp to valid range
     texelMin = max(texelMin, int2(0, 0));
     texelMax = min(texelMax, texSize - int2(1, 1));
 
@@ -1788,27 +871,23 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     float bestT = rayTMax + 1.0;
     bool found = false;
 
-    // V21: Simple double loop over ALL texels - no ψ, no marching, just test everything
     for (int ty = texelMin.y; ty <= texelMax.y; ty++)
     {
         for (int tx = texelMin.x; tx <= texelMax.x; tx++)
         {
             int2 currentTexel = int2(tx, ty);
 
-            // Compute UV coordinates for texel corners
             float2 uv00 = float2(currentTexel) / float2(texSize);
             float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
             float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
             float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
 
-            // Convert to barycentric
             float2 b00, b10, b01, b11;
             texToBary(tri, uv00, b00);
             texToBary(tri, uv10, b10);
             texToBary(tri, uv01, b01);
             texToBary(tri, uv11, b11);
 
-            // V24: Check if any corner is in valid triangle domain using BARY_EPS
             bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
             bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
             bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
@@ -1817,155 +896,6 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             if (!(valid00 || valid10 || valid01 || valid11))
                 continue;
 
-            // Clamp barycentric coordinates for micro-triangle intersection
-            b00 = clampBary(b00);
-            b10 = clampBary(b10);
-            b01 = clampBary(b01);
-            b11 = clampBary(b11);
-
-            // Test micro-triangles for intersection
-            float microT;
-            float2 microBary;
-            float3 microNormal;
-
-            // Triangle 1: b00, b10, b01
-            float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
-            if (area1 > 1e-6)
-            {
-                if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
-                                           rayTMin, min(rayTMax, bestT),
-                                           microT, microBary, microNormal))
-                {
-                    if (microT < bestT)
-                    {
-                        bestT = microT;
-                        hitT = microT;
-                        hitBary = microBary;
-                        hitGeoNormal = microNormal;
-                        found = true;
-                    }
-                }
-            }
-
-            // Triangle 2: b10, b11, b01
-            // V24: Use BARY_EPS for diagonal boundary tolerance
-            float w11 = 1.0 - b11.x - b11.y;
-            if (w11 >= -BARY_EPS)
-            {
-                float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
-                if (area2 > 1e-6)
-                {
-                    if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
-                                               rayTMin, min(rayTMax, bestT),
-                                               microT, microBary, microNormal))
-                    {
-                        if (microT < bestT)
-                        {
-                            bestT = microT;
-                            hitT = microT;
-                            hitBary = microBary;
-                            hitGeoNormal = microNormal;
-                            found = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return found;
-}
-
-//=============================================================================
-// V26: ψ-Guided Texel Marching with PROPER Entry Detection
-//
-// V25 Bug: Used inverseDisplacement(rayO + rayTMin * rayD) to find entry texel.
-// But rayTMin is from ray-AABB intersection, NOT where ψ=0 curve enters the
-// UV region! This caused ψ-marching to start at wrong texels and never find hits.
-//
-// V26 Fix: Use findPsiZeroEntry() to properly find where ψ=0 curve crosses
-// the UV region boundary. This is the CORRECT entry point per Paper Section 4.4.
-//
-// The ψ=0 curve is where the ray projects onto the UV plane (Equation 3).
-// Texel marching should follow this curve through the UV region.
-//=============================================================================
-bool texelMarchWithPsi_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                           float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                           int2 texSize, float2 rayDirUV,
-                           out float hitT, out float2 hitBary, out float3 hitGeoNormal,
-                           out int texelsVisited)
-{
-    hitT = rayTMax + 1.0;
-    hitBary = float2(0, 0);
-    hitGeoNormal = float3(0, 1, 0);
-    texelsVisited = 0;
-
-    // Convert UV bounds to texel coordinates
-    int2 texelMin = int2(floor(uvMin * float2(texSize)));
-    int2 texelMax = int2(ceil(uvMax * float2(texSize)));
-
-    // Clamp to valid range
-    texelMin = max(texelMin, int2(0, 0));
-    texelMax = min(texelMax, texSize - int2(1, 1));
-
-    if (any(texelMin > texelMax))
-        return false;
-
-    // V26: Find entry point where ψ=0 curve crosses UV region boundary
-    // This is the CORRECT entry point per Paper Section 4.4
-    int2 currentTexel;
-    int entryEdge;
-    bool validEntry = findPsiZeroEntry(tri, rayO, rayD, uvMin, uvMax, texSize, rayDirUV,
-                                       currentTexel, entryEdge);
-
-    // Ensure texel is within bounds (findPsiZeroEntry should guarantee this, but be safe)
-    currentTexel = clamp(currentTexel, texelMin, texelMax);
-
-    float bestT = rayTMax + 1.0;
-    bool found = false;
-
-    // Track visited texels to avoid infinite loops
-    int maxIters = (texelMax.x - texelMin.x + 1) * (texelMax.y - texelMin.y + 1) + 4;
-
-    for (int iter = 0; iter < maxIters; iter++)
-    {
-        // Check if current texel is within bounds
-        if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
-            currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
-        {
-            break;
-        }
-
-        texelsVisited++;
-
-        // Compute UV coordinates for texel corners
-        float2 uv00 = float2(currentTexel) / float2(texSize);
-        float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
-        float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
-        float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
-
-        // Convert to barycentric
-        float2 b00, b10, b01, b11;
-        texToBary(tri, uv00, b00);
-        texToBary(tri, uv10, b10);
-        texToBary(tri, uv01, b01);
-        texToBary(tri, uv11, b11);
-
-        // Save original unclamped values for ψ computation (V15 fix)
-        float2 b00_orig = b00;
-        float2 b10_orig = b10;
-        float2 b01_orig = b01;
-        float2 b11_orig = b11;
-
-        // Check if any corner is in valid triangle domain
-        bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
-        bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
-        bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
-        bool valid11 = b11.x >= -BARY_EPS && b11.y >= -BARY_EPS && b11.x + b11.y <= 1.0 + BARY_EPS;
-
-        if (valid00 || valid10 || valid01 || valid11)
-        {
-            // Clamp barycentric coordinates for micro-triangle intersection
             b00 = clampBary(b00);
             b10 = clampBary(b10);
             b01 = clampBary(b01);
@@ -2017,157 +947,24 @@ bool texelMarchWithPsi_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
             }
         }
-
-        // Compute ψ at all 4 corners using ORIGINAL unclamped values
-        float psi00 = psi(tri, b00_orig, rayO, rayD);
-        float psi10 = psi(tri, b10_orig, rayO, rayD);
-        float psi01 = psi(tri, b01_orig, rayO, rayD);
-        float psi11 = psi(tri, b11_orig, rayO, rayD);
-
-        // V25: Check for ψ degeneracy (all values near zero)
-        float maxAbsPsi = max(max(abs(psi00), abs(psi10)), max(abs(psi01), abs(psi11)));
-        bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD;
-
-        // Find exit edge
-        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, rayDirUV);
-
-        if (exitEdge == EDGE_NONE || psiDegenerate)
-        {
-            // V25: Bidirectional fallback based on ray direction
-            // Move in the direction of the ray, not just +X/+Y
-            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
-            {
-                // Move primarily in X direction
-                int dx = (rayDirUV.x >= 0) ? 1 : -1;
-                if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
-                {
-                    currentTexel.x += dx;
-                    entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
-                }
-                else
-                {
-                    // Can't move in X, try Y
-                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
-                    if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
-                    {
-                        currentTexel.y += dy;
-                        entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
-                    }
-                    else
-                        break;
-                }
-            }
-            else
-            {
-                // Move primarily in Y direction
-                int dy = (rayDirUV.y >= 0) ? 1 : -1;
-                if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
-                {
-                    currentTexel.y += dy;
-                    entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
-                }
-                else
-                {
-                    // Can't move in Y, try X
-                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
-                    if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
-                    {
-                        currentTexel.x += dx;
-                        entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
-                    }
-                    else
-                        break;
-                }
-            }
-            continue;
-        }
-
-        // Move to adjacent texel based on exit edge
-        switch (exitEdge)
-        {
-            case EDGE_LEFT:   currentTexel.x--; break;
-            case EDGE_RIGHT:  currentTexel.x++; break;
-            case EDGE_BOTTOM: currentTexel.y--; break;
-            case EDGE_TOP:    currentTexel.y++; break;
-        }
-
-        entryEdge = getOppositeEdge(exitEdge);
     }
 
     return found;
 }
 
 //=============================================================================
-// V26: Simplified Leaf Region Tester (GUI Toggle)
-//
-// Removed hybrid approach - now just two modes controlled by GUI:
-//   - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
-//   - pushConst.usePsiMarching = 1: ψ-guided marching (V26, experimental)
-//
-// V26 uses findPsiZeroEntry() to properly find where ψ=0 curve crosses
-// the UV region boundary (per Paper Section 4.4).
+// ψ-Guided Texel Marching (Paper Section 4.4)
 //=============================================================================
-bool testLeafRegion_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                        int2 texSize,
-                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                       float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                       int2 texSize, float2 rayDirUV,
+                       out float hitT, out float2 hitBary, out float3 hitGeoNormal)
 {
     hitT = rayTMax + 1.0;
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
 
-    // Check GUI toggle: 0 = brute force, 1 = ψ-marching
-    if (pushConst.usePsiMarching == 0)
-    {
-        // Brute force: test ALL texels in the region (reliable)
-        return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
-                                     uvMin, uvMax, rayTMin, rayTMax,
-                                     texSize, hitT, hitBary, hitGeoNormal);
-    }
-
-    // ψ-guided marching (V26): use proper entry detection per Paper Section 4.4
-    float2 rayDirUV = computeRayDirUV(tri, rayD);
-    int texelsVisited = 0;
-
-    bool found = texelMarchWithPsi_V26(tri, matIdx, rayO, rayD,
-                                       uvMin, uvMax, rayTMin, rayTMax,
-                                       texSize, rayDirUV,
-                                       hitT, hitBary, hitGeoNormal,
-                                       texelsVisited);
-
-    return found;
-}
-
-//=============================================================================
-// V27: ψ-Guided Texel Marching with CORRECT Entry Detection Per Paper
-//
-// Fixes 4 bugs from V26:
-// 1. Fix #1: Consistent texelMax calculation
-// 2. Fix #2: Valid barycentric check for ψ computation
-// 3. Fix #3: Bound refinement per Paper Algorithm 1 line 15
-// 4. Fix #4: Entry from inverse_displacement (Paper Section 4.1), NOT ψ boundary
-//
-// Paper's Algorithm (Section 4.4):
-// 1. Project ray entry/exit to UV via inverse_displacement (Eq 2)
-// 2. REDUCE UV bounds to actual ray footprint (Algorithm 1 line 15)
-// 3. Start texel marching from projected entry UV
-// 4. Use ψ sign at corners to determine exit edge
-//=============================================================================
-bool texelMarchWithPsi_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                           float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                           int2 texSize, float2 rayDirUV,
-                           out float hitT, out float2 hitBary, out float3 hitGeoNormal,
-                           out int texelsVisited)
-{
-    hitT = rayTMax + 1.0;
-    hitBary = float2(0, 0);
-    hitGeoNormal = float3(0, 1, 0);
-    texelsVisited = 0;
-
-    //=========================================================================
-    // V27 Fix #4: Entry Detection via inverse_displacement (Paper Section 4.1)
-    // Project 3D ray entry/exit to UV using inverse displacement, NOT ψ boundary
-    //=========================================================================
+    // Entry detection via inverse_displacement (Paper Section 4.1)
     float3 Q_entry = rayO + rayTMin * rayD;
     float3 Q_exit = rayO + rayTMax * rayD;
 
@@ -2175,62 +972,40 @@ bool texelMarchWithPsi_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     bool validEntry = inverseDisplacement(tri, Q_entry, baryEntry);
     bool validExit = inverseDisplacement(tri, Q_exit, baryExit);
 
-    // Convert to UV space
     float2 uvEntry = baryToTex(tri, baryEntry);
     float2 uvExit = baryToTex(tri, baryExit);
 
-    //=========================================================================
-    // V27 Fix #3: Bound Refinement (Paper Algorithm 1 line 15)
-    // Reduce UV bounds to actual ray footprint
-    //=========================================================================
+    // Bound refinement (Paper Algorithm 1 line 15)
     float2 refinedUvMin = uvMin;
     float2 refinedUvMax = uvMax;
 
     if (validEntry && validExit)
     {
-        // Tighten bounds to ray footprint
         float2 rayUvMin = min(uvEntry, uvExit);
         float2 rayUvMax = max(uvEntry, uvExit);
-
-        // Intersect with original bounds (don't expand, only reduce)
-        refinedUvMin = max(uvMin, rayUvMin);
-        refinedUvMax = min(uvMax, rayUvMax);
-
-        // Add small padding for safety
         float2 padding = float2(1.0) / float2(texSize);
-        refinedUvMin = max(uvMin, refinedUvMin - padding);
-        refinedUvMax = min(uvMax, refinedUvMax + padding);
+        refinedUvMin = max(uvMin, rayUvMin - padding);
+        refinedUvMax = min(uvMax, rayUvMax + padding);
     }
 
-    //=========================================================================
-    // V27 Fix #1: Consistent texelMax calculation
-    // Use the SAME calculation in entry detection AND marching loop
-    //=========================================================================
     int2 texelMin = int2(floor(refinedUvMin * float2(texSize)));
     int2 texelMax = int2(floor(refinedUvMax * float2(texSize)));
-
-    // Clamp to valid texture range
     texelMin = max(texelMin, int2(0, 0));
     texelMax = min(texelMax, texSize - int2(1, 1));
 
     if (any(texelMin > texelMax))
         return false;
 
-    //=========================================================================
-    // Find entry texel: use projected entry point, clamped to refined bounds
-    //=========================================================================
+    // Find entry texel
     int2 currentTexel;
-
     if (validEntry)
     {
-        // Clamp entry UV to refined bounds, then convert to texel
         float2 clampedEntryUV = clamp(uvEntry, refinedUvMin, refinedUvMax);
         currentTexel = int2(floor(clampedEntryUV * float2(texSize)));
         currentTexel = clamp(currentTexel, texelMin, texelMax);
     }
     else
     {
-        // Fallback: start at corner based on ray direction
         if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
             currentTexel = texelMin;
         else if (rayDirUV.x >= 0 && rayDirUV.y < 0)
@@ -2241,7 +1016,6 @@ bool texelMarchWithPsi_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             currentTexel = texelMax;
     }
 
-    // Determine initial entry edge based on ray direction
     int entryEdge = EDGE_NONE;
     if (abs(rayDirUV.x) >= abs(rayDirUV.y))
         entryEdge = (rayDirUV.x >= 0) ? EDGE_LEFT : EDGE_RIGHT;
@@ -2250,44 +1024,27 @@ bool texelMarchWithPsi_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
     float bestT = rayTMax + 1.0;
     bool found = false;
-
-    // Maximum iterations based on region size
     int maxIters = (texelMax.x - texelMin.x + 1) * (texelMax.y - texelMin.y + 1) + 4;
 
     for (int iter = 0; iter < maxIters; iter++)
     {
-        // Check bounds
         if (currentTexel.x < texelMin.x || currentTexel.x > texelMax.x ||
             currentTexel.y < texelMin.y || currentTexel.y > texelMax.y)
-        {
             break;
-        }
 
-        texelsVisited++;
-
-        // Compute UV coordinates for texel corners
         float2 uv00 = float2(currentTexel) / float2(texSize);
         float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
         float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
         float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
 
-        // Convert to barycentric
         float2 b00, b10, b01, b11;
         texToBary(tri, uv00, b00);
         texToBary(tri, uv10, b10);
         texToBary(tri, uv01, b01);
         texToBary(tri, uv11, b11);
 
-        // Save original unclamped values for ψ computation
-        float2 b00_orig = b00;
-        float2 b10_orig = b10;
-        float2 b01_orig = b01;
-        float2 b11_orig = b11;
+        float2 b00_orig = b00, b10_orig = b10, b01_orig = b01, b11_orig = b11;
 
-        //=====================================================================
-        // V27 Fix #2: Valid barycentric check for ψ computation
-        // Only compute ψ at corners that are within valid triangle domain
-        //=====================================================================
         bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
         bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
         bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
@@ -2295,271 +1052,6 @@ bool texelMarchWithPsi_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
         if (valid00 || valid10 || valid01 || valid11)
         {
-            // Clamp barycentric coordinates for micro-triangle intersection
-            b00 = clampBary(b00);
-            b10 = clampBary(b10);
-            b01 = clampBary(b01);
-            b11 = clampBary(b11);
-
-            float microT;
-            float2 microBary;
-            float3 microNormal;
-
-            // Triangle 1: b00, b10, b01
-            float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
-            if (area1 > 1e-6)
-            {
-                if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
-                                           rayTMin, min(rayTMax, bestT),
-                                           microT, microBary, microNormal))
-                {
-                    if (microT < bestT)
-                    {
-                        bestT = microT;
-                        hitT = microT;
-                        hitBary = microBary;
-                        hitGeoNormal = microNormal;
-                        found = true;
-                    }
-                }
-            }
-
-            // Triangle 2: b10, b11, b01
-            float w11 = 1.0 - b11.x - b11.y;
-            if (w11 >= -BARY_EPS)
-            {
-                float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
-                if (area2 > 1e-6)
-                {
-                    if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
-                                               rayTMin, min(rayTMax, bestT),
-                                               microT, microBary, microNormal))
-                    {
-                        if (microT < bestT)
-                        {
-                            bestT = microT;
-                            hitT = microT;
-                            hitBary = microBary;
-                            hitGeoNormal = microNormal;
-                            found = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        //=====================================================================
-        // V27 Fix #2 continued: Compute ψ only at VALID corners
-        // For invalid corners, use extrapolated ψ from valid neighbors
-        //=====================================================================
-        float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 0.0;
-        float psi10 = valid10 ? psi(tri, b10_orig, rayO, rayD) : 0.0;
-        float psi01 = valid01 ? psi(tri, b01_orig, rayO, rayD) : 0.0;
-        float psi11 = valid11 ? psi(tri, b11_orig, rayO, rayD) : 0.0;
-
-        // Count valid corners and handle missing values
-        int validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
-
-        // If not enough valid corners for reliable sign detection, use DDA fallback
-        if (validCount < 2)
-        {
-            // DDA-style fallback: move in ray direction
-            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
-            {
-                int dx = (rayDirUV.x >= 0) ? 1 : -1;
-                if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
-                {
-                    currentTexel.x += dx;
-                    entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
-                }
-                else
-                {
-                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
-                    if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
-                    {
-                        currentTexel.y += dy;
-                        entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
-                    }
-                    else
-                        break;
-                }
-            }
-            else
-            {
-                int dy = (rayDirUV.y >= 0) ? 1 : -1;
-                if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
-                {
-                    currentTexel.y += dy;
-                    entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
-                }
-                else
-                {
-                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
-                    if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
-                    {
-                        currentTexel.x += dx;
-                        entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
-                    }
-                    else
-                        break;
-                }
-            }
-            continue;
-        }
-
-        // Check for ψ degeneracy (all values near zero)
-        float maxAbsPsi = max(max(abs(psi00), abs(psi10)), max(abs(psi01), abs(psi11)));
-        bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD;
-
-        // Find exit edge using ψ signs
-        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, rayDirUV);
-
-        if (exitEdge == EDGE_NONE || psiDegenerate)
-        {
-            // DDA-style fallback: move in ray direction
-            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
-            {
-                int dx = (rayDirUV.x >= 0) ? 1 : -1;
-                if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
-                {
-                    currentTexel.x += dx;
-                    entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
-                }
-                else
-                {
-                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
-                    if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
-                    {
-                        currentTexel.y += dy;
-                        entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
-                    }
-                    else
-                        break;
-                }
-            }
-            else
-            {
-                int dy = (rayDirUV.y >= 0) ? 1 : -1;
-                if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
-                {
-                    currentTexel.y += dy;
-                    entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
-                }
-                else
-                {
-                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
-                    if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
-                    {
-                        currentTexel.x += dx;
-                        entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
-                    }
-                    else
-                        break;
-                }
-            }
-            continue;
-        }
-
-        // Move to adjacent texel based on exit edge
-        switch (exitEdge)
-        {
-            case EDGE_LEFT:   currentTexel.x--; break;
-            case EDGE_RIGHT:  currentTexel.x++; break;
-            case EDGE_BOTTOM: currentTexel.y--; break;
-            case EDGE_TOP:    currentTexel.y++; break;
-        }
-
-        entryEdge = getOppositeEdge(exitEdge);
-    }
-
-    return found;
-}
-
-//=============================================================================
-// V27: Leaf Region Tester with Correct Entry Detection
-//
-// Uses V27's texelMarchWithPsi_V27() which implements all 4 bug fixes:
-// - Correct entry via inverse_displacement (not ψ boundary)
-// - Bound refinement per paper
-// - Consistent texelMax calculation
-// - Valid barycentric check for ψ
-//=============================================================================
-bool testLeafRegion_V27(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                        int2 texSize,
-                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
-{
-    hitT = rayTMax + 1.0;
-    hitBary = float2(0, 0);
-    hitGeoNormal = float3(0, 1, 0);
-
-    // Check GUI toggle: 0 = brute force, 1 = ψ-marching (V27)
-    if (pushConst.usePsiMarching == 0)
-    {
-        // Brute force: test ALL texels in the region (reliable)
-        return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
-                                     uvMin, uvMax, rayTMin, rayTMax,
-                                     texSize, hitT, hitBary, hitGeoNormal);
-    }
-
-    // V27 ψ-guided marching with correct entry detection
-    float2 rayDirUV = computeRayDirUV(tri, rayD);
-    int texelsVisited = 0;
-
-    bool found = texelMarchWithPsi_V27(tri, matIdx, rayO, rayD,
-                                       uvMin, uvMax, rayTMin, rayTMax,
-                                       texSize, rayDirUV,
-                                       hitT, hitBary, hitGeoNormal,
-                                       texelsVisited);
-
-    return found;
-}
-
-//=============================================================================
-// Tessellate UV region (V11 fallback method)
-//=============================================================================
-bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
-                        float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
-                        int2 texSize,
-                        out float hitT, out float2 hitBary, out float3 hitGeoNormal)
-{
-    hitT = rayTMax + 1.0;
-    hitBary = float2(0, 0);
-    hitGeoNormal = float3(0, 1, 0);
-
-    float2 uvSize = (uvMax - uvMin) * float2(texSize);
-    int res = int(max(uvSize.x, uvSize.y)) + 1;
-    res = clamp(res, 2, 8);
-
-    float bestT = rayTMax + 1.0;
-    bool found = false;
-
-    float2 uvStep = (uvMax - uvMin) / float(res);
-
-    for (int iu = 0; iu < res; iu++)
-    {
-        for (int iv = 0; iv < res; iv++)
-        {
-            float2 uv00 = uvMin + float2(iu, iv) * uvStep;
-            float2 uv10 = uvMin + float2(iu + 1, iv) * uvStep;
-            float2 uv01 = uvMin + float2(iu, iv + 1) * uvStep;
-            float2 uv11 = uvMin + float2(iu + 1, iv + 1) * uvStep;
-
-            float2 b00, b10, b01, b11;
-            texToBary(tri, uv00, b00);
-            texToBary(tri, uv10, b10);
-            texToBary(tri, uv01, b01);
-            texToBary(tri, uv11, b11);
-
-            float eps = 0.01;
-            bool valid00 = b00.x >= -eps && b00.y >= -eps && b00.x + b00.y <= 1.0 + eps;
-            bool valid10 = b10.x >= -eps && b10.y >= -eps && b10.x + b10.y <= 1.0 + eps;
-            bool valid01 = b01.x >= -eps && b01.y >= -eps && b01.x + b01.y <= 1.0 + eps;
-            bool valid11 = b11.x >= -eps && b11.y >= -eps && b11.x + b11.y <= 1.0 + eps;
-
-            if (!valid00 && !valid10 && !valid01 && !valid11)
-                continue;
-
             b00 = clampBary(b00);
             b10 = clampBary(b10);
             b01 = clampBary(b01);
@@ -2590,7 +1082,7 @@ bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 
             // Triangle 2
             float w11 = 1.0 - b11.x - b11.y;
-            if (w11 >= -0.01)
+            if (w11 >= -BARY_EPS)
             {
                 float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
                 if (area2 > 1e-6)
@@ -2611,25 +1103,150 @@ bool tessellateUVRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
             }
         }
+
+        // Compute ψ at valid corners
+        float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 0.0;
+        float psi10 = valid10 ? psi(tri, b10_orig, rayO, rayD) : 0.0;
+        float psi01 = valid01 ? psi(tri, b01_orig, rayO, rayD) : 0.0;
+        float psi11 = valid11 ? psi(tri, b11_orig, rayO, rayD) : 0.0;
+
+        int validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
+
+        // DDA fallback for insufficient valid corners
+        if (validCount < 2)
+        {
+            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+            {
+                int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
+                {
+                    currentTexel.x += dx;
+                    entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
+                }
+                else
+                {
+                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                    if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
+                    {
+                        currentTexel.y += dy;
+                        entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
+                    }
+                    else break;
+                }
+            }
+            else
+            {
+                int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
+                {
+                    currentTexel.y += dy;
+                    entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
+                }
+                else
+                {
+                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                    if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
+                    {
+                        currentTexel.x += dx;
+                        entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
+                    }
+                    else break;
+                }
+            }
+            continue;
+        }
+
+        float maxAbsPsi = max(max(abs(psi00), abs(psi10)), max(abs(psi01), abs(psi11)));
+        bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD;
+
+        int exitEdge = findExitEdge(psi00, psi10, psi01, psi11, entryEdge, rayDirUV);
+
+        // DDA fallback for no exit or degenerate ψ
+        if (exitEdge == EDGE_NONE || psiDegenerate)
+        {
+            if (abs(rayDirUV.x) >= abs(rayDirUV.y))
+            {
+                int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
+                {
+                    currentTexel.x += dx;
+                    entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
+                }
+                else
+                {
+                    int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                    if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
+                    {
+                        currentTexel.y += dy;
+                        entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
+                    }
+                    else break;
+                }
+            }
+            else
+            {
+                int dy = (rayDirUV.y >= 0) ? 1 : -1;
+                if (currentTexel.y + dy >= texelMin.y && currentTexel.y + dy <= texelMax.y)
+                {
+                    currentTexel.y += dy;
+                    entryEdge = (dy > 0) ? EDGE_BOTTOM : EDGE_TOP;
+                }
+                else
+                {
+                    int dx = (rayDirUV.x >= 0) ? 1 : -1;
+                    if (currentTexel.x + dx >= texelMin.x && currentTexel.x + dx <= texelMax.x)
+                    {
+                        currentTexel.x += dx;
+                        entryEdge = (dx > 0) ? EDGE_LEFT : EDGE_RIGHT;
+                    }
+                    else break;
+                }
+            }
+            continue;
+        }
+
+        // Move to adjacent texel
+        switch (exitEdge)
+        {
+            case EDGE_LEFT:   currentTexel.x--; break;
+            case EDGE_RIGHT:  currentTexel.x++; break;
+            case EDGE_BOTTOM: currentTexel.y--; break;
+            case EDGE_TOP:    currentTexel.y++; break;
+        }
+        entryEdge = getOppositeEdge(exitEdge);
     }
 
     return found;
 }
 
 //=============================================================================
-// Main intersection shader - V25: Hybrid ψ-Guided + Brute Force
-//
-// V25 brings back ψ-guided marching with automatic fallback to brute force:
-// - Uses ψ-marching as fast path (O(n) texels along ray path)
-// - Monitors texel visit count to detect failed marching
-// - Falls back to brute force when marching visits too few texels
-// - Bidirectional fallback based on ray direction (not just +X/+Y)
-//
-// Core algorithm:
-// - Hierarchical traversal with affine arithmetic bounds
-// - Bounding prism for initial intersection
-// - Bound reduction via inverse displacement with validation
-// - V25 hybrid leaf testing: ψ-marching first, brute force fallback
+// Leaf Region Tester (Dispatches to brute force or ψ-marching)
+//=============================================================================
+bool testLeafRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+                    float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
+                    int2 texSize,
+                    out float hitT, out float2 hitBary, out float3 hitGeoNormal)
+{
+    hitT = rayTMax + 1.0;
+    hitBary = float2(0, 0);
+    hitGeoNormal = float3(0, 1, 0);
+
+    if (pushConst.usePsiMarching == 0)
+    {
+        return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
+                                     uvMin, uvMax, rayTMin, rayTMax,
+                                     texSize, hitT, hitBary, hitGeoNormal);
+    }
+
+    float2 rayDirUV = computeRayDirUV(tri, rayD);
+    return texelMarchWithPsi(tri, matIdx, rayO, rayD,
+                             uvMin, uvMax, rayTMin, rayTMax,
+                             texSize, rayDirUV,
+                             hitT, hitBary, hitGeoNormal);
+}
+
+//=============================================================================
+// Main Intersection Shader
 //=============================================================================
 [shader("intersection")]
 void intersectionMain()
@@ -2682,10 +1299,7 @@ void intersectionMain()
 
     if (texSize.x == 0 || texSize.y == 0) return;
 
-    //=========================================================================
-    // V10: Create full-triangle bounding PRISM and intersect ray with it
-    // This is the key difference from V9 - we use PRISM instead of AABB!
-    //=========================================================================
+    // Create bounding prism and intersect
     float dispScale = getDisplacementScale(matIdx);
     Prism fullPrism = makePrism(tri, 0.0, dispScale);
 
@@ -2697,11 +1311,7 @@ void intersectionMain()
     prismTExit = min(prismTExit, rayTMax);
     if (prismTEntry >= prismTExit) return;
 
-    //=========================================================================
-    // Project ray-prism intersection points to UV space (Algorithm 1, line 3)
-    // Key insight: Since points are INSIDE the prism, inverse displacement
-    // is GUARANTEED to converge! This is why prism > AABB.
-    //=========================================================================
+    // Project to UV space (Algorithm 1, line 3)
     float3 Q_entry = rayOrigin + prismTEntry * rayDir;
     float3 Q_exit = rayOrigin + prismTExit * rayDir;
 
@@ -2709,7 +1319,6 @@ void intersectionMain()
     bool validEntry = inverseDisplacement(tri, Q_entry, baryEntry);
     bool validExit = inverseDisplacement(tri, Q_exit, baryExit);
 
-    // Initial UV bounds from prism intersection
     float2 triUVMin = min(min(tri.t0, tri.t1), tri.t2);
     float2 triUVMax = max(max(tri.t0, tri.t1), tri.t2);
 
@@ -2721,19 +1330,15 @@ void intersectionMain()
         float2 uvEntry = baryToTex(tri, baryEntry);
         float2 uvExit = baryToTex(tri, baryExit);
 
-        // Start with bounds from projected intersection
         initialUVMin = min(uvEntry, uvExit);
         initialUVMax = max(uvEntry, uvExit);
 
-        // Add padding for numerical safety
         float2 uvPadding = (initialUVMax - initialUVMin) * 0.1 + float2(0.01, 0.01);
         initialUVMin = max(triUVMin, initialUVMin - uvPadding);
         initialUVMax = min(triUVMax, initialUVMax + uvPadding);
     }
 
-    //=========================================================================
-    // Stack-based hierarchical traversal in UV space
-    //=========================================================================
+    // Stack-based hierarchical traversal
     UVBound stack[MAX_STACK_SIZE];
     int stackPtr = 0;
 
@@ -2751,7 +1356,6 @@ void intersectionMain()
     while (stackPtr > 0 && iterations < MAX_TRAVERSAL_ITERS)
     {
         iterations++;
-
         stackPtr--;
         UVBound bound = stack[stackPtr];
 
@@ -2763,18 +1367,14 @@ void intersectionMain()
 
         if (maxTexelSize <= MARCHING_SCALE)
         {
-            // V27: ψ-marching with CORRECT entry detection (Per Paper Section 4.1)
-            // V26 bug: used ψ=0 boundary crossing which is WRONG
-            // V27 fix: uses inverse_displacement of ray entry/exit (per paper)
-            // Also fixes: consistent texelMax, valid bary check, bound refinement
             float hitT;
             float2 hitBary;
             float3 hitGeoNormal;
 
-            if (testLeafRegion_V27(tri, matIdx, rayOrigin, rayDir,
-                                   bound.uvMin, bound.uvMax,
-                                   rayTMin, min(rayTMax, bestT),
-                                   texSize, hitT, hitBary, hitGeoNormal))
+            if (testLeafRegion(tri, matIdx, rayOrigin, rayDir,
+                               bound.uvMin, bound.uvMax,
+                               rayTMin, min(rayTMax, bestT),
+                               texSize, hitT, hitBary, hitGeoNormal))
             {
                 if (hitT < bestT)
                 {
@@ -2787,9 +1387,7 @@ void intersectionMain()
             continue;
         }
 
-        // V11: Use AFFINE ARITHMETIC for sub-region bounds
-        // Affine arithmetic provides mathematically guaranteed bounds
-        // that never miss extrema (unlike grid sampling in V10.1)
+        // Get displacement bounds (TODO: use RMIP)
         float hMin, hMax;
         getDisplacementBounds(matIdx, bound.uvMin, bound.uvMax, texSize, hMin, hMax);
 
@@ -2807,22 +1405,7 @@ void intersectionMain()
         if (regionTEntry >= regionTExit)
             continue;
 
-        //=====================================================================
-        // V23: Safe Bound Reduction with Validation
-        //
-        // The problem in V22: disabling bound reduction entirely caused the
-        // algorithm to hit iteration limits. Bound reduction IS needed.
-        //
-        // The problem in earlier versions: ray-AABB intersection points can
-        // be OUTSIDE the bounding prism, where inverseDisplacement() gives
-        // incorrect results that exclude valid texels.
-        //
-        // V23 Solution: Keep bound reduction, but VALIDATE the results.
-        // If the projected UV implies the 3D point is far from the actual
-        // ray-AABB intersection, skip bound reduction for this iteration.
-        //=====================================================================
-
-        // Try bound reduction with validation
+        // Bound reduction with validation
         float3 Q_entry = rayOrigin + rayDir * regionTEntry;
         float3 Q_exit = rayOrigin + rayDir * regionTExit;
 
@@ -2830,16 +1413,11 @@ void intersectionMain()
         bool entryValid = inverseDisplacement(tri, Q_entry, projEntryBary);
         bool exitValid = inverseDisplacement(tri, Q_exit, projExitBary);
 
-        // V23 VALIDATION: Check that projected points are actually on the displaced surface
-        // If the inverse displacement "worked" but gave wrong UV, the reconstructed
-        // 3D point will be far from the original Q (signed distance along normal out of range)
         if (entryValid)
         {
             float3 P_entry = getP(tri, projEntryBary);
-            float3 N_entry = getN(tri, projEntryBary);
-            float3 N_entry_hat = normalize(N_entry);
-            float t_entry = dot(Q_entry - P_entry, N_entry_hat);
-            // If signed distance along normal is way outside displacement range, projection invalid
+            float3 N_entry = normalize(getN(tri, projEntryBary));
+            float t_entry = dot(Q_entry - P_entry, N_entry);
             if (t_entry < hMin - 0.2 || t_entry > hMax + 0.2)
                 entryValid = false;
         }
@@ -2847,14 +1425,12 @@ void intersectionMain()
         if (exitValid)
         {
             float3 P_exit = getP(tri, projExitBary);
-            float3 N_exit = getN(tri, projExitBary);
-            float3 N_exit_hat = normalize(N_exit);
-            float t_exit = dot(Q_exit - P_exit, N_exit_hat);
+            float3 N_exit = normalize(getN(tri, projExitBary));
+            float t_exit = dot(Q_exit - P_exit, N_exit);
             if (t_exit < hMin - 0.2 || t_exit > hMax + 0.2)
                 exitValid = false;
         }
 
-        // Only apply bound reduction if BOTH projections are validated
         if (entryValid && exitValid)
         {
             float2 projEntryUV = baryToTex(tri, projEntryBary);
@@ -2862,16 +1438,13 @@ void intersectionMain()
             float2 projUVMin = min(projEntryUV, projExitUV);
             float2 projUVMax = max(projEntryUV, projExitUV);
 
-            // Add small padding for safety
             float2 padding = (bound.uvMax - bound.uvMin) * 0.05;
             projUVMin -= padding;
             projUVMax += padding;
 
-            // Reduce bounds (intersection with current bounds)
             bound.uvMin = max(bound.uvMin, projUVMin);
             bound.uvMax = min(bound.uvMax, projUVMax);
         }
-        // If validation failed, skip bound reduction - subdivision will still shrink bounds
 
         // Subdivide
         float2 uvSize = bound.uvMax - bound.uvMin;
@@ -2881,11 +1454,9 @@ void intersectionMain()
             if (uvSize.x >= uvSize.y)
             {
                 float uMid = (bound.uvMin.x + bound.uvMax.x) * 0.5;
-
                 stack[stackPtr].uvMin = float2(uMid, bound.uvMin.y);
                 stack[stackPtr].uvMax = bound.uvMax;
                 stackPtr++;
-
                 stack[stackPtr].uvMin = bound.uvMin;
                 stack[stackPtr].uvMax = float2(uMid, bound.uvMax.y);
                 stackPtr++;
@@ -2893,11 +1464,9 @@ void intersectionMain()
             else
             {
                 float vMid = (bound.uvMin.y + bound.uvMax.y) * 0.5;
-
                 stack[stackPtr].uvMin = float2(bound.uvMin.x, vMid);
                 stack[stackPtr].uvMax = bound.uvMax;
                 stackPtr++;
-
                 stack[stackPtr].uvMin = bound.uvMin;
                 stack[stackPtr].uvMax = float2(bound.uvMax.x, vMid);
                 stackPtr++;
@@ -2905,9 +1474,7 @@ void intersectionMain()
         }
     }
 
-    //=========================================================================
-    // Report best hit
-    //=========================================================================
+    // Report hit
     if (foundHit && bestT >= rayTMin && bestT <= rayTMax)
     {
         float2 hitTexUV = baryToTex(tri, bestBary);
