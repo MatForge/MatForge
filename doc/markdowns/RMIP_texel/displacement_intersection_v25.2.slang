@@ -1,17 +1,21 @@
 /*
- * RMIP V26 - Proper ψ=0 Entry Detection (Paper Section 4.4) + GUI Toggle
+ * RMIP V25.2 - Hybrid ψ-Guided + Brute Force (Configurable Fallback)
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
  * Reference: "Tessellation-Free Displacement Mapping for Ray Tracing" (Thonat et al. 2021)
  *
- * V26 Changes:
- * 1. Fixed entry point detection: findPsiZeroEntry() properly finds where ψ=0 curve
- *    crosses UV region boundary (Paper Section 4.4), instead of wrong AABB projection
+ * V25.2 Key Fix (from V25.1):
+ * - V25.1 Bug: Always fell back when !psiFound, even with threshold=0
+ * - This prevented testing pure ψ-marching (threshold=0 should mean "no fallback")
+ * - V25.2 Fix: Make threshold behavior intuitive:
+ *   - PSI_MARCH_MIN_RATIO = 0: Pure ψ-marching (NO fallback, for testing)
+ *   - PSI_MARCH_MIN_RATIO = 1: Pure brute force (ALWAYS fallback)
+ *   - PSI_MARCH_MIN_RATIO = 0.3: Hybrid (fallback when unreliable)
  *
- * 2. Simplified to two modes (removed hybrid approach that wasn't working):
- *    - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
- *    - pushConst.usePsiMarching = 1: ψ-guided marching (experimental)
- *
- * GUI Toggle: "Use Psi Marching (RMIP)" checkbox controls the mode
+ * V25 Hybrid Approach (Approach B from V25 discussion):
+ * - Try ψ-guided marching first (O(n) along ray path)
+ * - Fall back to brute force based on threshold and hit status
+ * - When both find hits, use the closer one
+ * - This provides: Performance for normal cases + Correctness for edge cases
  *
  * Key Equations from Paper:
  * - Eq 2: (P(u,v) - Q) × N(u,v) = 0 (displacement inversion)
@@ -38,7 +42,11 @@ static const int MAX_STACK_SIZE = 32;  // Was 32
 // This helps with diagonal edge cases where u+v≈1
 static const float BARY_EPS = 0.05;  // Was 0.01 in many places
 
-// V26: Threshold for detecting ψ degeneracy at texel corners
+// V25: Threshold for detecting failed ψ-marching
+// If marching visits fewer than this fraction of expected texels, fall back to brute force
+static const float PSI_MARCH_MIN_RATIO = 0.001;  // At least 30% of expected path length
+
+// V25: Threshold for detecting ψ degeneracy at texel corners
 // When all ψ values are below this, sign detection becomes unreliable
 static const float PSI_NEAR_ZERO_THRESHOLD = 0.01;
 
@@ -676,271 +684,6 @@ int getOppositeEdge(int edge)
         case EDGE_TOP:    return EDGE_BOTTOM;
         default:          return EDGE_NONE;
     }
-}
-
-//=============================================================================
-// V26: Find where ψ=0 curve enters the UV region (Paper Section 4.4)
-//
-// The ψ=0 curve is where the ray projects onto the UV plane.
-// To find the correct entry texel, we must find where this curve crosses
-// the UV region boundary.
-//
-// Method:
-// 1. Evaluate ψ at the 4 corners of the UV region
-// 2. For each edge, if ψ changes sign, the curve crosses that edge
-// 3. Use ray direction in UV space to determine which crossing is ENTRY
-//    (the one the ray crosses first, based on rayDirUV)
-// 4. Use linear interpolation to find the exact crossing point
-//
-// Returns: true if entry found, with entryTexel and entryEdge set
-//=============================================================================
-bool findPsiZeroEntry(Tri tri, float3 rayO, float3 rayD,
-                      float2 uvMin, float2 uvMax, int2 texSize, float2 rayDirUV,
-                      out int2 entryTexel, out int entryEdge)
-{
-    entryTexel = int2(0, 0);
-    entryEdge = EDGE_NONE;
-
-    // Evaluate ψ at UV region corners
-    // Corner layout:
-    //   (uvMin.x, uvMax.y) = top-left (01)     (uvMax.x, uvMax.y) = top-right (11)
-    //   (uvMin.x, uvMin.y) = bottom-left (00)  (uvMax.x, uvMin.y) = bottom-right (10)
-    float2 b00, b10, b01, b11;
-    texToBary(tri, uvMin, b00);                           // bottom-left
-    texToBary(tri, float2(uvMax.x, uvMin.y), b10);        // bottom-right
-    texToBary(tri, float2(uvMin.x, uvMax.y), b01);        // top-left
-    texToBary(tri, uvMax, b11);                           // top-right
-
-    float psi00 = psi(tri, b00, rayO, rayD);
-    float psi10 = psi(tri, b10, rayO, rayD);
-    float psi01 = psi(tri, b01, rayO, rayD);
-    float psi11 = psi(tri, b11, rayO, rayD);
-
-    // Find which edges have ψ sign changes (curve crossings)
-    bool crossLeft   = (psi00 * psi01 < 0.0);  // Left edge: x = uvMin.x
-    bool crossRight  = (psi10 * psi11 < 0.0);  // Right edge: x = uvMax.x
-    bool crossBottom = (psi00 * psi10 < 0.0);  // Bottom edge: y = uvMin.y
-    bool crossTop    = (psi01 * psi11 < 0.0);  // Top edge: y = uvMax.y
-
-    int numCrossings = (crossLeft ? 1 : 0) + (crossRight ? 1 : 0) +
-                       (crossBottom ? 1 : 0) + (crossTop ? 1 : 0);
-
-    if (numCrossings == 0)
-    {
-        // ψ=0 curve doesn't cross this region - shouldn't happen if RMIP is correct
-        // Fall back to corner based on ray direction
-        if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
-        {
-            entryTexel = int2(floor(uvMin * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_LEFT : EDGE_BOTTOM;
-        }
-        else if (rayDirUV.x >= 0 && rayDirUV.y < 0)
-        {
-            entryTexel = int2(floor(float2(uvMin.x, uvMax.y - 0.001) * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_LEFT : EDGE_TOP;
-        }
-        else if (rayDirUV.x < 0 && rayDirUV.y >= 0)
-        {
-            entryTexel = int2(floor(float2(uvMax.x - 0.001, uvMin.y) * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_RIGHT : EDGE_BOTTOM;
-        }
-        else
-        {
-            entryTexel = int2(floor((uvMax - 0.001) * float2(texSize)));
-            entryEdge = (abs(rayDirUV.x) > abs(rayDirUV.y)) ? EDGE_RIGHT : EDGE_TOP;
-        }
-        return false;  // Indicate fallback was used
-    }
-
-    // Determine which crossing is the ENTRY based on ray direction in UV space
-    // Entry edge is the one the ray crosses FIRST when traveling along rayDirUV
-    //
-    // If rayDirUV.x > 0: ray moves right, so LEFT edge is potential entry
-    // If rayDirUV.x < 0: ray moves left, so RIGHT edge is potential entry
-    // If rayDirUV.y > 0: ray moves up, so BOTTOM edge is potential entry
-    // If rayDirUV.y < 0: ray moves down, so TOP edge is potential entry
-
-    float2 entryUV = float2(0, 0);
-    bool foundEntry = false;
-
-    // Priority based on dominant direction
-    if (abs(rayDirUV.x) >= abs(rayDirUV.y))
-    {
-        // Primarily horizontal movement
-        if (rayDirUV.x >= 0)
-        {
-            // Moving right: prefer LEFT, then BOTTOM/TOP
-            if (crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (rayDirUV.y >= 0 && crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (rayDirUV.y < 0 && crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-            else if (crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-        }
-        else
-        {
-            // Moving left: prefer RIGHT, then BOTTOM/TOP
-            if (crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-            else if (rayDirUV.y >= 0 && crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (rayDirUV.y < 0 && crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-            else if (crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-        }
-    }
-    else
-    {
-        // Primarily vertical movement
-        if (rayDirUV.y >= 0)
-        {
-            // Moving up: prefer BOTTOM, then LEFT/RIGHT
-            if (crossBottom)
-            {
-                float t = psi00 / (psi00 - psi10);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMin.y);
-                entryEdge = EDGE_BOTTOM;
-                foundEntry = true;
-            }
-            else if (rayDirUV.x >= 0 && crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (rayDirUV.x < 0 && crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-            else if (crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-        }
-        else
-        {
-            // Moving down: prefer TOP, then LEFT/RIGHT
-            if (crossTop)
-            {
-                float t = psi01 / (psi01 - psi11);
-                entryUV = float2(lerp(uvMin.x, uvMax.x, t), uvMax.y);
-                entryEdge = EDGE_TOP;
-                foundEntry = true;
-            }
-            else if (rayDirUV.x >= 0 && crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (rayDirUV.x < 0 && crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-            else if (crossLeft)
-            {
-                float t = psi00 / (psi00 - psi01);
-                entryUV = float2(uvMin.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_LEFT;
-                foundEntry = true;
-            }
-            else if (crossRight)
-            {
-                float t = psi10 / (psi10 - psi11);
-                entryUV = float2(uvMax.x, lerp(uvMin.y, uvMax.y, t));
-                entryEdge = EDGE_RIGHT;
-                foundEntry = true;
-            }
-        }
-    }
-
-    if (foundEntry)
-    {
-        // Convert entry UV to texel coordinates
-        entryTexel = int2(floor(entryUV * float2(texSize)));
-        // Clamp to valid range within the region
-        int2 texelMin = int2(floor(uvMin * float2(texSize)));
-        int2 texelMax = int2(ceil(uvMax * float2(texSize))) - int2(1, 1);
-        entryTexel = clamp(entryTexel, texelMin, texelMax);
-        return true;
-    }
-
-    return false;
 }
 
 //=============================================================================
@@ -1873,19 +1616,16 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// V26: ψ-Guided Texel Marching with PROPER Entry Detection
+// V25: ψ-Guided Texel Marching with Robustness Tracking
 //
-// V25 Bug: Used inverseDisplacement(rayO + rayTMin * rayD) to find entry texel.
-// But rayTMin is from ray-AABB intersection, NOT where ψ=0 curve enters the
-// UV region! This caused ψ-marching to start at wrong texels and never find hits.
+// This is the ψ-guided marching from V18, modified to:
+// 1. Track how many texels were visited
+// 2. Detect degenerate cases (ψ≈0 at all corners)
+// 3. Use bidirectional fallback when sign detection fails
 //
-// V26 Fix: Use findPsiZeroEntry() to properly find where ψ=0 curve crosses
-// the UV region boundary. This is the CORRECT entry point per Paper Section 4.4.
-//
-// The ψ=0 curve is where the ray projects onto the UV plane (Equation 3).
-// Texel marching should follow this curve through the UV region.
+// The texel count is returned to allow the caller to decide if fallback is needed.
 //=============================================================================
-bool texelMarchWithPsi_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+bool texelMarchWithPsi_V25(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                            float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
                            int2 texSize, float2 rayDirUV,
                            out float hitT, out float2 hitBary, out float3 hitGeoNormal,
@@ -1907,15 +1647,32 @@ bool texelMarchWithPsi_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     if (any(texelMin > texelMax))
         return false;
 
-    // V26: Find entry point where ψ=0 curve crosses UV region boundary
-    // This is the CORRECT entry point per Paper Section 4.4
-    int2 currentTexel;
-    int entryEdge;
-    bool validEntry = findPsiZeroEntry(tri, rayO, rayD, uvMin, uvMax, texSize, rayDirUV,
-                                       currentTexel, entryEdge);
+    // Find entry point by projecting ray entry to UV space
+    float3 Q_entry = rayO + rayTMin * rayD;
+    float2 entryBary;
+    bool validEntry = inverseDisplacement(tri, Q_entry, entryBary);
 
-    // Ensure texel is within bounds (findPsiZeroEntry should guarantee this, but be safe)
-    currentTexel = clamp(currentTexel, texelMin, texelMax);
+    int2 currentTexel;
+    int entryEdge = EDGE_NONE;
+
+    if (validEntry && baryInTriangle(entryBary, 0.1))
+    {
+        float2 entryUV = baryToTex(tri, entryBary);
+        currentTexel = int2(floor(entryUV * float2(texSize)));
+        currentTexel = clamp(currentTexel, texelMin, texelMax);
+    }
+    else
+    {
+        // Fallback: start at corner of UV region based on ray direction
+        if (rayDirUV.x >= 0 && rayDirUV.y >= 0)
+            currentTexel = texelMin;
+        else if (rayDirUV.x >= 0 && rayDirUV.y < 0)
+            currentTexel = int2(texelMin.x, texelMax.y);
+        else if (rayDirUV.x < 0 && rayDirUV.y >= 0)
+            currentTexel = int2(texelMax.x, texelMin.y);
+        else
+            currentTexel = texelMax;
+    }
 
     float bestT = rayTMax + 1.0;
     bool found = false;
@@ -2094,16 +1851,20 @@ bool texelMarchWithPsi_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// V26: Simplified Leaf Region Tester (GUI Toggle)
+// V25.2: Hybrid Leaf Region Tester (Configurable Fallback)
 //
-// Removed hybrid approach - now just two modes controlled by GUI:
-//   - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
-//   - pushConst.usePsiMarching = 1: ψ-guided marching (V26, experimental)
+// V25 Bug: Only fell back when visit count was low (broken).
+// V25.1 Bug: Always fell back when !psiFound, even with threshold=0.
 //
-// V26 uses findPsiZeroEntry() to properly find where ψ=0 curve crosses
-// the UV region boundary (per Paper Section 4.4).
+// V25.2 Fix: Make threshold behavior intuitive:
+//   - PSI_MARCH_MIN_RATIO = 0: Pure ψ-marching (NO fallback, for testing)
+//   - PSI_MARCH_MIN_RATIO = 1: Pure brute force (ALWAYS fallback)
+//   - PSI_MARCH_MIN_RATIO = 0.3: Hybrid (fallback when unreliable)
+//
+// The key insight is that threshold=0 should mean "trust ψ completely"
+// and threshold=1 should mean "don't trust ψ at all".
 //=============================================================================
-bool testLeafRegion_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
+bool testLeafRegion_V25(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                         float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
                         int2 texSize,
                         out float hitT, out float2 hitBary, out float3 hitGeoNormal)
@@ -2112,26 +1873,111 @@ bool testLeafRegion_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
 
-    // Check GUI toggle: 0 = brute force, 1 = ψ-marching
-    if (pushConst.usePsiMarching == 0)
+    // Compute ray direction in UV space (for ψ-marching)
+    float2 rayDirUV = computeRayDirUV(tri, rayD);
+
+    // Estimate expected path length through the region
+    float2 regionSizeTexels = (uvMax - uvMin) * float2(texSize);
+    float expectedPathLength;
+
+    if (abs(rayDirUV.x) < 0.001 && abs(rayDirUV.y) < 0.001)
     {
-        // Brute force: test ALL texels in the region (reliable)
+        // Ray nearly perpendicular to surface - very short path expected
+        expectedPathLength = 1.0;
+    }
+    else
+    {
+        // Estimate based on dominant direction
+        float2 absDir = abs(rayDirUV);
+        float2 normalizedDir = absDir / max(absDir.x + absDir.y, 0.001);
+        expectedPathLength = regionSizeTexels.x * normalizedDir.x + regionSizeTexels.y * normalizedDir.y;
+        expectedPathLength = max(1.0, expectedPathLength);
+    }
+
+    // V25.2: Special case - threshold >= 1.0 means pure brute force
+    if (PSI_MARCH_MIN_RATIO >= 1.0)
+    {
         return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
                                      uvMin, uvMax, rayTMin, rayTMax,
                                      texSize, hitT, hitBary, hitGeoNormal);
     }
 
-    // ψ-guided marching (V26): use proper entry detection per Paper Section 4.4
-    float2 rayDirUV = computeRayDirUV(tri, rayD);
+    // Try ψ-guided marching first
     int texelsVisited = 0;
+    float psiHitT, bruteHitT;
+    float2 psiHitBary, bruteHitBary;
+    float3 psiHitNormal, bruteHitNormal;
 
-    bool found = texelMarchWithPsi_V26(tri, matIdx, rayO, rayD,
-                                       uvMin, uvMax, rayTMin, rayTMax,
-                                       texSize, rayDirUV,
-                                       hitT, hitBary, hitGeoNormal,
-                                       texelsVisited);
+    bool psiFound = texelMarchWithPsi_V25(tri, matIdx, rayO, rayD,
+                                          uvMin, uvMax, rayTMin, rayTMax,
+                                          texSize, rayDirUV,
+                                          psiHitT, psiHitBary, psiHitNormal,
+                                          texelsVisited);
 
-    return found;
+    // V25.2: Special case - threshold <= 0 means pure ψ-marching (no fallback)
+    if (PSI_MARCH_MIN_RATIO <= 0.0)
+    {
+        if (psiFound)
+        {
+            hitT = psiHitT;
+            hitBary = psiHitBary;
+            hitGeoNormal = psiHitNormal;
+            return true;
+        }
+        return false;  // No fallback - if ψ didn't find it, we miss it
+    }
+
+    // V25.2: Hybrid mode (0 < threshold < 1)
+    // Determine if fallback is needed based on confidence
+    float visitRatio = float(texelsVisited) / expectedPathLength;
+
+    // Fall back to brute force if:
+    // 1. ψ-marching found NO hit (might have visited wrong texels), OR
+    // 2. ψ-marching visited too few texels (early termination)
+    bool needFallback = !psiFound || (visitRatio < PSI_MARCH_MIN_RATIO);
+
+    if (needFallback)
+    {
+        // Try brute force
+        bool bruteFound = testAllTexelsInRegion(tri, matIdx, rayO, rayD,
+                                                 uvMin, uvMax, rayTMin, rayTMax,
+                                                 texSize, bruteHitT, bruteHitBary, bruteHitNormal);
+
+        if (bruteFound)
+        {
+            // Brute force found a hit - use it (it's more reliable)
+            // If ψ-marching also found a hit, use the closer one
+            if (psiFound && psiHitT < bruteHitT)
+            {
+                hitT = psiHitT;
+                hitBary = psiHitBary;
+                hitGeoNormal = psiHitNormal;
+            }
+            else
+            {
+                hitT = bruteHitT;
+                hitBary = bruteHitBary;
+                hitGeoNormal = bruteHitNormal;
+            }
+            return true;
+        }
+        else if (psiFound)
+        {
+            // Brute force found nothing but ψ-marching did
+            // This is suspicious but use ψ-marching's result
+            hitT = psiHitT;
+            hitBary = psiHitBary;
+            hitGeoNormal = psiHitNormal;
+            return true;
+        }
+        return false;
+    }
+
+    // ψ-marching found a hit AND visited enough texels - trust it
+    hitT = psiHitT;
+    hitBary = psiHitBary;
+    hitGeoNormal = psiHitNormal;
+    return true;
 }
 
 //=============================================================================
@@ -2383,14 +2229,13 @@ void intersectionMain()
         if (maxTexelSize <= MARCHING_SCALE)
         {
             // V25: Hybrid ψ-Guided + Brute Force
-            // V26: ψ-marching with PROPER entry detection (per Paper Section 4.4)
-            // V25 bug: used wrong entry point (ray-AABB instead of ψ=0 curve entry)
-            // V26 fix: findPsiZeroEntry() finds where ψ=0 crosses UV region boundary
+            // Try ψ-marching first (fast path), fall back to brute force if it fails
+            // This gives performance for normal cases + correctness for edge cases
             float hitT;
             float2 hitBary;
             float3 hitGeoNormal;
 
-            if (testLeafRegion_V26(tri, matIdx, rayOrigin, rayDir,
+            if (testLeafRegion_V25(tri, matIdx, rayOrigin, rayDir,
                                    bound.uvMin, bound.uvMax,
                                    rayTMin, min(rayTMax, bestT),
                                    texSize, hitT, hitBary, hitGeoNormal))

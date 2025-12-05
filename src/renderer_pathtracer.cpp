@@ -255,6 +255,24 @@ bool PathTracer::onUIRender(Resources& resources)
       PE::end();
   }
 
+  // RMIP texel marching method selection
+  if (PE::begin())
+  {
+      bool prevPsiMarching = m_usePsiMarching;
+      changed |= PE::Checkbox("Use Psi Marching (RMIP)", &m_usePsiMarching,
+                              "RMIP texel marching: OFF=brute force (reliable), ON=psi-guided (V26, experimental)");
+
+      if (m_usePsiMarching != prevPsiMarching)
+      {
+          if (m_usePsiMarching)
+              LOGI("RMIP: Switched to psi-guided texel marching (V26)\n");
+          else
+              LOGI("RMIP: Switched to brute force texel marching\n");
+      }
+
+      PE::end();
+  }
+
   // Manual sampling controls
   if(PE::begin())
   {
@@ -418,6 +436,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.useQOLDS          = m_useQOLDS ? 1 : 0;  // QOLDS sampling toggle 
   m_pushConst.useFastMSX        = m_useFastMSX ? 1 : 0;
   m_pushConst.useBoundedVNDF    = m_useBoundedVNDF ? 1 : 0;
+  m_pushConst.usePsiMarching    = m_usePsiMarching ? 1 : 0;  // RMIP texel marching method
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 
   // Track total samples accumulated
