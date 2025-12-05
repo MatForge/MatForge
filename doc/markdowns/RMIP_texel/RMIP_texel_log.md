@@ -5290,6 +5290,287 @@ For a 512×512 texture:
 
 ---
 
-*Last Updated: December 4, 2025*
+## Paper vs Implementation Comparison (Dec 5, 2025)
+
+### Overview
+
+This section provides a systematic comparison between the current `displacement_intersection.slang` (V28/cleaned) and the RMIP paper ("Displacement ray-tracing via inversion and oblong bounding", SIGGRAPH Asia 2023).
+
+---
+
+### Summary of Differences
+
+| Component | Paper | Current Implementation | Status |
+|-----------|-------|------------------------|--------|
+| **RMIP Query** | 4-rectangle decomposition (Alg. 2) | Conservative global bounds | ❌ NOT USED |
+| **Inverse Displacement** | Newton iteration (Eq. 2) | Newton iteration | ✅ Correct |
+| **ψ Function** | det(P-O, N, D) (Eq. 3) | Same formula | ✅ Correct |
+| **Turning Points** | Split at ψ_u=0, ψ_v=0 (Eq. 4-5) | Not implemented | ❌ MISSING |
+| **Bound Reduction** | Project 3D interval → 2D (Alg. 1, line 15) | Implemented | ✅ Correct |
+| **2D Subdivision** | Split at ψ=0 intersection (Fig. 5c) | Geometric midpoint | ⚠️ Different |
+| **Texel Marching** | ψ sign at corners → exit edge | Implemented | ⚠️ Has issues |
+| **Front-to-back** | Push back first, pop front (Alg. 1, line 17) | Stack-based | ⚠️ Order not guaranteed |
+| **Affine Arithmetic** | 3D bounds from 2D regions | Implemented | ✅ Correct |
+| **Bounding Prism** | Per-triangle prism | Implemented | ✅ Correct |
+
+---
+
+### 1. RMIP Data Structure (Paper Section 5) — ❌ NOT USED
+
+**This is the MOST CRITICAL missing feature.**
+
+**Paper Algorithm 2**:
+```
+function RMIP_RMQ(uv_min, uv_max, λ, rmip):
+    r = textureSize(rmip, 0)
+    p_min = floor(uv_min · r), p_max = ceil(uv_max · r)
+    s = floor(log2(p_max - p_min))  // Query log size
+    i = s.x + s.y · stride          // Layer index
+
+    // Sample 4 overlapping sub-queries
+    b1 = textureLoD(rmip, u_min, v_min, i, λ)
+    b2 = textureLoD(rmip, u_mid, v_min, i, λ)
+    b3 = textureLoD(rmip, u_min, v_mid, i, λ)
+    b4 = textureLoD(rmip, u_mid, v_mid, i, λ)
+    return minmax(b1, b2, b3, b4)
+```
+
+**Current Implementation** (lines 553-560):
+```slang
+void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
+                           out float hMin, out float hMax)
+{
+    // TODO: Use RMIP for tight rectangular bounds per paper
+    // Currently using conservative global bounds
+    hMin = 0.0;
+    hMax = getDisplacementScale(matIdx);
+}
+```
+
+**Impact**:
+- Bounds are always [0, maxDisplacement] regardless of region
+- No hierarchical culling benefit
+- All rays must traverse to leaf level
+- Loses the main performance advantage (10× speedup from paper)
+
+**Fix Required**: The RMIP query function exists in `rmip_common.h.slang` as `queryRMIPFull()`. It should be called:
+```slang
+void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
+                           out float hMin, out float hMax)
+{
+    uint maxLevel = uint(log2(float(max(texSize.x, texSize.y))));
+    float2 bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, texMin, texMax, maxLevel);
+    hMin = bounds.x * getDisplacementScale(matIdx);
+    hMax = bounds.y * getDisplacementScale(matIdx);
+}
+```
+
+---
+
+### 2. Turning Point Detection (Paper Section 4.2) — ❌ MISSING
+
+**Paper Equations 4-5**:
+```
+ψ_u = det(P_u, N, D) + det(P-O, N_u, D) = 0  (line in UV space)
+ψ_v = det(P_v, N, D) + det(P-O, N_v, D) = 0  (line in UV space)
+```
+
+The paper identifies points where the projected ray curve changes direction. These are intersections of the ψ=0 curve with the lines ψ_u=0 and ψ_v=0.
+
+**Paper Algorithm 1, lines 4-5**:
+```
+turning_points = zero_uv_derivative(ray, triangle)
+bounds = split(bounds, turning_points)
+```
+
+**Current Implementation**: No turning point detection. Initial bounds come only from inverse displacement of entry/exit points.
+
+**Impact**:
+- Without splitting at turning points, the 2D bounding rectangle may not contain the entire ray curve
+- Ray curve can "bulge" outside the rectangle
+- May cause **missed intersections**, contributing to stripping artifacts
+
+**Paper's inline figure** (Section 4.2):
+> "Each ψ_u = 0 and ψ_v = 0 defines a line in texture space. We can retrieve the zero-derivative points by intersecting the projected ray with those two lines, which boils down to solving two quadratic equations."
+
+---
+
+### 3. ψ-Guided Texel Marching (Paper Section 4.4) — ⚠️ PARTIALLY CORRECT
+
+**Paper Description**:
+> "The sign of the implicit form ψ (3) at each texel corner indicates from which edge the ray leaves the texel."
+
+**Current Implementation Issues**:
+
+1. **Invalid corner handling** (lines 1108-1111):
+   ```slang
+   float psi00 = valid00 ? psi(tri, b00_orig, rayO, rayD) : 0.0;
+   ```
+   Setting invalid corners to 0.0 introduces **artificial sign crossings**. The paper assumes all corners are valid within the triangle.
+
+2. **Degenerate ψ threshold** (lines 1159-1161):
+   ```slang
+   float maxAbsPsi = max(max(abs(psi00), abs(psi10)), max(abs(psi01), abs(psi11)));
+   bool psiDegenerate = maxAbsPsi < PSI_NEAR_ZERO_THRESHOLD;  // 0.01
+   ```
+   The threshold is not scaled relative to triangle/texel size. For small triangles or high-curvature regions, this could incorrectly trigger the degenerate path.
+
+3. **curveDir usage**: The implementation uses `rayDirUV` (projected ray direction) for disambiguation. The paper suggests using the actual ψ gradient direction for proper curve following.
+
+---
+
+### 4. 2D Bound Subdivision (Paper Section 4.3, Fig. 5c) — ⚠️ DIFFERENT APPROACH
+
+**Paper**:
+> "We instead split the domain directly in texture space: we use the implicit form to compute the intersection between the interval curve and the line splitting the longer side of the bound in the middle."
+
+The paper computes where ψ=0 intersects the midpoint line, then splits at that point.
+
+**Current Implementation** (lines 1449-1474):
+```slang
+// Subdivide
+float2 uvSize = bound.uvMax - bound.uvMin;
+if (uvSize.x >= uvSize.y)
+{
+    float uMid = (bound.uvMin.x + bound.uvMax.x) * 0.5;
+    // Split at geometric midpoint
+}
+```
+
+Splits at the **geometric** midpoint, not the ψ=0 intersection.
+
+**Impact**:
+- Less balanced traversal
+- One sub-region may contain most of the ray curve
+- Potential for the ray curve to escape one sub-region entirely
+
+---
+
+### 5. Front-to-Back Ordering (Paper Alg. 1, lines 16-17) — ⚠️ NOT GUARANTEED
+
+**Paper**:
+```
+for front, back in split(bound):
+    bounds.push(back, front)  // Back first so front is popped earlier
+```
+
+The paper explicitly maintains front-to-back order for early termination.
+
+**Current Implementation** (lines 1452-1473):
+```slang
+if (uvSize.x >= uvSize.y)
+{
+    // Right half first
+    stack[stackPtr++] = rightHalf;
+    // Left half second
+    stack[stackPtr++] = leftHalf;
+}
+```
+
+The order is based on subdivision direction, not ray direction. The "front" sub-region (closer to ray origin in UV space) should always be processed first.
+
+**Impact**:
+- May process back regions before front regions
+- Delays finding the first hit
+- Misses early termination opportunities
+
+---
+
+### 6. The Fundamental ψ Limitation (V31 Discovery)
+
+The log documents extensive debugging (V12-V30.1) that revealed a **fundamental limitation**:
+
+> **ψ=0 represents the ray's projection onto the UNDISPLACED base surface, NOT where the ray hits the displaced surface.**
+
+**Paper Equation 3**:
+```
+ψ(u,v) = det(P(u,v) - O, N(u,v), D) = 0
+```
+
+Where `P(u,v)` is the **base** triangle position (no displacement applied).
+
+**Paper's implicit assumption** (Section 4.4):
+> "This step is triggered when the 2D bounds become small enough, **typically the size of a texel**."
+
+At texel scale, displacement is approximately constant, so ψ≈displaced hit location. But at larger scales (MARCHING_SCALE > 1.0), the displacement gradient can move the actual hit to a different texel.
+
+**This explains**:
+- Why stripping follows ψ contours (concentric rings around displacement peaks)
+- Why brute force works perfectly (tests ALL texels)
+- Why reducing MARCHING_SCALE to 1.0 makes ψ-marching match brute force
+
+---
+
+### 7. Additional Paper Details Not Implemented
+
+1. **Fractional LoD support** (Paper Section 5, Fig. 6):
+   The paper's RMIP supports fractional level-of-detail via interpolation across mip levels. Current implementation uses integer levels only.
+
+2. **Tiling support** (Paper Section 5, Algorithm 2):
+   The paper handles displacement map tiling with wrapping queries. Current implementation may not correctly handle tiled UV coordinates.
+
+3. **RMIP compression** (Paper supplemental):
+   The paper describes compression from N²(1+log₂N)² to N² (order of classical mipmap). Current RMIP builder may not use this compression.
+
+---
+
+### Recommendations (Priority Order)
+
+#### High Priority
+
+1. **Use RMIP for displacement bounds**
+   - Replace `getDisplacementBounds` to call `queryRMIPFull`
+   - This is the core performance benefit of the paper
+
+2. **Add turning point detection**
+   - Compute ψ_u=0 and ψ_v=0 lines
+   - Split initial bounds at turning points
+   - Prevents ray curve from escaping bounding rectangle
+
+3. **Fix invalid corner handling in ψ-marching**
+   - Don't set invalid corners to 0.0 (creates false crossings)
+   - Skip texels with <2 valid corners, or use boundary-aware ψ
+
+#### Medium Priority
+
+4. **Ensure front-to-back ordering**
+   - Determine which sub-region is "front" based on ray UV direction
+   - Push back first, front second
+
+5. **Scale ψ threshold properly**
+   - Make `PSI_NEAR_ZERO_THRESHOLD` relative to triangle/texel size
+
+#### Low Priority
+
+6. **Subdivision at ψ=0 intersection**
+   - Compute where ψ=0 crosses the midpoint line
+   - Split there instead of geometric midpoint
+
+---
+
+### Test Cases for Validation
+
+1. **Grazing angle rays**: Most sensitive to turning points
+2. **High curvature triangles**: ψ varies rapidly, RMIP bounds matter most
+3. **Triangle edges**: Boundary between valid/invalid corners
+4. **Near-parallel to normal**: Should have small UV footprint (fast path)
+5. **Tangent rays**: ψ ≈ 0 everywhere, tests degenerate handling
+6. **Tiled displacement**: Tests RMIP wrapping support
+
+---
+
+### Paper References
+
+- **Algorithm 1**: Main traversal loop (Section 3)
+- **Section 4.1**: Point-wise inversion (Eq. 2)
+- **Section 4.2**: Implicit ray projection (Eq. 3) and turning points (Eq. 4-5)
+- **Section 4.3**: Bound tightening (Fig. 5)
+- **Section 4.4**: Texel marching (inline figure)
+- **Section 5**: RMIP structure (Algorithm 2, Fig. 6)
+
+---
+
+*Last Updated: December 5, 2025*
 *V27 restored as base, tuned with MARCHING_SCALE and MAX_TRAVERSAL_ITERS analysis*
 *V31 insight confirmed: ψ limitation is fundamental, brute force is the robust solution*
+*Paper comparison added: Key missing features are RMIP bounds and turning point detection*
