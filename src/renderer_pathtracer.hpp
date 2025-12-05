@@ -106,11 +106,13 @@ public:
   int                        m_totalSamplesAccumulated{0};  // Track total samples separately
 
   // QOLDS sampling method 
-  bool m_useQOLDS{false};  // Toggle between default sampler and QOLDS
+  bool m_useQOLDS{true};  // Toggle between default sampler and QOLDS
 
   bool m_useFastMSX{true};  // Toggle for fast multi-sample anti-aliasing
 
   bool m_useBoundedVNDF{true};  // Toggle for bounded VNDF GGX sampling
+
+  bool m_usePsiMarching{false};  // RMIP: false=brute force (default), true=ψ-guided texel marching (V26)
 
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 

@@ -1,23 +1,17 @@
 /*
- * RMIP V26 - Proper ψ=0 Entry Detection (Paper Section 4.4)
+ * RMIP V26 - Proper ψ=0 Entry Detection (Paper Section 4.4) + GUI Toggle
  * Paper: "Displacement ray-tracing via inversion and oblong bounding" (SIGGRAPH Asia 2023)
  * Reference: "Tessellation-Free Displacement Mapping for Ray Tracing" (Thonat et al. 2021)
  *
- * V26 Key Fix (from V25.2):
- * - V25 Bug: Used inverseDisplacement(rayO + rayTMin * rayD) to find entry texel
- * - But rayTMin is from ray-AABB intersection, NOT where ψ=0 curve enters UV region!
- * - This caused ψ-marching to start at wrong texels and NEVER find hits
- * - V26 Fix: Use findPsiZeroEntry() to properly find where ψ=0 curve crosses
- *   the UV region boundary. This is the CORRECT entry point per Paper Section 4.4.
+ * V26 Changes:
+ * 1. Fixed entry point detection: findPsiZeroEntry() properly finds where ψ=0 curve
+ *    crosses UV region boundary (Paper Section 4.4), instead of wrong AABB projection
  *
- * The ψ=0 curve is where the ray projects onto the UV plane (Equation 3).
- * To find entry: evaluate ψ at UV region corners, find sign changes on edges,
- * use ray direction to determine which crossing is entry vs exit.
+ * 2. Simplified to two modes (removed hybrid approach that wasn't working):
+ *    - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
+ *    - pushConst.usePsiMarching = 1: ψ-guided marching (experimental)
  *
- * Threshold behavior (same as V25.2):
- *   - PSI_MARCH_MIN_RATIO = 0: Pure ψ-marching (NO fallback, for testing)
- *   - PSI_MARCH_MIN_RATIO = 1: Pure brute force (ALWAYS fallback)
- *   - PSI_MARCH_MIN_RATIO = 0.3: Hybrid (fallback when unreliable)
+ * GUI Toggle: "Use Psi Marching (RMIP)" checkbox controls the mode
  *
  * Key Equations from Paper:
  * - Eq 2: (P(u,v) - Q) × N(u,v) = 0 (displacement inversion)
@@ -44,11 +38,7 @@ static const int MAX_STACK_SIZE = 32;  // Was 32
 // This helps with diagonal edge cases where u+v≈1
 static const float BARY_EPS = 0.05;  // Was 0.01 in many places
 
-// V25: Threshold for detecting failed ψ-marching
-// If marching visits fewer than this fraction of expected texels, fall back to brute force
-static const float PSI_MARCH_MIN_RATIO = 0.1;  // At least 30% of expected path length
-
-// V25: Threshold for detecting ψ degeneracy at texel corners
+// V26: Threshold for detecting ψ degeneracy at texel corners
 // When all ψ values are below this, sign detection becomes unreliable
 static const float PSI_NEAR_ZERO_THRESHOLD = 0.01;
 
@@ -2104,20 +2094,14 @@ bool texelMarchWithPsi_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
 }
 
 //=============================================================================
-// V25.2: Hybrid Leaf Region Tester (Configurable Fallback)
+// V26: Simplified Leaf Region Tester (GUI Toggle)
 //
-// V25 Bug: Only fell back when visit count was low (broken).
-// V25.1 Bug: Always fell back when !psiFound, even with threshold=0.
+// Removed hybrid approach - now just two modes controlled by GUI:
+//   - pushConst.usePsiMarching = 0: Brute force (reliable, tests all texels)
+//   - pushConst.usePsiMarching = 1: ψ-guided marching (V26, experimental)
 //
-// V26 Fix: Proper ψ=0 Entry Detection
-//   - V25 used wrong entry point (ray-AABB intersection instead of ψ=0 curve entry)
-//   - V26 uses findPsiZeroEntry() to find where ψ=0 curve crosses UV region boundary
-//   - This is the CORRECT entry point per Paper Section 4.4
-//
-// Threshold behavior (same as V25.2):
-//   - PSI_MARCH_MIN_RATIO = 0: Pure ψ-marching (NO fallback, for testing)
-//   - PSI_MARCH_MIN_RATIO = 1: Pure brute force (ALWAYS fallback)
-//   - PSI_MARCH_MIN_RATIO = 0.3: Hybrid (fallback when unreliable)
+// V26 uses findPsiZeroEntry() to properly find where ψ=0 curve crosses
+// the UV region boundary (per Paper Section 4.4).
 //=============================================================================
 bool testLeafRegion_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                         float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
@@ -2128,111 +2112,26 @@ bool testLeafRegion_V26(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     hitBary = float2(0, 0);
     hitGeoNormal = float3(0, 1, 0);
 
-    // Compute ray direction in UV space (for ψ-marching)
-    float2 rayDirUV = computeRayDirUV(tri, rayD);
-
-    // Estimate expected path length through the region
-    float2 regionSizeTexels = (uvMax - uvMin) * float2(texSize);
-    float expectedPathLength;
-
-    if (abs(rayDirUV.x) < 0.001 && abs(rayDirUV.y) < 0.001)
+    // Check GUI toggle: 0 = brute force, 1 = ψ-marching
+    if (pushConst.usePsiMarching == 0)
     {
-        // Ray nearly perpendicular to surface - very short path expected
-        expectedPathLength = 1.0;
-    }
-    else
-    {
-        // Estimate based on dominant direction
-        float2 absDir = abs(rayDirUV);
-        float2 normalizedDir = absDir / max(absDir.x + absDir.y, 0.001);
-        expectedPathLength = regionSizeTexels.x * normalizedDir.x + regionSizeTexels.y * normalizedDir.y;
-        expectedPathLength = max(1.0, expectedPathLength);
-    }
-
-    // V25.2: Special case - threshold >= 1.0 means pure brute force
-    if (PSI_MARCH_MIN_RATIO >= 1.0)
-    {
+        // Brute force: test ALL texels in the region (reliable)
         return testAllTexelsInRegion(tri, matIdx, rayO, rayD,
                                      uvMin, uvMax, rayTMin, rayTMax,
                                      texSize, hitT, hitBary, hitGeoNormal);
     }
 
-    // V26: Try ψ-guided marching with PROPER entry detection
+    // ψ-guided marching (V26): use proper entry detection per Paper Section 4.4
+    float2 rayDirUV = computeRayDirUV(tri, rayD);
     int texelsVisited = 0;
-    float psiHitT, bruteHitT;
-    float2 psiHitBary, bruteHitBary;
-    float3 psiHitNormal, bruteHitNormal;
 
-    bool psiFound = texelMarchWithPsi_V26(tri, matIdx, rayO, rayD,
-                                          uvMin, uvMax, rayTMin, rayTMax,
-                                          texSize, rayDirUV,
-                                          psiHitT, psiHitBary, psiHitNormal,
-                                          texelsVisited);
+    bool found = texelMarchWithPsi_V26(tri, matIdx, rayO, rayD,
+                                       uvMin, uvMax, rayTMin, rayTMax,
+                                       texSize, rayDirUV,
+                                       hitT, hitBary, hitGeoNormal,
+                                       texelsVisited);
 
-    // V25.2: Special case - threshold <= 0 means pure ψ-marching (no fallback)
-    if (PSI_MARCH_MIN_RATIO <= 0.0)
-    {
-        if (psiFound)
-        {
-            hitT = psiHitT;
-            hitBary = psiHitBary;
-            hitGeoNormal = psiHitNormal;
-            return true;
-        }
-        return false;  // No fallback - if ψ didn't find it, we miss it
-    }
-
-    // V25.2: Hybrid mode (0 < threshold < 1)
-    // Determine if fallback is needed based on confidence
-    float visitRatio = float(texelsVisited) / expectedPathLength;
-
-    // Fall back to brute force if:
-    // 1. ψ-marching found NO hit (might have visited wrong texels), OR
-    // 2. ψ-marching visited too few texels (early termination)
-    bool needFallback = !psiFound || (visitRatio < PSI_MARCH_MIN_RATIO);
-
-    if (needFallback)
-    {
-        // Try brute force
-        bool bruteFound = testAllTexelsInRegion(tri, matIdx, rayO, rayD,
-                                                 uvMin, uvMax, rayTMin, rayTMax,
-                                                 texSize, bruteHitT, bruteHitBary, bruteHitNormal);
-
-        if (bruteFound)
-        {
-            // Brute force found a hit - use it (it's more reliable)
-            // If ψ-marching also found a hit, use the closer one
-            if (psiFound && psiHitT < bruteHitT)
-            {
-                hitT = psiHitT;
-                hitBary = psiHitBary;
-                hitGeoNormal = psiHitNormal;
-            }
-            else
-            {
-                hitT = bruteHitT;
-                hitBary = bruteHitBary;
-                hitGeoNormal = bruteHitNormal;
-            }
-            return true;
-        }
-        else if (psiFound)
-        {
-            // Brute force found nothing but ψ-marching did
-            // This is suspicious but use ψ-marching's result
-            hitT = psiHitT;
-            hitBary = psiHitBary;
-            hitGeoNormal = psiHitNormal;
-            return true;
-        }
-        return false;
-    }
-
-    // ψ-marching found a hit AND visited enough texels - trust it
-    hitT = psiHitT;
-    hitBary = psiHitBary;
-    hitGeoNormal = psiHitNormal;
-    return true;
+    return found;
 }
 
 //=============================================================================
