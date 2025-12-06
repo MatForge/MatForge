@@ -983,7 +983,7 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
 
     // DEBUG V37c: RMIP returns near-zero - investigate why
     // Compare RMIP layer 0 vs direct displacement to verify texture binding
-    if (true)
+    if (false)
     {
         uint maxLevel = uint(log2(float(texSize.x)));
 

@@ -6291,3 +6291,142 @@ if (hMax < 0.001 * scale) {
 *V36: RMIP bounds query implemented but returns incorrect max values - under investigation*
 *V37: NEAREST sampler fix attempted - did not resolve, queryRMIPFull returns ~0.01 constant*
 *V37b: Added direct RMIP sampling diagnostic to isolate texture vs query logic issue*
+*V38: RMIP layer building fix - all layers now correctly populated*
+
+---
+
+### Version 38: RMIP Layer Building Fix (December 5, 2025)
+
+**Problem**: V36/V37 diagnostics revealed that `queryRMIPFull` was returning constant ~0.01 values regardless of query region. Progressive layer testing showed:
+- Layer 0 (init shader): ✅ Contains correct displacement values
+- Layer 1+ (expand shader): ❌ All zeros
+
+The RMIP expand shader was not writing to higher layers despite being dispatched.
+
+**Root Cause Analysis**:
+
+Three issues were identified in the RMIP build pipeline:
+
+#### Issue 1: Wrong Descriptor Type for Expand Shader (V38)
+
+The expand shader used `Texture2DArray<float2>` for the input binding, which requires `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`. However, the `[]` operator (Load) requires `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE`.
+
+**Fix**: Created separate descriptor layouts for init and expand shaders:
+- Init shader: `SAMPLED_IMAGE` for binding 0 (reads displacement texture with sampler)
+- Expand shader: `STORAGE_IMAGE` for binding 0 (reads RMIP array with `[]` operator)
+
+```cpp
+// rmip_builder.cpp - createDescriptorSetLayouts()
+// Init shader layout (SAMPLED_IMAGE for binding 0)
+m_initBindings.addBinding(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+
+// Expand shader layout (STORAGE_IMAGE for binding 0)
+m_expandBindings.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+```
+
+```slang
+// rmip_expand.compute.slang
+// V38: Both input and output must be RWTexture2DArray for [] operator access
+[[vk::binding(0, 0)]]
+RWTexture2DArray<float2> rmipInput;  // Read-only access via STORAGE_IMAGE
+
+[[vk::binding(1, 0)]]
+RWTexture2DArray<float2> rmipOutput;
+```
+
+#### Issue 2: Wrong Barriers for Transfer Operations (V38b)
+
+After `vkCmdCopyImage` operations, the code used `addImageBarrier()` with `VK_ACCESS_SHADER_WRITE_BIT`, but copy operations produce `VK_ACCESS_TRANSFER_WRITE_BIT`.
+
+**Fix**: Added `addTransferBarrier()` for proper synchronization after copy operations:
+
+```cpp
+void RmipBuilder::addTransferBarrier(VkCommandBuffer cmd, VkImage image)
+{
+    VkImageMemoryBarrier barrier{
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+        // ...
+    };
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, ...);
+}
+```
+
+#### Issue 3: Uniform Buffer Race Condition (V38c) **[PRIMARY FIX]**
+
+The critical issue: A single `m_paramsBuffer` uniform buffer was being overwritten before GPU execution.
+
+The build sequence records multiple dispatches:
+1. CPU writes params for dispatch (p=1,q=0), records dispatch
+2. CPU writes params for dispatch (p=2,q=0), **overwrites buffer**, records dispatch
+3. CPU writes params for dispatch (p=1,q=1), **overwrites buffer**, records dispatch
+4. ... more dispatches recorded ...
+5. GPU finally executes - but buffer now contains params from the LAST dispatch!
+
+All dispatches executed with the wrong (p,q) parameters.
+
+**Fix**: Changed the expand shader from `ConstantBuffer` to push constants:
+
+```slang
+// Before (V37):
+[[vk::binding(2, 0)]]
+ConstantBuffer<RMIPBuildParams> params;
+
+// After (V38c):
+// Push constants are recorded per-dispatch and don't have this race condition
+[[vk::push_constant]]
+RMIPBuildParams params;
+```
+
+The C++ code was already calling `vkCmdPushConstants` (lines 554-555 in `bindExpandResources()`), so the shader change was the only required modification.
+
+**Verification**:
+
+Added debug code to write constant (0.5, 1.0) to layer 1:
+```slang
+if (p == 1 && q == 0)
+{
+    uint outputLayer = computeLayerIndex(p, q, stride);
+    rmipOutput[uint3(pos, outputLayer)] = float2(0.5, 1.0);  // Test constant
+    return;
+}
+```
+
+After V38c fix, layer 1 correctly showed 1.0 for the max value, confirming the expand shader was executing with correct parameters. Debug code was then removed.
+
+**Files Changed**:
+
+1. `shaders/rmip_expand.compute.slang`:
+   - Changed `Texture2DArray<float2>` to `RWTexture2DArray<float2>` for input (V38)
+   - Changed `ConstantBuffer<RMIPBuildParams>` to `[[vk::push_constant]] RMIPBuildParams` (V38c)
+
+2. `src/rmip_builder.hpp`:
+   - Added separate pipeline layouts: `m_initPipelineLayout`, `m_expandPipelineLayout`
+   - Added separate descriptor layouts: `m_initDescriptorSetLayout`, `m_expandDescriptorSetLayout`
+   - Added `addTransferBarrier()` function declaration (V38b)
+
+3. `src/rmip_builder.cpp`:
+   - Implemented `createDescriptorSetLayouts()` with separate bindings for init and expand
+   - Updated `createPipelines()` to use separate layouts
+   - Added `addTransferBarrier()` implementation (V38b)
+   - Updated all copy locations to use correct barriers
+
+**Build**: ✅ Successful
+
+**Testing Result**: ✅ **RMIP LAYERS NOW CORRECTLY POPULATED**
+
+- Layer 0: Contains actual displacement values (from init shader)
+- Layer 1+: Contains correct minmax values (from expand shader)
+- `getDisplacementBounds()` now returns proper RMIP-queried bounds
+
+**Summary of V38 Fixes**:
+
+| Fix | Issue | Solution |
+|-----|-------|----------|
+| V38 | Expand shader couldn't read input with `[]` operator | Separate descriptor layouts (STORAGE_IMAGE for expand) |
+| V38b | Wrong barriers after copy operations | Added `addTransferBarrier()` with TRANSFER stage |
+| V38c | Uniform buffer race condition | Push constants instead of uniform buffer |
+
+The RMIP data structure is now correctly built, enabling proper displacement bounds queries for the hierarchical traversal algorithm.
