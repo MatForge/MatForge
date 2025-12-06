@@ -979,6 +979,48 @@ float sampleDisplacement(uint matIdx, float2 texUV)
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
 {
+    float scale = getDisplacementScale(matIdx);
+
+    // DEBUG V37c: RMIP returns near-zero - investigate why
+    // Compare RMIP layer 0 vs direct displacement to verify texture binding
+    if (true)
+    {
+        uint maxLevel = uint(log2(float(texSize.x)));
+
+        // Direct displacement sample at center (this WORKS - used by sampleDisplacement)
+        float directDisp = displacementMaps[matIdx].SampleLevel(displacementSampler, float2(0.5, 0.5), 0).r;
+
+        // RMIP layer 0 sample at center
+        // Layer 0 (p=0, q=0) should store (disp, disp) for each texel
+        uint layer0 = getRmipLayer(0, 0, maxLevel);
+        float2 rmipLayer0 = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, float(layer0)), 0).xy;
+
+        // Try layer 0 directly without getRmipLayer (in case layer calc is wrong)
+        float2 rmipDirect0 = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, 0.0), 0).xy;
+
+        // DEBUG OUTPUT via hMax value:
+        // If hMax shows reasonable value (~0.5 range), RMIP has data
+        // If hMax is near 0, RMIP texture is empty/wrong
+
+        // V37c CONFIRMED: Layer 0 works! Issue is in higher layers.
+
+        // V37d: Test layer 1 (p=1, q=0) - 2x1 texel rectangles
+        // layer index = 1 + 0 * (maxLevel+1) = 1
+        float2 rmipLayer1 = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, 1.0), 0).xy;
+
+        // Use layer 1 for bounds - does expand shader work?
+        hMin = 0.0;
+        hMax = rmipLayer1.y * scale;  // Test layer 1
+
+        // Fallback if layer 1 returns near-zero
+        if (false)
+        {
+            hMax = scale;  // Conservative fallback
+        }
+
+        return;
+    }
+
     // Use RMIP for tight rectangular bounds per paper Section 5 / Algorithm 2
     // RMIP provides O(1) minmax queries over arbitrary axis-aligned rectangles
 
@@ -1005,12 +1047,8 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
     float2 bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, queryMin, queryMax, maxLevel);
 
     // Scale by displacement factor to get world-space displacement bounds
-    float scale = getDisplacementScale(matIdx);
     hMin = bounds.x * scale;
     hMax = bounds.y * scale;
-    if (false) {
-        hMax = scale;
-    }
 }
 
 //=============================================================================

@@ -6236,7 +6236,46 @@ When sampling `Texture2DArray` with `float3(uv, float(layer))`:
 
 **Build**: ✅ Successful
 
-**Testing**: Pending user verification
+**Testing Result**: ❌ SAMPLER FIX DID NOT RESOLVE ISSUE
+
+The circular void pattern persists unchanged. Further investigation revealed:
+- `bounds.y` from `queryRMIPFull` is consistently ~0.01 regardless of query region
+- Setting `hMax = 0.01 * scale` reproduces the exact same behavior
+- This indicates `queryRMIPFull` returns a small constant, not actual minmax values
+
+### V37b: Direct RMIP Sampling Diagnostic
+
+Added diagnostic code to bypass `queryRMIPFull` and directly sample the RMIP texture:
+
+```slang
+// Sample layer 0 (single texel values) at center
+uint layer0 = getRmipLayer(0, 0, maxLevel);  // Should be 0
+float2 centerSample = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, float(layer0)), 0).xy;
+
+// Sample highest layer (global minmax)
+uint topLayer = getRmipLayer(maxLevel, maxLevel, maxLevel);
+float2 globalSample = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, float(topLayer)), 0).xy;
+
+// Use global bounds - if this works, RMIP texture is valid
+hMin = globalSample.x * scale;
+hMax = globalSample.y * scale;
+
+// Fallback if global returns near-zero
+if (hMax < 0.001 * scale) {
+    hMin = 0.0;
+    hMax = scale;
+}
+```
+
+**Purpose**: Determine if:
+1. The RMIP texture data is correct (build phase worked)
+2. Direct layer sampling works
+3. Issue is in `queryRMIPFull` logic vs texture binding/data
+
+**Expected Results**:
+- If rendering works with `globalSample`: RMIP texture is valid, bug is in `queryRMIPFull`
+- If fallback triggers (near-zero): RMIP texture has wrong data or isn't bound correctly
+- If still broken even with fallback: Issue is elsewhere
 
 ---
 
@@ -6250,4 +6289,5 @@ When sampling `Texture2DArray` with `float3(uv, float(layer))`:
 *V35: Confirmed hyperbolic two-branch is not the issue (both branches found)*
 *V33-V35 Analysis: Stripping is fundamental to ψ-marching without RMIP bounds*
 *V36: RMIP bounds query implemented but returns incorrect max values - under investigation*
-*V37: ROOT CAUSE FOUND - LINEAR filtering on RMIP sampler. Fixed with separate NEAREST sampler.*
+*V37: NEAREST sampler fix attempted - did not resolve, queryRMIPFull returns ~0.01 constant*
+*V37b: Added direct RMIP sampling diagnostic to isolate texture vs query logic issue*
