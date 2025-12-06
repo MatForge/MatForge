@@ -658,6 +658,13 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
       write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementFactors), &dispFactorsInfo);
   }
 
+  // Add material-to-displacement-index mapping buffer
+  if (resources.bMaterialDispIndex.buffer != VK_NULL_HANDLE)
+  {
+      VkDescriptorBufferInfo mappingInfo{resources.bMaterialDispIndex.buffer, 0, VK_WHOLE_SIZE};
+      write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eMaterialDispIndex), &mappingInfo);
+  }
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 

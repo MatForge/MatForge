@@ -44,15 +44,16 @@ static const float BARY_EPS = 0.05;
 [[vk::binding(8, 1)]] Texture2DArray<float2> rmipMaps[8];
 [[vk::binding(10, 1)]] SamplerState rmipSampler;
 [[vk::binding(12, 1)]] StructuredBuffer<float> displacementFactors;
+[[vk::binding(13, 1)]] StructuredBuffer<int> materialDispIndex;  // Maps materialID -> displacement array index (-1 = no displacement)
 
 [[vk::push_constant]] ConstantBuffer<PathtracePushConstant> pushConst;
 
 //=============================================================================
 // Helper Functions
 //=============================================================================
-float getDisplacementScale(uint matIdx)
+float getDisplacementScale(uint dispIdx)
 {
-    return displacementFactors[matIdx];
+    return displacementFactors[dispIdx];
 }
 
 uint packUV(float2 uv)
@@ -1495,7 +1496,15 @@ void intersectionMain()
     GltfRenderPrimitive renderPrim = renderPrimitives[renderPrimID];
 
     int materialID = max(0, renderNode.materialID);
-    uint matIdx = min(uint(materialID), 7u);
+
+    // Look up displacement array index from material ID
+    // Returns -1 if this material has no displacement
+    int dispIdx = materialDispIndex[materialID];
+    if (dispIdx < 0)
+        return;  // No displacement for this material
+
+    // Clamp to array bounds (array size is 8)
+    uint dispArrayIdx = min(uint(dispIdx), 7u);
 
     uint3 indices = getTriangleIndices(renderPrim, triangleIndex);
 
@@ -1523,13 +1532,13 @@ void intersectionMain()
     Tri tri = makeTri(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2);
 
     uint tw, th;
-    displacementMaps[matIdx].GetDimensions(tw, th);
+    displacementMaps[dispArrayIdx].GetDimensions(tw, th);
     int2 texSize = int2(tw, th);
 
     if (texSize.x == 0 || texSize.y == 0) return;
 
     // Create bounding prism and intersect
-    float dispScale = getDisplacementScale(matIdx);
+    float dispScale = getDisplacementScale(dispArrayIdx);
     Prism fullPrism = makePrism(tri, 0.0, dispScale);
 
     float prismTEntry, prismTExit;
@@ -1603,7 +1612,7 @@ void intersectionMain()
             float2 hitBary;
             float3 hitGeoNormal;
 
-            if (testLeafRegion(tri, matIdx, rayOrigin, rayDir,
+            if (testLeafRegion(tri, dispArrayIdx, rayOrigin, rayDir,
                                bound.uvMin, bound.uvMax,
                                rayTMin, min(rayTMax, bestT),
                                texSize, hitT, hitBary, hitGeoNormal))
@@ -1619,9 +1628,9 @@ void intersectionMain()
             continue;
         }
 
-        // Get displacement bounds 
+        // Get displacement bounds
         float hMin, hMax;
-        getDisplacementBounds(matIdx, bound.uvMin, bound.uvMax, texSize, hMin, hMax);
+        getDisplacementBounds(dispArrayIdx, bound.uvMin, bound.uvMax, texSize, hMin, hMax);
 
         float3 aabbMin, aabbMax;
         if (!computeUVRegionAABB_Affine(tri, bound.uvMin, bound.uvMax, hMin, hMax, aabbMin, aabbMax))
