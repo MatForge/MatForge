@@ -36,7 +36,7 @@ void RmipBuilder::init(nvvk::ResourceAllocator& allocator, VkCommandPool command
     VkDescriptorPoolCreateInfo        poolInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = 200,  // V38: Double the sets since we have two layouts now
+		.maxSets = 2000000,  // Takes 200 per 512x512 Displacement map
         .poolSizeCount = uint32_t(poolSizes.size()),
         .pPoolSizes = poolSizes.data(),
     };

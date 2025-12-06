@@ -1,0 +1,261 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "MatForge Test Generator"
+  },
+  "extensionsUsed": [
+    "KHR_materials_displacement"
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0,
+        1,
+        2
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "VerticalStripesPlane"
+    },
+    {
+      "mesh": 1,
+      "name": "ChippedPlanksPlane",
+      "translation": [2.5, 0.0, 0.0]
+    },
+    {
+      "mesh": 2,
+      "name": "QuiltedFabricPlane",
+      "translation": [-2.5, 0.0, 0.0]
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Plane1",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0
+        }
+      ]
+    },
+    {
+      "name": "Plane2",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 1
+        }
+      ]
+    },
+    {
+      "name": "Plane3",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 2
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "VerticalStripesMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.8,
+          0.8,
+          0.8,
+          1.0
+        ],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.5
+      },
+      "extensions": {
+        "KHR_materials_displacement": {
+          "displacementGeometryTexture": {
+            "index": 0,
+            "texCoord": 0
+          },
+          "displacementGeometryFactor": 0.5,
+          "displacementGeometryOffset": 0.0
+        }
+      }
+    },
+    {
+      "name": "ChippedPlanksMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.6,
+          0.5,
+          0.4,
+          1.0
+        ],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.6
+      },
+      "normalTexture": {
+        "index": 2,
+        "texCoord": 0
+      },
+      "extensions": {
+        "KHR_materials_displacement": {
+          "displacementGeometryTexture": {
+            "index": 1,
+            "texCoord": 0
+          },
+          "displacementGeometryFactor": 0.1,
+          "displacementGeometryOffset": 0.0
+        }
+      }
+    },
+    {
+      "name": "QuiltedFabricMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.7,
+          0.6,
+          0.8,
+          1.0
+        ],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.7
+      },
+      "normalTexture": {
+        "index": 4,
+        "texCoord": 0
+      },
+      "extensions": {
+        "KHR_materials_displacement": {
+          "displacementGeometryTexture": {
+            "index": 3,
+            "texCoord": 0
+          },
+          "displacementGeometryFactor": 0.1,
+          "displacementGeometryOffset": 0.0
+        }
+      }
+    }
+  ],
+  "textures": [
+    {
+      "source": 0
+    },
+    {
+      "source": 1
+    },
+    {
+      "source": 2
+    },
+    {
+      "source": 3
+    },
+    {
+      "source": 4
+    }
+  ],
+  "images": [
+    {
+      "uri": "displacement_vertical_512.png",
+      "mimeType": "image/png"
+    },
+    {
+      "uri": "121_chipped_planks_height_512.png",
+      "mimeType": "image/png"
+    },
+    {
+      "uri": "121_chipped_planks_normal_512.jpg",
+      "mimeType": "image/jpeg"
+    },
+    {
+      "uri": "120_quilted_fabric_height_512.png",
+      "mimeType": "image/png"
+    },
+    {
+      "uri": "120_quilted_fabric_normal_512.jpg",
+      "mimeType": "image/jpeg"
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3",
+      "min": [
+        -1,
+        0,
+        -1
+      ],
+      "max": [
+        1,
+        0,
+        1
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5123,
+      "count": 6,
+      "type": "SCALAR"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 48
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 48,
+      "byteLength": 48
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 96,
+      "byteLength": 32
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 128,
+      "byteLength": 12
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 140,
+      "uri": "data:application/octet-stream;base64,AACAvwAAAAAAAIC/AACAPwAAAAAAAIC/AACAPwAAAAAAAIA/AACAvwAAAAAAAIA/AAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAgD8AAAEAAgAAAAIAAwA="
+    }
+  ]
+}
