@@ -122,6 +122,7 @@ struct Resources
 
   // Displacement factors from glTF (per material)
   nvvk::Buffer bDisplacementFactors;  // Array of floats, one per material
+  nvvk::Buffer bMaterialDispIndex;    // Maps materialID -> displacement array index (-1 = no displacement)
   nvshaders::Tonemapper           tonemapper{};  // Tonemapper
   shaderio::TonemapperData        tonemapperData{
              .autoExposure = 1,

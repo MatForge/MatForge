@@ -234,5 +234,6 @@ private:
   void buildDisplacementRMIPs(VkCommandBuffer cmd);
   void cleanupDisplacementRMIPs();
   void passRMIPToPathTracer();
+  void updateDisplacementFactors(VkCommandBuffer cmd);  // Update displacement factors from glTF when material changes
   bool checkMaterialHasDisplacement(int materialIndex);
 };

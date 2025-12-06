@@ -72,6 +72,7 @@ enum BindingPoints
   eRmipSampler = 10,			// Sampler for RMIP textures
   eDisplacementSampler = 11,	// Sampler for displacement textures
   eDisplacementFactors = 12,	// Per-material displacement factors from glTF
+  eMaterialDispIndex = 13,	// Maps materialID -> displacement array index (-1 if no displacement)
 
 };
 

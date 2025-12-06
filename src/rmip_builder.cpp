@@ -21,15 +21,22 @@ void RmipBuilder::init(nvvk::ResourceAllocator& allocator, VkCommandPool command
     m_allocator = &allocator;
     m_commandPool = commandPool;
 
-    createDescriptorSetLayout();
+    createDescriptorSetLayouts();  // V38: Now creates separate layouts
     createPipelines();
 
-    // Create descriptor pool
-    std::vector<VkDescriptorPoolSize> poolSizes = m_bindings.calculatePoolSizes();
+    // Create descriptor pool - V38: Need pool sizes for both init and expand bindings
+    std::vector<VkDescriptorPoolSize> initPoolSizes = m_initBindings.calculatePoolSizes();
+    std::vector<VkDescriptorPoolSize> expandPoolSizes = m_expandBindings.calculatePoolSizes();
+
+    // Combine pool sizes (may have duplicates, but that's fine - we just need enough)
+    std::vector<VkDescriptorPoolSize> poolSizes;
+    poolSizes.insert(poolSizes.end(), initPoolSizes.begin(), initPoolSizes.end());
+    poolSizes.insert(poolSizes.end(), expandPoolSizes.begin(), expandPoolSizes.end());
+
     VkDescriptorPoolCreateInfo        poolInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = 100,  // Allow many descriptor sets for multiple dispatches
+		.maxSets = 2000000,  // Takes 200 per 512x512 Displacement map
         .poolSizeCount = uint32_t(poolSizes.size()),
         .pPoolSizes = poolSizes.data(),
     };
@@ -74,21 +81,26 @@ void RmipBuilder::deinit()
     // At line 251 of buildRMIP(), we assign: m_rmipImage.image = rmipOutput (external)
     // The caller is responsible for destroying it.
 
-    // Destroy pipelines and layouts
+    // Destroy pipelines and layouts - V38: Now have separate layouts for init and expand
     if (m_initPipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(m_device, m_initPipeline, nullptr);
     if (m_expandPipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(m_device, m_expandPipeline, nullptr);
-    if (m_pipelineLayout != VK_NULL_HANDLE)
-        vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-    if (m_descriptorSetLayout != VK_NULL_HANDLE)
-        vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
+    if (m_initPipelineLayout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(m_device, m_initPipelineLayout, nullptr);
+    if (m_expandPipelineLayout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(m_device, m_expandPipelineLayout, nullptr);
+    if (m_initDescriptorSetLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(m_device, m_initDescriptorSetLayout, nullptr);
+    if (m_expandDescriptorSetLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(m_device, m_expandDescriptorSetLayout, nullptr);
     if (m_descriptorPool != VK_NULL_HANDLE)
         vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
 
-    m_bindings.clear();
+    m_initBindings.clear();
+    m_expandBindings.clear();
 
-    // Reset all handles
+    // Reset all handles - V38: Updated for separate layouts
     m_device = VK_NULL_HANDLE;
     m_allocator = nullptr;
     m_stagingView = VK_NULL_HANDLE;
@@ -98,9 +110,14 @@ void RmipBuilder::deinit()
     m_paramsBuffer = {};
     m_initPipeline = VK_NULL_HANDLE;
     m_expandPipeline = VK_NULL_HANDLE;
-    m_pipelineLayout = VK_NULL_HANDLE;
-    m_descriptorSetLayout = VK_NULL_HANDLE;
+    m_initPipelineLayout = VK_NULL_HANDLE;
+    m_expandPipelineLayout = VK_NULL_HANDLE;
+    m_initDescriptorSetLayout = VK_NULL_HANDLE;
+    m_expandDescriptorSetLayout = VK_NULL_HANDLE;
     m_descriptorPool = VK_NULL_HANDLE;
+    m_stagingResolution = 0;
+    m_stagingNumLayers = 0;
+    m_stagingNeedsTransition = true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -114,28 +131,50 @@ void RmipBuilder::resetDescriptorPool()
 
     // Reset the descriptor pool, freeing all allocated descriptor sets
     vkResetDescriptorPool(m_device, m_descriptorPool, 0);
+
+    // Reset staging state for new scene - force transition on next buildRMIP
+    m_stagingNeedsTransition = true;
 }
 
 //--------------------------------------------------------------------------------------------------
-// Create descriptor set layout for RMIP building
+// Create descriptor set layouts for RMIP building
+// V38: Now creates TWO separate layouts:
+//   - Init shader: SAMPLED_IMAGE for binding 0 (reads displacement texture with sampler support)
+//   - Expand shader: STORAGE_IMAGE for binding 0 (reads RMIP arrays with [] operator)
 //
-void RmipBuilder::createDescriptorSetLayout()
+void RmipBuilder::createDescriptorSetLayouts()
 {
-    // Binding 0: Input texture (Texture2D or Texture2DArray)
-    m_bindings.addBinding(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-
-    // Binding 1: Output texture (RWTexture2DArray)
-    m_bindings.addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-
+    // ========================================
+    // Init shader layout (SAMPLED_IMAGE for binding 0)
+    // ========================================
+    // Binding 0: Displacement texture (Texture2D) - SAMPLED_IMAGE
+    m_initBindings.addBinding(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    // Binding 1: Output RMIP array (RWTexture2DArray) - STORAGE_IMAGE
+    m_initBindings.addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
     // Binding 2: Uniform buffer (parameters)
-    m_bindings.addBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    m_initBindings.addBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 
-    NVVK_CHECK(m_bindings.createDescriptorSetLayout(m_device, 0, &m_descriptorSetLayout));
-    NVVK_DBG_NAME(m_descriptorSetLayout);
+    NVVK_CHECK(m_initBindings.createDescriptorSetLayout(m_device, 0, &m_initDescriptorSetLayout));
+    NVVK_DBG_NAME(m_initDescriptorSetLayout);
+
+    // ========================================
+    // Expand shader layout (STORAGE_IMAGE for binding 0)
+    // ========================================
+    // Binding 0: Input RMIP array (RWTexture2DArray for read) - STORAGE_IMAGE
+    // V38 FIX: Must be STORAGE_IMAGE to support [] operator in Slang shader
+    m_expandBindings.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    // Binding 1: Output RMIP array (RWTexture2DArray for write) - STORAGE_IMAGE
+    m_expandBindings.addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    // Binding 2: Uniform buffer (parameters)
+    m_expandBindings.addBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    NVVK_CHECK(m_expandBindings.createDescriptorSetLayout(m_device, 0, &m_expandDescriptorSetLayout));
+    NVVK_DBG_NAME(m_expandDescriptorSetLayout);
 }
 
 //--------------------------------------------------------------------------------------------------
 // Create compute pipelines for RMIP construction
+// V38: Now creates separate pipeline layouts for init and expand
 //
 void RmipBuilder::createPipelines()
 {
@@ -148,16 +187,27 @@ void RmipBuilder::createPipelines()
         .size = sizeof(RmipBuildParams),
     };
 
-    // Pipeline layout
-    VkPipelineLayoutCreateInfo layoutInfo{
+    // Init pipeline layout (uses init descriptor set layout)
+    VkPipelineLayoutCreateInfo initLayoutInfo{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
-        .pSetLayouts = &m_descriptorSetLayout,
+        .pSetLayouts = &m_initDescriptorSetLayout,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstant,
     };
-    NVVK_CHECK(vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_pipelineLayout));
-    NVVK_DBG_NAME(m_pipelineLayout);
+    NVVK_CHECK(vkCreatePipelineLayout(m_device, &initLayoutInfo, nullptr, &m_initPipelineLayout));
+    NVVK_DBG_NAME(m_initPipelineLayout);
+
+    // Expand pipeline layout (uses expand descriptor set layout)
+    VkPipelineLayoutCreateInfo expandLayoutInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &m_expandDescriptorSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstant,
+    };
+    NVVK_CHECK(vkCreatePipelineLayout(m_device, &expandLayoutInfo, nullptr, &m_expandPipelineLayout));
+    NVVK_DBG_NAME(m_expandPipelineLayout);
 
     // Create shader modules
     VkShaderModuleCreateInfo moduleInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
@@ -174,25 +224,38 @@ void RmipBuilder::createPipelines()
     VkShaderModule expandModule;
     NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &expandModule));
 
-    // Create pipelines
-    VkPipelineShaderStageCreateInfo shaderStage{
+    // Create init pipeline
+    VkPipelineShaderStageCreateInfo initShaderStage{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
         .module = initModule,
         .pName = "main",
     };
 
-    VkComputePipelineCreateInfo pipelineInfo{
+    VkComputePipelineCreateInfo initPipelineInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = shaderStage,
-        .layout = m_pipelineLayout,
+        .stage = initShaderStage,
+        .layout = m_initPipelineLayout,  // V38: Uses init-specific layout
     };
 
-    NVVK_CHECK(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_initPipeline));
+    NVVK_CHECK(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &initPipelineInfo, nullptr, &m_initPipeline));
     NVVK_DBG_NAME(m_initPipeline);
 
-    pipelineInfo.stage.module = expandModule;
-    NVVK_CHECK(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_expandPipeline));
+    // Create expand pipeline
+    VkPipelineShaderStageCreateInfo expandShaderStage{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = expandModule,
+        .pName = "main",
+    };
+
+    VkComputePipelineCreateInfo expandPipelineInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = expandShaderStage,
+        .layout = m_expandPipelineLayout,  // V38: Uses expand-specific layout
+    };
+
+    NVVK_CHECK(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &expandPipelineInfo, nullptr, &m_expandPipeline));
     NVVK_DBG_NAME(m_expandPipeline);
 
     vkDestroyShaderModule(m_device, initModule, nullptr);
@@ -201,13 +264,29 @@ void RmipBuilder::createPipelines()
 
 //--------------------------------------------------------------------------------------------------
 // Create staging image for ping-pong during construction
+// NOTE: Only recreates if dimensions change to avoid destroying staging while
+// previous RMIP build commands are still pending in the command buffer
 //
 void RmipBuilder::createStagingImage(uint32_t resolution, uint32_t numLayers)
 {
-    // Destroy old staging if it exists
+    // Check if we can reuse existing staging image (same dimensions)
+    if (m_stagingImage.image != VK_NULL_HANDLE &&
+        m_stagingResolution == resolution &&
+        m_stagingNumLayers == numLayers)
+    {
+        return;  // Reuse existing staging image
+    }
+
+    // Need to recreate - destroy old staging if it exists
+    // IMPORTANT: This should only happen when dimensions change between scenes,
+    // not between individual materials in the same scene (which have same resolution)
     if (m_stagingView)
         vkDestroyImageView(m_device, m_stagingView, nullptr);
-    m_allocator->destroyImage(m_stagingImage);
+    if (m_stagingImage.image != VK_NULL_HANDLE)
+        m_allocator->destroyImage(m_stagingImage);
+
+    m_stagingView = VK_NULL_HANDLE;
+    m_stagingImage = {};
 
     // Create image
     VkImageCreateInfo imageInfo{
@@ -239,6 +318,11 @@ void RmipBuilder::createStagingImage(uint32_t resolution, uint32_t numLayers)
 
     NVVK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &m_stagingView));
     NVVK_DBG_NAME(m_stagingView);
+
+    // Track current staging dimensions
+    m_stagingResolution = resolution;
+    m_stagingNumLayers = numLayers;
+    m_stagingNeedsTransition = true;  // New image needs UNDEFINED→GENERAL transition
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -264,11 +348,38 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
     uint32_t maxLevel = static_cast<uint32_t>(std::log2(resolution));
     uint32_t numLayers = (maxLevel + 1) * (maxLevel + 1);
 
-    // Create staging for ping-pong
+    // Create staging for ping-pong (reuses if same dimensions)
     createStagingImage(resolution, numLayers);
 
-    // Transition staging image from UNDEFINED to GENERAL
-    transitionToGeneral(cmd, m_stagingImage.image);
+    // Handle staging image transition/barrier
+    if (m_stagingNeedsTransition)
+    {
+        // First use: transition from UNDEFINED to GENERAL
+        transitionToGeneral(cmd, m_stagingImage.image);
+        m_stagingNeedsTransition = false;
+    }
+    else
+    {
+        // Reusing staging: add compute→compute barrier to ensure previous RMIP build completed
+        // This is critical when multiple RMIPs are built in the same command buffer
+        VkImageMemoryBarrier barrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = m_stagingImage.image,
+            .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                .levelCount = VK_REMAINING_MIP_LEVELS,
+                                .layerCount = VK_REMAINING_ARRAY_LAYERS},
+        };
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
 
     // Transition RMIP output image from UNDEFINED to GENERAL
     transitionToGeneral(cmd, rmipOutput);
@@ -289,8 +400,8 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
         params.currentQ = 0;
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_initPipeline);
-        // Displacement map is in SHADER_READ_ONLY_OPTIMAL from scene loading
-        bindResources(cmd, displacementView, rmipOutputView, params, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // V38: Use init-specific bind function (SAMPLED_IMAGE for displacement map)
+        bindInitResources(cmd, displacementView, rmipOutputView, params);
 
         uint32_t groupsX = (resolution + 15) / 16;
         uint32_t groupsY = (resolution + 15) / 16;
@@ -300,12 +411,29 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
     }
 
     // Step 2: Build all other levels
+    // FIX V37e: Vulkan doesn't allow same image for SAMPLED_IMAGE + STORAGE_IMAGE in same dispatch
+    // Solution: Use ping-pong but copy ALL layers after each level so both buffers have all data
+
+    // First copy layer 0 from rmipOutput to staging so both have the base data
+    {
+        VkImageCopy copyRegion{
+            .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = numLayers},
+            .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = numLayers},
+            .extent = {resolution, resolution, 1},
+        };
+        vkCmdCopyImage(cmd, rmipOutput, VK_IMAGE_LAYOUT_GENERAL,
+            m_stagingImage.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copyRegion);
+        // V38b: Use transfer barrier after copy
+        addTransferBarrier(cmd, m_stagingImage.image);
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_expandPipeline);
+
+    // Track which buffer has the latest data
     VkImage     currentInput = rmipOutput;
     VkImageView currentInputView = rmipOutputView;
     VkImage     currentOutput = m_stagingImage.image;
     VkImageView currentOutputView = m_stagingView;
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_expandPipeline);
 
     // Process level by level
     for (uint32_t level = 1; level <= 2 * maxLevel; ++level)
@@ -323,8 +451,8 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
             params.currentP = p;
             params.currentQ = q;
 
-            // RMIP arrays are in GENERAL layout for compute read/write
-            bindResources(cmd, currentInputView, currentOutputView, params, VK_IMAGE_LAYOUT_GENERAL);
+            // V38: Use expand-specific bind function (STORAGE_IMAGE for RMIP arrays)
+            bindExpandResources(cmd, currentInputView, currentOutputView, params);
 
             uint32_t width = 1u << p;
             uint32_t height = 1u << q;
@@ -337,41 +465,57 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
             addImageBarrier(cmd, currentOutput);
         }
 
-        // Ping-pong buffers
+        // After each level, copy ALL layers from output back to input
+        // This ensures both buffers have all layers for the next level
+        {
+            VkImageCopy copyRegion{
+                .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = numLayers},
+                .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = numLayers},
+                .extent = {resolution, resolution, 1},
+            };
+            vkCmdCopyImage(cmd, currentOutput, VK_IMAGE_LAYOUT_GENERAL,
+                currentInput, VK_IMAGE_LAYOUT_GENERAL, 1, &copyRegion);
+            // V38b: Use transfer barrier after copy
+            addTransferBarrier(cmd, currentInput);
+        }
+
+        // Swap buffers for next level
         std::swap(currentInput, currentOutput);
         std::swap(currentInputView, currentOutputView);
     }
 
-    // Copy final result back if needed
-    if (currentInput == m_stagingImage.image)
+    // Copy final result to rmipOutput if needed
+    if (currentInput != rmipOutput)
     {
         VkImageCopy copyRegion{
             .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = numLayers},
             .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = numLayers},
             .extent = {resolution, resolution, 1},
         };
-        vkCmdCopyImage(cmd, m_stagingImage.image, VK_IMAGE_LAYOUT_GENERAL,
+        vkCmdCopyImage(cmd, currentInput, VK_IMAGE_LAYOUT_GENERAL,
             rmipOutput, VK_IMAGE_LAYOUT_GENERAL, 1, &copyRegion);
+        // V38b: Barrier so shaders can read the final result
+        addTransferBarrier(cmd, rmipOutput);
     }
 
     LOGI("RMIP built: %dx%d, %d layers\n", resolution, resolution, numLayers);
 }
 
 //--------------------------------------------------------------------------------------------------
-// Bind resources for a compute dispatch
+// Bind resources for init shader dispatch
+// V38: Uses init-specific descriptor layout (SAMPLED_IMAGE for binding 0)
 //
-void RmipBuilder::bindResources(VkCommandBuffer       cmd,
+void RmipBuilder::bindInitResources(VkCommandBuffer cmd,
     VkImageView           inputView,
     VkImageView           outputView,
-    const RmipBuildParams& params,
-    VkImageLayout         inputLayout)
+    const RmipBuildParams& params)
 {
-    // Allocate descriptor set
+    // Allocate descriptor set from init layout
     VkDescriptorSetAllocateInfo allocInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool = m_descriptorPool,
         .descriptorSetCount = 1,
-        .pSetLayouts = &m_descriptorSetLayout,
+        .pSetLayouts = &m_initDescriptorSetLayout,
     };
 
     VkDescriptorSet descriptorSet;
@@ -383,7 +527,7 @@ void RmipBuilder::bindResources(VkCommandBuffer       cmd,
     // Update descriptor set
     VkDescriptorImageInfo inputImageInfo{
         .imageView = inputView,
-        .imageLayout = inputLayout,  // Varies: SHADER_READ_ONLY_OPTIMAL for displacement map, GENERAL for RMIP arrays
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,  // Displacement map is SHADER_READ_ONLY
     };
 
     VkDescriptorImageInfo outputImageInfo{
@@ -398,29 +542,84 @@ void RmipBuilder::bindResources(VkCommandBuffer       cmd,
     };
 
     nvvk::WriteSetContainer writes;
-    writes.append(m_bindings.getWriteSet(0, descriptorSet), inputImageInfo);
-    writes.append(m_bindings.getWriteSet(1, descriptorSet), outputImageInfo);
-    writes.append(m_bindings.getWriteSet(2, descriptorSet), bufferInfo);
+    writes.append(m_initBindings.getWriteSet(0, descriptorSet), inputImageInfo);
+    writes.append(m_initBindings.getWriteSet(1, descriptorSet), outputImageInfo);
+    writes.append(m_initBindings.getWriteSet(2, descriptorSet), bufferInfo);
 
     vkUpdateDescriptorSets(m_device, writes.size(), writes.data(), 0, nullptr);
 
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout,
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_initPipelineLayout,
         0, 1, &descriptorSet, 0, nullptr);
 
-    vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+    vkCmdPushConstants(cmd, m_initPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, sizeof(RmipBuildParams), &params);
-
 }
 
 //--------------------------------------------------------------------------------------------------
-// Add image memory barrier
+// Bind resources for expand shader dispatch
+// V38: Uses expand-specific descriptor layout (STORAGE_IMAGE for binding 0)
+//
+void RmipBuilder::bindExpandResources(VkCommandBuffer cmd,
+    VkImageView           inputView,
+    VkImageView           outputView,
+    const RmipBuildParams& params)
+{
+    // Allocate descriptor set from expand layout
+    VkDescriptorSetAllocateInfo allocInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = m_descriptorPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &m_expandDescriptorSetLayout,
+    };
+
+    VkDescriptorSet descriptorSet;
+    NVVK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet));
+
+    // Update the reusable params buffer with new data
+    memcpy(m_paramsBuffer.mapping, &params, sizeof(RmipBuildParams));
+
+    // Update descriptor set
+    VkDescriptorImageInfo inputImageInfo{
+        .imageView = inputView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,  // RMIP arrays are GENERAL for storage access
+    };
+
+    VkDescriptorImageInfo outputImageInfo{
+        .imageView = outputView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+
+    VkDescriptorBufferInfo bufferInfo{
+        .buffer = m_paramsBuffer.buffer,
+        .offset = 0,
+        .range = sizeof(RmipBuildParams),
+    };
+
+    nvvk::WriteSetContainer writes;
+    writes.append(m_expandBindings.getWriteSet(0, descriptorSet), inputImageInfo);
+    writes.append(m_expandBindings.getWriteSet(1, descriptorSet), outputImageInfo);
+    writes.append(m_expandBindings.getWriteSet(2, descriptorSet), bufferInfo);
+
+    vkUpdateDescriptorSets(m_device, writes.size(), writes.data(), 0, nullptr);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_expandPipelineLayout,
+        0, 1, &descriptorSet, 0, nullptr);
+
+    vkCmdPushConstants(cmd, m_expandPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(RmipBuildParams), &params);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Add image memory barrier for compute shader writes
+// V38b FIX: Now includes TRANSFER stage for copy operations
 //
 void RmipBuilder::addImageBarrier(VkCommandBuffer cmd, VkImage image)
 {
     VkImageMemoryBarrier barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        // V38b: Include TRANSFER access for copy operations
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .image = image,
@@ -429,9 +628,35 @@ void RmipBuilder::addImageBarrier(VkCommandBuffer cmd, VkImage image)
                             .layerCount = VK_REMAINING_ARRAY_LAYERS},
     };
 
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-        0, nullptr, 0, nullptr, 1, &barrier);
+    // V38b: Include TRANSFER stage for vkCmdCopyImage operations
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Add barrier after transfer (copy) operations
+// V38b: Ensures copy completes before next shader/transfer reads
+//
+void RmipBuilder::addTransferBarrier(VkCommandBuffer cmd, VkImage image)
+{
+    VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .image = image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .levelCount = VK_REMAINING_MIP_LEVELS,
+                            .layerCount = VK_REMAINING_ARRAY_LAYERS},
+    };
+
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
 //--------------------------------------------------------------------------------------------------

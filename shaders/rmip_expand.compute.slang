@@ -1,13 +1,19 @@
 #include "rmip_common.h.slang"
 
+// V38 FIX: Both input and output must be RWTexture2DArray for [] operator access
+// Binding 0 is now VK_DESCRIPTOR_TYPE_STORAGE_IMAGE (not SAMPLED_IMAGE)
+// This is required because Vulkan SAMPLED_IMAGE doesn't support [] operator (Load)
 [[vk::binding(0, 0)]]
-Texture2DArray<float2> rmipInput;
+RWTexture2DArray<float2> rmipInput;  // Read-only access via STORAGE_IMAGE
 
 [[vk::binding(1, 0)]]
 RWTexture2DArray<float2> rmipOutput;
 
-[[vk::binding(2, 0)]]
-ConstantBuffer<RMIPBuildParams> params;
+// V38c FIX: Use push constants instead of uniform buffer
+// The uniform buffer was being overwritten by subsequent dispatches before GPU execution
+// Push constants are recorded per-dispatch and don't have this race condition
+[[vk::push_constant]]
+RMIPBuildParams params;
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -16,53 +22,48 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     uint2 pos = dispatchThreadID.xy;
     uint p = params.currentP;
     uint q = params.currentQ;
-    
+
     // Early exit for base level (handled by init shader)
     if (p == 0 && q == 0)
         return;
-    
+
     uint width = 1u << p;
     uint height = 1u << q;
-    
+
     // Check if position is valid for this rectangle size
     uint2 maxPos = params.inputResolution - uint2(width, height) + uint2(1, 1);
     if (any(pos >= maxPos))
         return;
-    
+
     uint stride = params.maxLevel + 1;
+
     MinMax result;
-    
+
     // Branch based on expansion type
     if (p == 0 && q > 0)
     {
-        // ============================================
         // VERTICAL EXPANSION: Double height only
-        // Reads 2 rectangles stacked vertically
-        // ============================================
         uint prevQ = q - 1;
         uint halfHeight = 1u << prevQ;
         uint inputLayer = computeLayerIndex(0, prevQ, stride);
-        
+
         float2 topData = rmipInput[uint3(pos, inputLayer)];
         float2 bottomData = rmipInput[uint3(pos + uint2(0, halfHeight), inputLayer)];
-        
+
         MinMax top = { topData.x, topData.y };
         MinMax bottom = { bottomData.x, bottomData.y };
         result = combineMinMax(top, bottom);
     }
     else if (p > 0 && q == 0)
     {
-        // ============================================
         // HORIZONTAL EXPANSION: Double width only
-        // Reads 2 rectangles side by side
-        // ============================================
         uint prevP = p - 1;
         uint halfWidth = 1u << prevP;
         uint inputLayer = computeLayerIndex(prevP, 0, stride);
-        
+
         float2 leftData = rmipInput[uint3(pos, inputLayer)];
         float2 rightData = rmipInput[uint3(pos + uint2(halfWidth, 0), inputLayer)];
-        
+
         MinMax left = { leftData.x, leftData.y };
         MinMax right = { rightData.x, rightData.y };
         result = combineMinMax(left, right);

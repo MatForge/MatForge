@@ -84,8 +84,19 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 
   checkForDisplacement(resources);
 
-  // Acquire a sampler for displacement textures
+  // Acquire a sampler for displacement textures (default LINEAR filtering)
   resources.samplerPool.acquireSampler(m_displacementSampler);
+
+  // Acquire a sampler for RMIP textures with NEAREST filtering
+  // RMIP queries MUST use NEAREST to get exact minmax values without interpolation
+  VkSamplerCreateInfo rmipSamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+  rmipSamplerInfo.magFilter = VK_FILTER_NEAREST;
+  rmipSamplerInfo.minFilter = VK_FILTER_NEAREST;
+  rmipSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  rmipSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  rmipSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  rmipSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  resources.samplerPool.acquireSampler(m_rmipSampler, rmipSamplerInfo);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -136,6 +147,10 @@ void PathTracer::onDetach(Resources& resources)
   // Release displacement sampler
   resources.samplerPool.releaseSampler(m_displacementSampler);
   m_displacementSampler = VK_NULL_HANDLE;
+
+  // Release RMIP sampler
+  resources.samplerPool.releaseSampler(m_rmipSampler);
+  m_rmipSampler = VK_NULL_HANDLE;
 
   // Clear displacement info vector
   m_displacementInfo.clear();
@@ -643,6 +658,13 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
       write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementFactors), &dispFactorsInfo);
   }
 
+  // Add material-to-displacement-index mapping buffer
+  if (resources.bMaterialDispIndex.buffer != VK_NULL_HANDLE)
+  {
+      VkDescriptorBufferInfo mappingInfo{resources.bMaterialDispIndex.buffer, 0, VK_WHOLE_SIZE};
+      write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eMaterialDispIndex), &mappingInfo);
+  }
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 
@@ -1140,21 +1162,27 @@ void PathTracer::writeDisplacementDescriptors(VkCommandBuffer cmd, Resources& re
     dispWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     write.append(dispWrite, dispImageInfos.data());
 
-    // Binding 10 & 11: Samplers - use displacement sampler
-    VkDescriptorImageInfo samplerInfo{};
-    samplerInfo.sampler = m_displacementSampler;
-    samplerInfo.imageView = VK_NULL_HANDLE;
-    samplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Binding 10: RMIP sampler - MUST use NEAREST filtering for exact minmax queries
+    VkDescriptorImageInfo rmipSamplerInfo{};
+    rmipSamplerInfo.sampler = m_rmipSampler;
+    rmipSamplerInfo.imageView = VK_NULL_HANDLE;
+    rmipSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkWriteDescriptorSet rmipSamplerWrite = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eRmipSampler);
     rmipSamplerWrite.descriptorCount = 1;
     rmipSamplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    write.append(rmipSamplerWrite, &samplerInfo);
+    write.append(rmipSamplerWrite, &rmipSamplerInfo);
+
+    // Binding 11: Displacement sampler - uses LINEAR filtering for smooth texture sampling
+    VkDescriptorImageInfo dispSamplerInfo{};
+    dispSamplerInfo.sampler = m_displacementSampler;
+    dispSamplerInfo.imageView = VK_NULL_HANDLE;
+    dispSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkWriteDescriptorSet dispSamplerWrite = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementSampler);
     dispSamplerWrite.descriptorCount = 1;
     dispSamplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    write.append(dispSamplerWrite, &samplerInfo);
+    write.append(dispSamplerWrite, &dispSamplerInfo);
 
     // Push the descriptor update
     VkPipelineBindPoint bindPoint = (m_renderTechnique == RenderTechnique::RayQuery)
