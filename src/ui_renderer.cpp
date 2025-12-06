@@ -510,6 +510,219 @@ void GltfRenderer::renderUI()
         }
         ImGui::Unindent();
       }
+
+      // VNDF Analysis
+      if(headerManager.beginHeader("VNDF Analysis"))
+      {
+        ImGui::TextWrapped("Compare Bounded VNDF vs Standard VNDF sampling efficiency.");
+        ImGui::Spacing();
+
+        // Step 1: Capture reference
+        ImGui::Text(ICON_MS_CAMERA " Step 1: Capture Reference");
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Current samples: %d", m_resources.frameCount + 1);
+        if(ImGui::Button("Capture VNDF Reference"))
+        {
+          VkCommandBuffer cmd{};
+          nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+          VkImage    refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+          VkExtent2D size     = m_resources.gBuffers.getSize();
+
+          m_vndfAnalyzer.captureReference(cmd, refImage, size);
+
+          nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+          // Finalize capture after GPU sync
+          m_vndfAnalyzer.finalizeReferenceCapture();
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Render to 512+ samples first, then capture as ground truth");
+        }
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Step 2: Run test
+        ImGui::Text(ICON_MS_SCIENCE " Step 2: VNDF Test");
+        ImGui::Indent();
+
+        bool vndfTestRunning = m_vndfTestActive;
+        ImGui::BeginDisabled(vndfTestRunning);
+
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start VNDF Test (Both)", ImVec2(250, 0)))
+        {
+          m_vndfTestRunBoth = true;
+          startVNDFTest(true);  // Start with Bounded VNDF
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Runs Bounded VNDF test followed by Standard VNDF test.\nCaptures at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples each.");
+        }
+
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Bounded VNDF Only", ImVec2(120, 0)))
+        {
+          m_vndfTestRunBoth = false;
+          startVNDFTest(true);
+        }
+        ImGui::SameLine();
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Standard VNDF Only", ImVec2(120, 0)))
+        {
+          m_vndfTestRunBoth = false;
+          startVNDFTest(false);
+        }
+
+        ImGui::EndDisabled();
+
+        if(vndfTestRunning)
+        {
+          const char* currentTest = m_vndfTestUseBoundedVNDF ? "Bounded VNDF" : "Standard VNDF";
+          const char* phase = m_vndfTestRunBoth ? (m_vndfTestUseBoundedVNDF ? " (1/2)" : " (2/2)") : "";
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+                           ICON_MS_HOURGLASS_EMPTY " %s%s: %zu/%zu samples",
+                           currentTest, phase, m_vndfTestCurrentIndex, m_vndfTestSampleCounts.size());
+        }
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Status display
+        if(m_vndfAnalyzer.isSessionActive())
+        {
+          ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
+                           ICON_MS_FIBER_MANUAL_RECORD " Active: %s",
+                           m_vndfAnalyzer.getSessionName().c_str());
+
+          const auto& metrics = m_vndfAnalyzer.getMetrics();
+          if(!metrics.empty())
+          {
+            ImGui::Text("Captured: %zu frames", metrics.size());
+            ImGui::Text("Latest Rejection: %.2f%%", metrics.back().rejectionRate);
+            ImGui::Text("Latest RMSE: %.6f", metrics.back().rmse);
+            ImGui::Text("Latest PSNR: %.2f dB", metrics.back().psnr);
+          }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Export
+        ImGui::Text(ICON_MS_SAVE " Export Results");
+        ImGui::Indent();
+        if(ImGui::Button("Export VNDF CSV"))
+        {
+          std::string filename = "../test/vndf_analysis/vndf_results.csv";
+          m_vndfAnalyzer.exportToCSV(filename);
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Export VNDF Images"))
+        {
+          m_vndfAnalyzer.exportComparisonImages("../test/vndf_analysis/images");
+        }
+        if(ImGui::Button("Export Plot Data"))
+        {
+          m_vndfAnalyzer.exportPlots("../test/vndf_analysis/");
+        }
+        ImGui::Unindent();
+      }
+
+      // MSX Analysis
+      if(headerManager.beginHeader("MSX Analysis"))
+      {
+        ImGui::TextWrapped("Test Fast-MSX multiple scattering against GGX baseline.");
+        ImGui::Spacing();
+
+        // Status
+        ImGui::Text(ICON_MS_INFO " Test Configuration");
+        ImGui::Indent();
+        ImGui::Text("Methods: GGX, FastMSX");
+        ImGui::Text("Roughness values: 0.1 - 1.0 (10 steps)");
+        ImGui::Text("Materials: Achromatic, Copper, Gold");
+        ImGui::Text("Samples: %u SPP", m_msxTestConfig.samplesPerPixel);
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Current frame info
+        ImGui::Text(ICON_MS_CAMERA " Current Frame");
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Samples: %d", m_resources.frameCount + 1);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(Render to 512+ samples before testing)");
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Run test
+        ImGui::Text(ICON_MS_SCIENCE " Run Test");
+        ImGui::Indent();
+
+        bool msxTestRunning = m_msxTestActive;
+        ImGui::BeginDisabled(msxTestRunning);
+
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start MSX Test Suite", ImVec2(250, 0)))
+        {
+          startMSXTest();
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Runs GGX vs FastMSX comparison across all roughness values and materials.\n"
+                           "Results exported to ../test/msx_analysis/");
+        }
+
+        ImGui::EndDisabled();
+
+        if(msxTestRunning)
+        {
+          float progress = m_msxAnalyzer.getTestProgress();
+          ImGui::ProgressBar(progress, ImVec2(250, 0));
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+                           ICON_MS_HOURGLASS_EMPTY " Test in progress...");
+        }
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Results summary
+        if(m_msxAnalyzer.isTestComplete())
+        {
+          ImGui::Separator();
+          ImGui::Text(ICON_MS_CHECK_CIRCLE " Test Complete");
+          ImGui::Indent();
+
+          const auto& metrics = m_msxAnalyzer.getMetrics();
+          if(!metrics.empty())
+          {
+            // Show summary for FastMSX
+            auto summary = m_msxAnalyzer.getTestSummary(matforge::MSXMethod::FastMSX);
+            ImGui::Text("FastMSX Results:");
+            ImGui::Text("  Avg MSE: %.6e", summary.avgMSE);
+            ImGui::Text("  Avg PSNR: %.2f dB", summary.avgPSNR);
+            ImGui::Text("  Avg Render Time: %.2f ms", summary.avgRenderTime);
+            ImGui::Text("  Artifacts: %d/%d", summary.artifactCount, summary.totalTests);
+          }
+
+          ImGui::Unindent();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Export
+        ImGui::Text(ICON_MS_SAVE " Export Results");
+        ImGui::Indent();
+        if(ImGui::Button("Export MSX Metrics CSV"))
+        {
+          m_msxAnalyzer.exportMetricsCSV("../test/msx_analysis/msx_metrics.csv");
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Export MSX Images"))
+        {
+          m_msxAnalyzer.exportComparisonImages("../test/msx_analysis/images");
+        }
+        if(ImGui::Button("Generate Plot Script"))
+        {
+          m_msxAnalyzer.generatePlotScript("../test/msx_analysis/plot_results.py");
+        }
+        ImGui::Unindent();
+      }
     }
     ImGui::End();  // End Settings
 

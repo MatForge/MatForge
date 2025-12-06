@@ -202,6 +202,16 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Convergence analyzer
   m_convergenceAnalyzer.init(m_resources.allocator, m_device, {100, 100});  // Will be resized on first use
 
+  // VNDF analyzer
+  m_vndfAnalyzer.init(m_resources.allocator, m_device, {100, 100});  // Will be resized on first use
+
+  // MSX analyzer
+  m_msxTestConfig.resolution = {512, 512};
+  m_msxTestConfig.samplesPerPixel = 512;
+  m_msxTestConfig.methods = {matforge::MSXMethod::GGX, matforge::MSXMethod::FastMSX};
+  m_msxAnalyzer.init(m_resources.allocator, m_device, m_msxTestConfig);
+  setupMSXAnalyzerCallbacks();
+
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.sceneRtx.init(&m_resources.allocator);
@@ -389,6 +399,12 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
     // Update convergence test if active
     updateConvergenceTest(cmd);
+
+    // Update VNDF test if active
+    updateVNDFTest(cmd);
+
+    // Update MSX test if active
+    updateMSXTest(cmd);
   }
   else
   {
@@ -1486,6 +1502,12 @@ void GltfRenderer::destroyResources()
   // Destroy convergence analyzer before allocator to prevent memory leak
   m_convergenceAnalyzer.destroy();
 
+  // Destroy VNDF analyzer before allocator to prevent memory leak
+  m_vndfAnalyzer.destroy();
+
+  // Destroy MSX analyzer before allocator to prevent memory leak
+  m_msxAnalyzer.destroy();
+
   // Clean up RMIP resources BEFORE destroying allocator
   for (auto& rmipData : m_displacementRMIPs)
   {
@@ -1807,6 +1829,300 @@ void GltfRenderer::updateConvergenceTest(VkCommandBuffer cmd)
            m_convergenceTestSampleCounts.size(), targetSamples, timeDeltaMs);
   }
 }
+
+//--------------------------------------------------------------------------------------------------
+// VNDF Analysis - Compare Bounded VNDF vs Standard VNDF sampling
+//--------------------------------------------------------------------------------------------------
+
+void GltfRenderer::startVNDFTest(bool useBoundedVNDF)
+{
+  // Capture reference image first (must be at high sample count)
+  if(m_resources.frameCount < 100)
+  {
+    printf("Warning: Current frame count is %d. Please render to 512+ samples before starting test.\n", m_resources.frameCount);
+    printf("Capturing reference anyway, but results may be inaccurate.\n");
+  }
+
+  // Capture reference from current frame
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+  VkImage    refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+  VkExtent2D size     = m_resources.gBuffers.getSize();
+
+  m_vndfAnalyzer.captureReference(cmd, refImage, size);
+
+  nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+  // Finalize reference capture after GPU sync
+  m_vndfAnalyzer.finalizeReferenceCapture();
+
+  // Start VNDF session
+  std::string sessionName = useBoundedVNDF ? "bounded_vndf_test" : "standard_vndf_test";
+
+  // Get current roughness from scene materials
+  float currentRoughness = 0.5f;  // Default fallback
+  const auto& model = m_resources.scene.getModel();
+  if(!model.materials.empty())
+  {
+    // Use roughness from first material (typically the main material being tested)
+    currentRoughness = static_cast<float>(model.materials[0].pbrMetallicRoughness.roughnessFactor);
+  }
+
+  m_vndfAnalyzer.startSession(sessionName, useBoundedVNDF, currentRoughness);
+
+  // Set test state
+  m_vndfTestActive          = true;
+  m_vndfTestUseBoundedVNDF  = useBoundedVNDF;
+  m_vndfTestCurrentIndex    = 0;
+  m_vndfTestStartTime       = std::chrono::steady_clock::now();
+  m_vndfTestLastCaptureTime = m_vndfTestStartTime;
+
+  // Set Bounded VNDF mode in path tracer
+  m_pathTracer.m_useBoundedVNDF         = useBoundedVNDF;
+  m_pathTracer.m_pushConst.useBoundedVNDF = useBoundedVNDF ? 1 : 0;
+
+  // Disable auto SPP and set SPP to 1 for accurate testing
+  m_pathTracer.m_adaptiveSampling     = false;
+  m_pathTracer.m_pushConst.numSamples = 1;
+
+  // Reset rendering to start fresh
+  resetFrame();
+
+  printf("VNDF test started: %s (will capture at %zu sample counts)\n",
+         sessionName.c_str(), m_vndfTestSampleCounts.size());
+}
+
+void GltfRenderer::updateVNDFTest(VkCommandBuffer cmd)
+{
+  if(!m_vndfTestActive)
+    return;
+
+  // Finalize previous capture if pending
+  if(m_vndfTestPendingFinalize)
+  {
+    m_vndfAnalyzer.finalizeFrameCapture();
+    m_vndfTestPendingFinalize = false;
+  }
+
+  // Check if test is complete
+  if(m_vndfTestCurrentIndex >= m_vndfTestSampleCounts.size())
+  {
+    // Current test complete
+    m_vndfTestActive = false;
+    m_vndfAnalyzer.endSession();
+
+    // Export results with timestamp to test folder
+    std::string sessionName = m_vndfTestUseBoundedVNDF ? "bounded_vndf" : "standard_vndf";
+
+    // Generate timestamp string
+    auto        now       = std::chrono::system_clock::now();
+    std::time_t nowTime   = std::chrono::system_clock::to_time_t(now);
+    std::tm     localTime = {};
+#ifdef _WIN32
+    localtime_s(&localTime, &nowTime);
+#else
+    localtime_r(&nowTime, &localTime);
+#endif
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &localTime);
+
+    // Create test directory if it doesn't exist
+    std::filesystem::path testDir = "../test/vndf_analysis";
+    if(!std::filesystem::exists(testDir))
+    {
+      std::filesystem::create_directories(testDir);
+    }
+
+    std::string csvFile = (testDir / (sessionName + "_" + timestamp + ".csv")).string();
+    m_vndfAnalyzer.exportToCSV(csvFile);
+
+    auto duration = std::chrono::steady_clock::now() - m_vndfTestStartTime;
+    auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+
+    printf("VNDF test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+
+    // If running combined test and Bounded just finished, start Standard test
+    if(m_vndfTestRunBoth && m_vndfTestUseBoundedVNDF)
+    {
+      printf("Starting Standard VNDF test (part 2 of combined test)...\n");
+      startVNDFTest(false);  // Start Standard VNDF test
+    }
+    else
+    {
+      // All tests done
+      m_vndfTestRunBoth = false;
+    }
+    return;
+  }
+
+  uint32_t targetSamples = m_vndfTestSampleCounts[m_vndfTestCurrentIndex];
+
+  // Wait until we've accumulated enough samples
+  if(static_cast<uint32_t>(m_resources.frameCount + 1) >= targetSamples)
+  {
+    // Capture this milestone
+    VkImage    testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+    VkExtent2D size      = m_resources.gBuffers.getSize();
+
+    auto   currentTime   = std::chrono::steady_clock::now();
+    auto   duration      = currentTime - m_vndfTestStartTime;
+    double timeMs        = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    // For VNDF analysis, we track rejection statistics
+    // These would ideally come from shader counters, but for now use estimates
+    uint64_t totalSamples    = static_cast<uint64_t>(targetSamples) * size.width * size.height;
+    uint64_t rejectedSamples = 0;  // TODO: Implement shader counter for actual rejection tracking
+
+    m_vndfAnalyzer.captureFrame(cmd, testImage, targetSamples, totalSamples, rejectedSamples, timeMs);
+
+    // Update last capture time
+    m_vndfTestLastCaptureTime = currentTime;
+
+    // Mark as pending
+    m_vndfTestPendingFinalize = true;
+
+    // Move to next milestone
+    m_vndfTestCurrentIndex++;
+
+    printf("VNDF: Recorded capture %zu/%zu at %u samples\n", m_vndfTestCurrentIndex,
+           m_vndfTestSampleCounts.size(), targetSamples);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// MSX Analysis - Test Fast-MSX Multiple Scattering Implementation
+//--------------------------------------------------------------------------------------------------
+
+void GltfRenderer::setupMSXAnalyzerCallbacks()
+{
+  // Callbacks are no longer needed with the async pattern
+  // The analyzer now uses captureReference/captureFrame directly
+  printf("MSX Analyzer: Using async capture pattern\n");
+}
+
+void GltfRenderer::startMSXTest()
+{
+  // Capture reference image first (must be at high sample count)
+  if(m_resources.frameCount < 100)
+  {
+    printf("Warning: Current frame count is %d. Please render to 512+ samples before starting test.\n", m_resources.frameCount);
+    printf("Capturing reference anyway, but results may be inaccurate.\n");
+  }
+
+  // Capture reference from current high-SPP frame
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+  VkImage    refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+  VkExtent2D size     = m_resources.gBuffers.getSize();
+
+  m_msxAnalyzer.captureReference(cmd, refImage, size);
+
+  nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+  // Finalize reference capture after GPU sync
+  m_msxAnalyzer.finalizeReferenceCapture();
+
+  // Start MSX session - test FastMSX first
+  bool useFastMSX = m_pathTracer.m_useFastMSX;
+  matforge::MSXMethod method = useFastMSX ? matforge::MSXMethod::FastMSX : matforge::MSXMethod::GGX;
+  std::string sessionName = useFastMSX ? "fastmsx_test" : "ggx_test";
+
+  m_msxAnalyzer.startSession(sessionName, method, matforge::TestMaterial::Achromatic, 0.5f);
+
+  // Set test state
+  m_msxTestActive          = true;
+  m_msxTestPendingFinalize = false;
+  m_msxTestStartTime       = std::chrono::steady_clock::now();
+
+  // Configure path tracer for testing
+  m_pathTracer.m_adaptiveSampling     = false;
+  m_pathTracer.m_pushConst.numSamples = 1;
+
+  // Reset rendering to start fresh
+  resetFrame();
+
+  printf("MSX test started: %s (will capture at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples)\n", sessionName.c_str());
+}
+
+void GltfRenderer::updateMSXTest(VkCommandBuffer cmd)
+{
+  if(!m_msxTestActive)
+    return;
+
+  // Finalize previous capture if pending
+  if(m_msxTestPendingFinalize)
+  {
+    m_msxAnalyzer.finalizeFrameCapture();
+    m_msxTestPendingFinalize = false;
+  }
+
+  // Sample counts to capture at
+  static const std::vector<uint32_t> sampleCounts = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+  static size_t currentSampleIndex = 0;
+
+  // Check if test is complete
+  if(currentSampleIndex >= sampleCounts.size())
+  {
+    // Test complete
+    m_msxTestActive = false;
+    m_msxAnalyzer.endSession();
+    currentSampleIndex = 0;  // Reset for next test
+
+    // Export results with timestamp
+    auto        now       = std::chrono::system_clock::now();
+    std::time_t nowTime   = std::chrono::system_clock::to_time_t(now);
+    std::tm     localTime = {};
+#ifdef _WIN32
+    localtime_s(&localTime, &nowTime);
+#else
+    localtime_r(&nowTime, &localTime);
+#endif
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &localTime);
+
+    std::filesystem::path testDir = "../test/msx_analysis";
+    if(!std::filesystem::exists(testDir))
+    {
+      std::filesystem::create_directories(testDir);
+    }
+
+    std::string csvFile = (testDir / ("msx_results_" + std::string(timestamp) + ".csv")).string();
+    m_msxAnalyzer.exportMetricsCSV(csvFile);
+
+    auto duration = std::chrono::steady_clock::now() - m_msxTestStartTime;
+    auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+
+    printf("MSX test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+    return;
+  }
+
+  uint32_t targetSamples = sampleCounts[currentSampleIndex];
+
+  // Wait until we've accumulated enough samples
+  if(static_cast<uint32_t>(m_resources.frameCount + 1) >= targetSamples)
+  {
+    // Capture this milestone
+    VkImage    testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+
+    auto   currentTime = std::chrono::steady_clock::now();
+    auto   duration    = currentTime - m_msxTestStartTime;
+    double timeMs      = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    m_msxAnalyzer.captureFrame(cmd, testImage, targetSamples, timeMs);
+
+    // Mark as pending
+    m_msxTestPendingFinalize = true;
+
+    // Move to next milestone
+    currentSampleIndex++;
+
+    printf("MSX: Recorded capture %zu/%zu at %u samples\n", currentSampleIndex,
+           sampleCounts.size(), targetSamples);
+  }
+}
+
 void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
 {
     NVVK_DBG_SCOPE(cmd);

@@ -56,6 +56,8 @@
 #include "ui_scene_graph.hpp"
 #include "qolds_builder.hpp"
 #include "convergence_analyzer.hpp"
+#include "vndf_analyzer.hpp"
+#include "msx_analyzer.hpp"
 #include "rmip_builder.hpp"
 #include "aabb_computer.hpp"
 
@@ -108,6 +110,17 @@ private:
   void startConvergenceTest(bool useQOLDS);
   void startCombinedConvergenceTest();  // Run both QOLDS and PCG tests sequentially
   void updateConvergenceTest(VkCommandBuffer cmd);
+
+  /////
+  /// VNDF Analysis
+  void startVNDFTest(bool useBoundedVNDF);
+  void updateVNDFTest(VkCommandBuffer cmd);
+
+  /////
+  /// MSX Analysis
+  void setupMSXAnalyzerCallbacks();
+  void startMSXTest();
+  void updateMSXTest(VkCommandBuffer cmd);
 
   /////
   /// UI
@@ -168,6 +181,28 @@ private:
   size_t                   m_convergenceTestCurrentIndex{0};
   std::chrono::steady_clock::time_point m_convergenceTestStartTime;
   std::chrono::steady_clock::time_point m_convergenceTestLastCaptureTime;  // For time delta calculation
+
+  // VNDF analysis
+  matforge::VNDFAnalyzer m_vndfAnalyzer;  // VNDF analyzer for Bounded vs Standard comparison
+
+  // VNDF test state
+  bool                     m_vndfTestActive{false};
+  bool                     m_vndfTestUseBoundedVNDF{false};
+  bool                     m_vndfTestPendingFinalize{false};
+  bool                     m_vndfTestRunBoth{false};  // Run both Bounded and Standard tests sequentially
+  std::vector<uint32_t>    m_vndfTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+  size_t                   m_vndfTestCurrentIndex{0};
+  std::chrono::steady_clock::time_point m_vndfTestStartTime;
+  std::chrono::steady_clock::time_point m_vndfTestLastCaptureTime;
+
+  // MSX analysis
+  matforge::MSXAnalyzer m_msxAnalyzer;  // MSX analyzer for Fast-MSX testing
+
+  // MSX test state
+  bool                     m_msxTestActive{false};
+  bool                     m_msxTestPendingFinalize{false};
+  matforge::MSXTestConfig  m_msxTestConfig;
+  std::chrono::steady_clock::time_point m_msxTestStartTime;
 
   std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 

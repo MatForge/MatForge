@@ -1,0 +1,11 @@
+Roughness,SampleCount,Method,RejectionRate
+0.2,1,Standard,0
+0.2,2,Standard,0
+0.2,4,Standard,0
+0.2,8,Standard,0
+0.2,16,Standard,0
+0.2,32,Standard,0
+0.2,64,Standard,0
+0.2,128,Standard,0
+0.2,256,Standard,0
+0.2,512,Standard,0
