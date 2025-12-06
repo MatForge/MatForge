@@ -115,6 +115,9 @@ void RmipBuilder::deinit()
     m_initDescriptorSetLayout = VK_NULL_HANDLE;
     m_expandDescriptorSetLayout = VK_NULL_HANDLE;
     m_descriptorPool = VK_NULL_HANDLE;
+    m_stagingResolution = 0;
+    m_stagingNumLayers = 0;
+    m_stagingNeedsTransition = true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -128,6 +131,9 @@ void RmipBuilder::resetDescriptorPool()
 
     // Reset the descriptor pool, freeing all allocated descriptor sets
     vkResetDescriptorPool(m_device, m_descriptorPool, 0);
+
+    // Reset staging state for new scene - force transition on next buildRMIP
+    m_stagingNeedsTransition = true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -258,13 +264,29 @@ void RmipBuilder::createPipelines()
 
 //--------------------------------------------------------------------------------------------------
 // Create staging image for ping-pong during construction
+// NOTE: Only recreates if dimensions change to avoid destroying staging while
+// previous RMIP build commands are still pending in the command buffer
 //
 void RmipBuilder::createStagingImage(uint32_t resolution, uint32_t numLayers)
 {
-    // Destroy old staging if it exists
+    // Check if we can reuse existing staging image (same dimensions)
+    if (m_stagingImage.image != VK_NULL_HANDLE &&
+        m_stagingResolution == resolution &&
+        m_stagingNumLayers == numLayers)
+    {
+        return;  // Reuse existing staging image
+    }
+
+    // Need to recreate - destroy old staging if it exists
+    // IMPORTANT: This should only happen when dimensions change between scenes,
+    // not between individual materials in the same scene (which have same resolution)
     if (m_stagingView)
         vkDestroyImageView(m_device, m_stagingView, nullptr);
-    m_allocator->destroyImage(m_stagingImage);
+    if (m_stagingImage.image != VK_NULL_HANDLE)
+        m_allocator->destroyImage(m_stagingImage);
+
+    m_stagingView = VK_NULL_HANDLE;
+    m_stagingImage = {};
 
     // Create image
     VkImageCreateInfo imageInfo{
@@ -296,6 +318,11 @@ void RmipBuilder::createStagingImage(uint32_t resolution, uint32_t numLayers)
 
     NVVK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &m_stagingView));
     NVVK_DBG_NAME(m_stagingView);
+
+    // Track current staging dimensions
+    m_stagingResolution = resolution;
+    m_stagingNumLayers = numLayers;
+    m_stagingNeedsTransition = true;  // New image needs UNDEFINED→GENERAL transition
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -321,11 +348,38 @@ void RmipBuilder::buildRMIP(VkCommandBuffer cmd,
     uint32_t maxLevel = static_cast<uint32_t>(std::log2(resolution));
     uint32_t numLayers = (maxLevel + 1) * (maxLevel + 1);
 
-    // Create staging for ping-pong
+    // Create staging for ping-pong (reuses if same dimensions)
     createStagingImage(resolution, numLayers);
 
-    // Transition staging image from UNDEFINED to GENERAL
-    transitionToGeneral(cmd, m_stagingImage.image);
+    // Handle staging image transition/barrier
+    if (m_stagingNeedsTransition)
+    {
+        // First use: transition from UNDEFINED to GENERAL
+        transitionToGeneral(cmd, m_stagingImage.image);
+        m_stagingNeedsTransition = false;
+    }
+    else
+    {
+        // Reusing staging: add compute→compute barrier to ensure previous RMIP build completed
+        // This is critical when multiple RMIPs are built in the same command buffer
+        VkImageMemoryBarrier barrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = m_stagingImage.image,
+            .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                .levelCount = VK_REMAINING_MIP_LEVELS,
+                                .layerCount = VK_REMAINING_ARRAY_LAYERS},
+        };
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
 
     // Transition RMIP output image from UNDEFINED to GENERAL
     transitionToGeneral(cmd, rmipOutput);

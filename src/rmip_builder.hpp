@@ -94,6 +94,9 @@ private:
     // Staging resources for ping-pong
     nvvk::Image   m_stagingImage{};
     VkImageView   m_stagingView{};
+    uint32_t      m_stagingResolution{0};  // Track current staging dimensions
+    uint32_t      m_stagingNumLayers{0};   // Track current staging layer count
+    bool          m_stagingNeedsTransition{true};  // Whether staging needs UNDEFINED→GENERAL transition
 
     // Output RMIP
     nvvk::Image m_rmipImage{};
