@@ -28,8 +28,8 @@
 //=============================================================================
 static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
-static const int MAX_TRAVERSAL_ITERS = 512;
-static const float MARCHING_SCALE = 8.0;
+static const int MAX_TRAVERSAL_ITERS = 2048;
+static const float MARCHING_SCALE = 2.0;
 static const int MAX_STACK_SIZE = 32;
 static const float BARY_EPS = 0.05;
 static const float PSI_NEAR_ZERO_THRESHOLD = 0.01;

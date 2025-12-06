@@ -6044,7 +6044,6 @@ The paper's algorithm uses ψ-marching as part of the RMIP traversal to efficien
 
 ![1764976582011](image/RMIP_texel_log/1764976582011.png)
 
-
 ---
 
 ---
@@ -6058,6 +6057,7 @@ Implement proper RMIP bounds querying in `getDisplacementBounds()` to provide ti
 ### Implementation
 
 Changed `getDisplacementBounds()` from:
+
 ```slang
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
@@ -6068,6 +6068,7 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
 ```
 
 To:
+
 ```slang
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
                            out float hMin, out float hMax)
@@ -6090,6 +6091,7 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
 ❌ **FAILED** - Severe rendering artifacts with characteristic circular pattern
 
 **Observed Behavior**:
+
 - At grazing angle: Nothing renders (all surfaces culled)
 - As viewing angle increases: Four corners/vertices render first
 - At top-down view: Plane renders with inner circular void (diameter ≈ edge length) and small square at center
@@ -6103,6 +6105,7 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
 ### Debug Finding
 
 Added debug code to verify the issue:
+
 ```slang
 if (false) {
     hMax = scale;  // Force global max bound
@@ -6110,6 +6113,7 @@ if (false) {
 ```
 
 When `hMax = scale` is forced (global bound), rendering is **correct**. This confirms:
+
 - `bounds.x` (min) may be correct
 - `bounds.y` (max) is **INCORRECT** - returning values that are too low
 
@@ -6128,6 +6132,7 @@ The circular void pattern suggests the error is related to **distance from textu
 #### Hypothesis 1: RMIP Higher Layers Not Built Correctly
 
 The RMIP structure has layers (p, q) where each stores minmax for rectangles of size (2^p, 2^q):
+
 - Layer (0, 0): Single texel queries
 - Layer (maxLevel, maxLevel): Entire texture query
 
@@ -6138,6 +6143,7 @@ For large queries (near texture center), we query high layers. If these layers c
 #### Hypothesis 2: RMIP Sampler Using Linear Filtering
 
 The `rmipSampler` must use **NEAREST** (point) filtering for correct minmax queries. If it uses LINEAR filtering:
+
 - Adjacent pixel values get interpolated
 - Minmax values become AVERAGED instead of preserved
 - Results in bounds that are too tight (between actual min and max)
@@ -6147,6 +6153,7 @@ The `rmipSampler` must use **NEAREST** (point) filtering for correct minmax quer
 #### Hypothesis 3: Layer Index Calculation Mismatch
 
 The `getRmipLayer()` function must match the build-time `computeLayerIndex()`:
+
 ```slang
 // Build: computeLayerIndex(p, q, stride) = p + q * stride
 // Query: getRmipLayer(p, q, maxLevel) = p + q * (maxLevel + 1)
@@ -6157,6 +6164,7 @@ If `maxLevel` is computed differently between build and query, wrong layers get 
 #### Hypothesis 4: Texture Array Sampling Issue
 
 When sampling `Texture2DArray` with `float3(uv, float(layer))`:
+
 - The Z coordinate is the array slice index
 - If sampler interpolates between array slices, we get wrong layer values
 
@@ -6174,18 +6182,17 @@ When sampling `Texture2DArray` with `float3(uv, float(layer))`:
 **Root Cause Chain**:
 
 1. In `renderer_pathtracer.cpp:88`, the code calls:
+
    ```cpp
    resources.samplerPool.acquireSampler(m_displacementSampler);
    ```
-
 2. The `SamplerPool::acquireSampler()` default (from `nvvk/sampler_pool.hpp:59-62`) uses:
+
    ```cpp
    .magFilter = VK_FILTER_LINEAR,
    .minFilter = VK_FILTER_LINEAR
    ```
-
 3. Both RMIP and displacement textures were using the same sampler (`m_displacementSampler`)
-
 4. **Result**: When querying RMIP minmax values, LINEAR filtering interpolates between adjacent texels, returning **averaged** values instead of true min/max
 
 **Why This Causes the Circular Void Pattern**:
@@ -6202,12 +6209,13 @@ When sampling `Texture2DArray` with `float3(uv, float(layer))`:
 **Files Changed**:
 
 1. `src/renderer_pathtracer.hpp` - Added `m_rmipSampler` member:
+
    ```cpp
    VkSampler m_displacementSampler{};  // LINEAR filtering for displacement textures
    VkSampler m_rmipSampler{};          // NEAREST filtering for RMIP minmax queries
    ```
-
 2. `src/renderer_pathtracer.cpp` - Create RMIP sampler in `onAttach()`:
+
    ```cpp
    VkSamplerCreateInfo rmipSamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
    rmipSamplerInfo.magFilter = VK_FILTER_NEAREST;
@@ -6218,14 +6226,14 @@ When sampling `Texture2DArray` with `float3(uv, float(layer))`:
    rmipSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
    resources.samplerPool.acquireSampler(m_rmipSampler, rmipSamplerInfo);
    ```
-
 3. `src/renderer_pathtracer.cpp` - Release in `onDetach()`:
+
    ```cpp
    resources.samplerPool.releaseSampler(m_rmipSampler);
    m_rmipSampler = VK_NULL_HANDLE;
    ```
-
 4. `src/renderer_pathtracer.cpp` - Use separate samplers in `writeDisplacementDescriptors()`:
+
    ```cpp
    // Binding 10: RMIP sampler - MUST use NEAREST filtering
    rmipSamplerInfo.sampler = m_rmipSampler;
@@ -6239,6 +6247,7 @@ When sampling `Texture2DArray` with `float3(uv, float(layer))`:
 **Testing Result**: ❌ SAMPLER FIX DID NOT RESOLVE ISSUE
 
 The circular void pattern persists unchanged. Further investigation revealed:
+
 - `bounds.y` from `queryRMIPFull` is consistently ~0.01 regardless of query region
 - Setting `hMax = 0.01 * scale` reproduces the exact same behavior
 - This indicates `queryRMIPFull` returns a small constant, not actual minmax values
@@ -6268,11 +6277,13 @@ if (hMax < 0.001 * scale) {
 ```
 
 **Purpose**: Determine if:
+
 1. The RMIP texture data is correct (build phase worked)
 2. Direct layer sampling works
 3. Issue is in `queryRMIPFull` logic vs texture binding/data
 
 **Expected Results**:
+
 - If rendering works with `globalSample`: RMIP texture is valid, bug is in `queryRMIPFull`
 - If fallback triggers (near-zero): RMIP texture has wrong data or isn't bound correctly
 - If still broken even with fallback: Issue is elsewhere
@@ -6298,6 +6309,7 @@ if (hMax < 0.001 * scale) {
 ### Version 38: RMIP Layer Building Fix (December 5, 2025)
 
 **Problem**: V36/V37 diagnostics revealed that `queryRMIPFull` was returning constant ~0.01 values regardless of query region. Progressive layer testing showed:
+
 - Layer 0 (init shader): ✅ Contains correct displacement values
 - Layer 1+ (expand shader): ❌ All zeros
 
@@ -6312,6 +6324,7 @@ Three issues were identified in the RMIP build pipeline:
 The expand shader used `Texture2DArray<float2>` for the input binding, which requires `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`. However, the `[]` operator (Load) requires `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE`.
 
 **Fix**: Created separate descriptor layouts for init and expand shaders:
+
 - Init shader: `SAMPLED_IMAGE` for binding 0 (reads displacement texture with sampler)
 - Expand shader: `STORAGE_IMAGE` for binding 0 (reads RMIP array with `[]` operator)
 
@@ -6359,6 +6372,7 @@ void RmipBuilder::addTransferBarrier(VkCommandBuffer cmd, VkImage image)
 The critical issue: A single `m_paramsBuffer` uniform buffer was being overwritten before GPU execution.
 
 The build sequence records multiple dispatches:
+
 1. CPU writes params for dispatch (p=1,q=0), records dispatch
 2. CPU writes params for dispatch (p=2,q=0), **overwrites buffer**, records dispatch
 3. CPU writes params for dispatch (p=1,q=1), **overwrites buffer**, records dispatch
@@ -6385,6 +6399,7 @@ The C++ code was already calling `vkCmdPushConstants` (lines 554-555 in `bindExp
 **Verification**:
 
 Added debug code to write constant (0.5, 1.0) to layer 1:
+
 ```slang
 if (p == 1 && q == 0)
 {
@@ -6399,15 +6414,16 @@ After V38c fix, layer 1 correctly showed 1.0 for the max value, confirming the e
 **Files Changed**:
 
 1. `shaders/rmip_expand.compute.slang`:
+
    - Changed `Texture2DArray<float2>` to `RWTexture2DArray<float2>` for input (V38)
    - Changed `ConstantBuffer<RMIPBuildParams>` to `[[vk::push_constant]] RMIPBuildParams` (V38c)
-
 2. `src/rmip_builder.hpp`:
+
    - Added separate pipeline layouts: `m_initPipelineLayout`, `m_expandPipelineLayout`
    - Added separate descriptor layouts: `m_initDescriptorSetLayout`, `m_expandDescriptorSetLayout`
    - Added `addTransferBarrier()` function declaration (V38b)
-
 3. `src/rmip_builder.cpp`:
+
    - Implemented `createDescriptorSetLayouts()` with separate bindings for init and expand
    - Updated `createPipelines()` to use separate layouts
    - Added `addTransferBarrier()` implementation (V38b)
@@ -6423,10 +6439,274 @@ After V38c fix, layer 1 correctly showed 1.0 for the max value, confirming the e
 
 **Summary of V38 Fixes**:
 
-| Fix | Issue | Solution |
-|-----|-------|----------|
-| V38 | Expand shader couldn't read input with `[]` operator | Separate descriptor layouts (STORAGE_IMAGE for expand) |
-| V38b | Wrong barriers after copy operations | Added `addTransferBarrier()` with TRANSFER stage |
-| V38c | Uniform buffer race condition | Push constants instead of uniform buffer |
+| Fix  | Issue                                                  | Solution                                               |
+| ---- | ------------------------------------------------------ | ------------------------------------------------------ |
+| V38  | Expand shader couldn't read input with `[]` operator | Separate descriptor layouts (STORAGE_IMAGE for expand) |
+| V38b | Wrong barriers after copy operations                   | Added `addTransferBarrier()` with TRANSFER stage     |
+| V38c | Uniform buffer race condition                          | Push constants instead of uniform buffer               |
 
 The RMIP data structure is now correctly built, enabling proper displacement bounds queries for the hierarchical traversal algorithm.
+
+
+![1764986695916](image/RMIP_texel_log/1764986695916.png)
+
+![1764986788706](image/RMIP_texel_log/1764986788706.png)
+
+![1764986792472](image/RMIP_texel_log/1764986792472.png)
+
+![1764986775964](image/RMIP_texel_log/1764986775964.png)
+
+---
+
+### Version 39: Displacement-Aware Perpendicular Band Testing (December 5, 2025)
+
+**Goal**: Fix ψ-marching stripping by using RMIP bounds to compute displacement-aware perpendicular band width.
+
+**Background**: V33-V35 analysis concluded that stripping is caused by displacement shifting hits perpendicular to the ψ=0 curve. V33 tried ±1 perpendicular texel testing but it was too slow and the fixed band width wasn't enough. Now with RMIP working (V38), we can compute the correct band width.
+
+**Key Insight**:
+- ψ=0 represents ray projection onto BASE surface P(u,v)
+- Actual hits occur on DISPLACED surface S(u,v) = P + h·N
+- Displacement shifts hits PERPENDICULAR to ψ=0 curve
+- Band width depends on: dispRange (from RMIP), grazing angle, texel size
+
+**Implementation**:
+
+1. **New function `computeDisplacementBandWidth()`**:
+```slang
+int computeDisplacementBandWidth(Tri tri, float3 rayD, float dispRange, int2 texSize)
+{
+    float3 avgN = normalize(tri.n0 + tri.n1 + tri.n2);
+    float NdotD = abs(dot(avgN, rayD));
+    float NcrossD = length(cross(avgN, rayD));
+
+    // Grazing factor = tan(ray-surface angle), clamped to max 10
+    float grazingFactor = NcrossD / max(NdotD, 0.1);
+    grazingFactor = min(grazingFactor, 10.0);
+
+    // Compute texel world size
+    float3 edge1 = tri.v1 - tri.v0;
+    float3 edge2 = tri.v2 - tri.v0;
+    float texelWorldSize = (length(edge1) + length(edge2)) * 0.5 / max(texSize.x, texSize.y);
+
+    // UV shift = dispRange * grazingFactor / texelWorldSize
+    float uvShift = dispRange * grazingFactor / max(texelWorldSize, 1e-6);
+
+    return max(1, min(int(ceil(uvShift)), 8));  // Capped at 8
+}
+```
+
+2. **Modified `texelMarchWithPsi()`**:
+   - Query RMIP for leaf region bounds at start
+   - Compute band width using new function
+   - For each texel on ψ=0, test all texels within ±bandWidth perpendicular to curve
+   - Applied to both primary marching loop and V35 hyperbolic branch loop
+
+**Testing Result**: ❌ **REJECTED** - Same issues as V33
+
+- ✅ Reduces stripping at SOME grazing angles (screenshots 2 & 3 from V32)
+- ❌ Stripping STILL PERSISTS at other angles
+- ❌ **FPS WORSE THAN BRUTE FORCE** - Perpendicular band testing is expensive
+- ❌ Not a viable solution
+
+**Performance Comparison**:
+
+| Method | Visual Quality | FPS |
+|--------|---------------|-----|
+| Brute Force | ✅ Correct | Baseline |
+| V39 ψ + Band | ⚠️ Partial | **< Brute Force** |
+
+**Why V39 Failed**:
+
+1. **Performance**: Testing (2*bandWidth+1) texels per ψ=0 texel is expensive
+2. **Correctness**: Band testing along one perpendicular direction doesn't catch all cases
+3. **Fundamental issue**: The displaced surface can be shifted in complex ways depending on local geometry, not just perpendicular to ψ gradient
+
+**Conclusion**: Perpendicular band testing (whether fixed V33 or RMIP-computed V39) is not the right approach:
+- Too slow (worse than brute force)
+- Doesn't fully solve stripping
+
+**Next Steps**: Need alternative approaches:
+1. **Hybrid approach**: Use ψ-marching for efficiency, fall back to brute force when stripping detected
+2. **Improved ψ curve tracking**: Better curve following that accounts for displacement
+3. **Accept brute force**: At leaf level, just use `testAllTexelsInRegion()` which is correct
+
+**Status**: V39 REVERTED
+
+---
+
+## Comprehensive Analysis: Why ψ-Marching Has Stripping (December 5, 2025)
+
+### Summary of Failed Attempts (V33-V35, V39)
+
+| Version | Hypothesis | Approach | Result | Why it Failed |
+|---------|-----------|----------|--------|---------------|
+| V33 | Displacement offsets hits perpendicular to ψ=0 | Test ±1 perpendicular texel | Slow, limited fix | Fixed band width (±1) insufficient for varying displacement |
+| V34 | Quadric ψ approximation is inaccurate | Use direct `psi()` instead of `evalPsiQuadric()` | No change | Quadric computation is correct |
+| V35 | Missing second branch of hyperbolic ψ curve | Queue-based multi-branch marching | No change | Both branches already found |
+| V39 | Need RMIP-computed perpendicular band width | Query RMIP for dispRange, compute band width | Slower than BF | Testing (2*bandWidth+1) texels per step is expensive |
+
+### Root Cause: ψ=0 Follows BASE Surface, Hits Occur on DISPLACED Surface
+
+The fundamental issue (identified in V33-V35 analysis):
+
+```
+ψ(u,v) = (P(u,v) - O) · (N × D) = 0
+```
+
+- **ψ=0 curve**: Where ray projects onto BASE surface P(u,v)
+- **Actual hits**: On DISPLACED surface S(u,v) = P(u,v) + h(u,v)·N(u,v)
+- **The offset**: Displacement h shifts hits PERPENDICULAR to ψ=0 curve
+
+```
+         ψ=0 curve on base surface P
+              ↓
+    ═══════╪═══════╪═══════╪═══════
+           │       │       │
+           │   X   │       │    ← Displaced surface S (height h)
+           │       │       │
+    ───────┼───────┼───────┼───────
+           │       │       │
+       Texel A  Texel B  Texel C
+
+Where ψ=0 passes: Texel B (on base surface)
+Where hit occurs: Texel A (on displaced surface due to height h)
+```
+
+At certain heights, this offset equals exactly N texels, causing systematic misses along contour lines of constant displacement → **stripping artifacts**.
+
+---
+
+### Current Implementation Architecture
+
+```
+testLeafRegion(tri, matIdx, rayO, rayD, uvMin, uvMax, ...)
+{
+    if (pushConst.usePsiMarching == 0)
+        return testAllTexelsInRegion(...);  // Brute force at leaf
+    else
+        return texelMarchWithPsi(...);      // ψ-guided marching (has stripping)
+}
+```
+
+**Key insight**: Both modes share the SAME hierarchical RMIP traversal above the leaf level!
+
+The hierarchical traversal (lines 2186-2280) does:
+1. Stack-based UV region traversal
+2. RMIP bounds query → 3D AABB
+3. Ray-AABB culling (skips empty regions)
+4. Subdivide if region too large
+5. At leaf (≤ MARCHING_SCALE texels): dispatch to `testLeafRegion()`
+
+---
+
+### "Brute Force at Leaf" vs "Current Brute Force" - What's the Difference?
+
+#### Current Brute Force (`usePsiMarching == 0`)
+
+```
+Hierarchical RMIP Traversal (efficient culling)
+    ↓
+At leaf (≤8 texels): testAllTexelsInRegion()
+    - Tests all texels in small region
+    - Correct, no stripping
+    - Only ~64 texels max (8×8)
+```
+
+#### ψ-Marching (`usePsiMarching == 1`)
+
+```
+Hierarchical RMIP Traversal (efficient culling)  ← SAME as above!
+    ↓
+At leaf (≤8 texels): texelMarchWithPsi()
+    - Follows ψ=0 curve through ~8-16 texels
+    - MISSES displaced hits in other texels
+    - Causes stripping
+```
+
+**The ONLY difference is what happens at leaf level!**
+
+| Aspect | Brute Force at Leaf | ψ-Marching at Leaf |
+|--------|--------------------|--------------------|
+| Hierarchical traversal | ✅ RMIP bounds | ✅ RMIP bounds |
+| Leaf region size | ≤8×8 = 64 texels | ≤8×8 = 64 texels |
+| Texels tested at leaf | ALL 64 | ~8-16 along ψ=0 |
+| Correctness | ✅ No stripping | ❌ Stripping |
+| Expected perf difference | Small (only leaf differs) | Small |
+
+---
+
+### What Does the Paper Actually Do? (Section 4.4)
+
+From the paper:
+
+> "The final stage of our traversal routine is a direct intersection test with a local reconstruction of the displaced surface. This step is triggered when the 2D bounds become small enough... we found that it is more efficient to stop the traversal earlier, and **march along the projected ray through the texels it crosses**."
+
+The paper DOES use ψ-marching, BUT:
+
+1. **Hierarchical traversal already guarantees ray hits somewhere in this region**
+2. **ψ-marching visits EVERY texel along the ψ=0 curve and tests it**
+3. **Because bounds are already VERY tight, the displaced hit IS in one of those texels**
+
+Key quote from Section 4.3:
+> "Rays that are near-parallel to the displacement directions have 2D projections **smaller than the size of a texel**."
+
+**Why paper's ψ-marching works:**
+- Bound reduction via inverse displacement → leaf regions are typically **1-4 texels**
+- ψ-marching visits ALL of them
+- The displaced hit MUST be in one of those texels
+
+**Why our ψ-marching has stripping:**
+- Our leaf region can be up to **8×8 = 64 texels**
+- ψ-marching only visits **~8-16 texels** along the curve
+- Displaced hits in the other **~50 texels** are MISSED
+
+---
+
+### The Real Fix Options
+
+#### Option 1: Lower MARCHING_SCALE
+- Change from 8 to 2-4
+- Forces tighter hierarchical subdivision
+- Smaller leaf regions → ψ-marching more likely to work
+- Trade-off: More hierarchical iterations
+
+#### Option 2: Improve Bound Reduction
+- Better inverse displacement projection (line 15 of Algorithm 1)
+- Tighter initial bounds from ray-prism intersection
+- Smaller leaf regions naturally
+
+#### Option 3: Always Brute Force at Leaf
+- Simple: just use `testAllTexelsInRegion()` always
+- Removes ψ-marching entirely
+- Since both modes share hierarchical traversal, performance difference is small
+- **Guaranteed correct, no stripping**
+
+#### Option 4: Hybrid Based on Leaf Size
+```slang
+if (leafTexelCount <= 4)
+    return texelMarchWithPsi(...);  // Safe for tiny regions
+else
+    return testAllTexelsInRegion(...);  // Brute force for larger regions
+```
+
+---
+
+### Recommendation
+
+**Option 3 (Always Brute Force at Leaf)** is the safest:
+
+1. **Correctness guaranteed** - no stripping possible
+2. **Performance impact minimal** - hierarchical traversal (shared) handles efficiency
+3. **Simple implementation** - just always call `testAllTexelsInRegion()`
+4. **Paper's method relies on tighter bounds than we achieve** - until bound reduction is improved, ψ-marching will have issues
+
+The hierarchical RMIP traversal provides the O(log N) efficiency. What happens at leaf level (testing ~64 texels vs ~16 texels) is a constant factor that matters less.
+
+---
+
+### Next Steps
+
+1. **Measure actual FPS difference** between `usePsiMarching=0` and `usePsiMarching=1`
+2. If difference is small → remove ψ-marching option entirely
+3. If difference is significant → investigate Option 1 (lower MARCHING_SCALE) or Option 2 (better bound reduction)
