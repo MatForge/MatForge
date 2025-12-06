@@ -1550,6 +1550,7 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
   if(m_uiSceneGraph.hasMaterialChanged())
   {
     m_resources.sceneVk.updateMaterialBuffer(cmd, m_resources.staging, m_resources.scene);
+    updateDisplacementFactors(cmd);  // Also update displacement factors if they changed
   }
   if(m_uiSceneGraph.hasLightChanged())
   {
@@ -2067,6 +2068,49 @@ void GltfRenderer::passRMIPToPathTracer()
 
     // Pass to PathTracer
     m_pathTracer.setDisplacementData(displacementInfo);
+}
+
+// Update displacement factors from the glTF model when material properties change
+// This is called when the user edits displacement factor/offset in the GUI
+void GltfRenderer::updateDisplacementFactors(VkCommandBuffer cmd)
+{
+    if (m_displacementRMIPs.empty())
+        return;
+
+    const tinygltf::Model& model = m_resources.scene.getModel();
+
+    // Gather updated displacement factors from the tinygltf model
+    std::vector<float> displacementFactors;
+    bool anyChanges = false;
+
+    for (size_t matIdx = 0; matIdx < m_displacementRMIPs.size(); ++matIdx)
+    {
+        RmipData& rmip = m_displacementRMIPs[matIdx];
+        if (!rmip.hasDisplacement)
+            continue;
+
+        if (matIdx < model.materials.size())
+        {
+            const tinygltf::Material& material = model.materials[matIdx];
+            KHR_materials_displacement displacement = tinygltf::utils::getDisplacement(material);
+
+            // Check if the factor changed
+            if (rmip.displacementFactor != displacement.displacementGeometryFactor)
+            {
+                rmip.displacementFactor = displacement.displacementGeometryFactor;
+                anyChanges = true;
+            }
+        }
+
+        displacementFactors.push_back(rmip.displacementFactor);
+    }
+
+    // Only update buffer if something changed
+    if (anyChanges && !displacementFactors.empty() && m_resources.bDisplacementFactors.buffer != VK_NULL_HANDLE)
+    {
+        VkDeviceSize bufferSize = displacementFactors.size() * sizeof(float);
+        m_resources.staging.appendBuffer(m_resources.bDisplacementFactors, 0, bufferSize, displacementFactors.data());
+    }
 }
 
 
