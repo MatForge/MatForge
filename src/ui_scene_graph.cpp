@@ -673,6 +673,7 @@ void UiSceneGraph::renderMaterial(int materialIndex)
     materialAnisotropy(material);
     materialClearcoat(material);
     materialDiffuseTransmission(material);
+    materialDisplacement(material);
     materialDispersion(material);
     materialEmissiveStrength(material);
     materialIor(material);
@@ -985,6 +986,36 @@ void UiSceneGraph::materialClearcoat(tinygltf::Material& material)
       tinygltf::utils::setClearcoat(material, {});
     }
   }
+}
+
+void UiSceneGraph::materialDisplacement(tinygltf::Material& material)
+{
+  bool hasMaterialDisplacement = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME);
+
+  // Only show the tab if the material has displacement (has a texture)
+  // No "Add" button - displacement requires a texture to be meaningful
+  if(hasMaterialDisplacement)
+  {
+    KHR_materials_displacement displacement = tinygltf::utils::getDisplacement(material);
+
+    // Only show editable properties if there's a displacement texture
+    if(displacement.displacementGeometryTexture.index >= 0)
+    {
+      if(PE::treeNode("Displacement"))
+      {
+        bool modif = false;
+        modif |= PE::DragFloat("Factor", &displacement.displacementGeometryFactor, 0.01f, 0.01f, 2.0f);
+        modif |= PE::DragFloat("Offset", &displacement.displacementGeometryOffset, 0.01f, -10.0f, 10.0f);
+        if(modif)
+        {
+          tinygltf::utils::setDisplacement(material, displacement);
+          m_changes.set(eMaterialDirty);
+        }
+        PE::treePop();
+      }
+    }
+  }
+  // No "Add" button - displacement is only meaningful with a texture
 }
 
 void UiSceneGraph::materialEmissiveStrength(tinygltf::Material& material)

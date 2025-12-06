@@ -1303,6 +1303,8 @@ void GltfRenderer::createDescriptorSets()
                                               VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // Displacement sampler
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementFactors,
                                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);  // Displacement factors from glTF
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eMaterialDispIndex,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);  // Material ID -> displacement array index
 
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
@@ -1463,6 +1465,7 @@ void GltfRenderer::destroyResources()
   m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
   m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
   m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
+  m_resources.allocator.destroyBuffer(m_resources.bMaterialDispIndex);
 
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);
@@ -1547,6 +1550,7 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
   if(m_uiSceneGraph.hasMaterialChanged())
   {
     m_resources.sceneVk.updateMaterialBuffer(cmd, m_resources.staging, m_resources.scene);
+    updateDisplacementFactors(cmd);  // Also update displacement factors if they changed
   }
   if(m_uiSceneGraph.hasLightChanged())
   {
@@ -1978,9 +1982,12 @@ void GltfRenderer::passRMIPToPathTracer()
     std::vector<PathTracer::DisplacementInfo> displacementInfo;
     displacementInfo.reserve(m_displacementRMIPs.size());
 
-    // Also collect displacement factors for shader
-    std::vector<float> displacementFactors;
-    displacementFactors.resize(m_displacementRMIPs.size(), 1.0f);  // Default to 1.0
+    // Build material-to-displacement-index mapping
+    // Maps materialID -> index in the 8-element displacement texture arrays
+    // -1 means no displacement for this material
+    std::vector<int32_t> materialToDispIndex(m_displacementRMIPs.size(), -1);
+    std::vector<float> displacementFactors;  // Only for materials WITH displacement
+    int32_t dispIdx = 0;
 
     for (size_t i = 0; i < m_displacementRMIPs.size(); ++i)
     {
@@ -1995,11 +2002,16 @@ void GltfRenderer::passRMIPToPathTracer()
 
         displacementInfo.push_back(info);
 
-        // Store displacement factor for shader access
-        displacementFactors[i] = rmip.displacementFactor;
+        // Build mapping for materials WITH displacement
+        if (rmip.hasDisplacement)
+        {
+            materialToDispIndex[i] = dispIdx;
+            displacementFactors.push_back(rmip.displacementFactor);
+            dispIdx++;
+        }
     }
 
-    // Create/update displacement factors buffer
+    // Create/update displacement factors buffer (now indexed by dispIdx, not materialID)
     if (m_resources.bDisplacementFactors.buffer != VK_NULL_HANDLE)
     {
         m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
@@ -2013,18 +2025,92 @@ void GltfRenderer::passRMIPToPathTracer()
                                                       VMA_MEMORY_USAGE_GPU_ONLY));
         NVVK_DBG_NAME(m_resources.bDisplacementFactors.buffer);
 
-        // Upload data using staging buffer
+        LOGI("Created displacement factors buffer with %zu entries\n", displacementFactors.size());
+    }
+
+    // Create/update material-to-displacement-index mapping buffer
+    if (m_resources.bMaterialDispIndex.buffer != VK_NULL_HANDLE)
+    {
+        m_resources.allocator.destroyBuffer(m_resources.bMaterialDispIndex);
+    }
+
+    if (!materialToDispIndex.empty())
+    {
+        VkDeviceSize mappingBufferSize = materialToDispIndex.size() * sizeof(int32_t);
+        NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bMaterialDispIndex, mappingBufferSize,
+                                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                                                      VMA_MEMORY_USAGE_GPU_ONLY));
+        NVVK_DBG_NAME(m_resources.bMaterialDispIndex.buffer);
+
+        LOGI("Created material-to-disp-index mapping buffer with %zu entries\n", materialToDispIndex.size());
+    }
+
+    // Upload both buffers using staging
+    if (!displacementFactors.empty() || !materialToDispIndex.empty())
+    {
         VkCommandBuffer cmd{};
         nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-        m_resources.staging.appendBuffer(m_resources.bDisplacementFactors, 0, bufferSize, displacementFactors.data());
+
+        if (!displacementFactors.empty())
+        {
+            VkDeviceSize bufferSize = displacementFactors.size() * sizeof(float);
+            m_resources.staging.appendBuffer(m_resources.bDisplacementFactors, 0, bufferSize, displacementFactors.data());
+        }
+        if (!materialToDispIndex.empty())
+        {
+            VkDeviceSize mappingBufferSize = materialToDispIndex.size() * sizeof(int32_t);
+            m_resources.staging.appendBuffer(m_resources.bMaterialDispIndex, 0, mappingBufferSize, materialToDispIndex.data());
+        }
+
         m_resources.staging.cmdUploadAppended(cmd);
         nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
-
-        LOGI("Created displacement factors buffer with %zu entries\n", displacementFactors.size());
     }
 
     // Pass to PathTracer
     m_pathTracer.setDisplacementData(displacementInfo);
+}
+
+// Update displacement factors from the glTF model when material properties change
+// This is called when the user edits displacement factor/offset in the GUI
+void GltfRenderer::updateDisplacementFactors(VkCommandBuffer cmd)
+{
+    if (m_displacementRMIPs.empty())
+        return;
+
+    const tinygltf::Model& model = m_resources.scene.getModel();
+
+    // Gather updated displacement factors from the tinygltf model
+    std::vector<float> displacementFactors;
+    bool anyChanges = false;
+
+    for (size_t matIdx = 0; matIdx < m_displacementRMIPs.size(); ++matIdx)
+    {
+        RmipData& rmip = m_displacementRMIPs[matIdx];
+        if (!rmip.hasDisplacement)
+            continue;
+
+        if (matIdx < model.materials.size())
+        {
+            const tinygltf::Material& material = model.materials[matIdx];
+            KHR_materials_displacement displacement = tinygltf::utils::getDisplacement(material);
+
+            // Check if the factor changed
+            if (rmip.displacementFactor != displacement.displacementGeometryFactor)
+            {
+                rmip.displacementFactor = displacement.displacementGeometryFactor;
+                anyChanges = true;
+            }
+        }
+
+        displacementFactors.push_back(rmip.displacementFactor);
+    }
+
+    // Only update buffer if something changed
+    if (anyChanges && !displacementFactors.empty() && m_resources.bDisplacementFactors.buffer != VK_NULL_HANDLE)
+    {
+        VkDeviceSize bufferSize = displacementFactors.size() * sizeof(float);
+        m_resources.staging.appendBuffer(m_resources.bDisplacementFactors, 0, bufferSize, displacementFactors.data());
+    }
 }
 
 

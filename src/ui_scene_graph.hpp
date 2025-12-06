@@ -119,6 +119,7 @@ private:
   void materialAnisotropy(tinygltf::Material& material);
   void materialClearcoat(tinygltf::Material& material);
   void materialDiffuseTransmission(tinygltf::Material& material);
+  void materialDisplacement(tinygltf::Material& material);
   void materialDispersion(tinygltf::Material& material);
   void materialEmissiveStrength(tinygltf::Material& material);
   void materialIor(tinygltf::Material& material);

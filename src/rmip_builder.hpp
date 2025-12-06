@@ -66,33 +66,37 @@ public:
 
 private:
     void createPipelines();
-    void createDescriptorSetLayout();
+    void createDescriptorSetLayouts();  // V38: Creates separate layouts for init and expand
     void createStagingImage(uint32_t resolution, uint32_t numLayers);
-    void bindResources(VkCommandBuffer       cmd,
-        VkImageView           inputView,
-        VkImageView           outputView,
-        const RmipBuildParams& params,
-        VkImageLayout         inputLayout);
+    void bindInitResources(VkCommandBuffer cmd, VkImageView inputView, VkImageView outputView, const RmipBuildParams& params);
+    void bindExpandResources(VkCommandBuffer cmd, VkImageView inputView, VkImageView outputView, const RmipBuildParams& params);
     void addImageBarrier(VkCommandBuffer cmd, VkImage image);
+    void addTransferBarrier(VkCommandBuffer cmd, VkImage image);  // V38b: For after copy operations
     void transitionToGeneral(VkCommandBuffer cmd, VkImage image);
 
     VkDevice                  m_device{};
     nvvk::ResourceAllocator* m_allocator{};
     VkCommandPool             m_commandPool{};
 
-    // Pipelines
-    VkPipelineLayout m_pipelineLayout{};
+    // Pipelines - V38: Separate layouts for init (SAMPLED_IMAGE) and expand (STORAGE_IMAGE)
+    VkPipelineLayout m_initPipelineLayout{};
+    VkPipelineLayout m_expandPipelineLayout{};
     VkPipeline       m_initPipeline{};      // Initialize base level
     VkPipeline       m_expandPipeline{};    // Expand levels (unified)
 
-    // Descriptor management
-    nvvk::DescriptorBindings m_bindings;
-    VkDescriptorSetLayout    m_descriptorSetLayout{};
+    // Descriptor management - V38: Separate bindings/layouts for init and expand
+    nvvk::DescriptorBindings m_initBindings;    // Uses SAMPLED_IMAGE for binding 0
+    nvvk::DescriptorBindings m_expandBindings;  // Uses STORAGE_IMAGE for binding 0
+    VkDescriptorSetLayout    m_initDescriptorSetLayout{};
+    VkDescriptorSetLayout    m_expandDescriptorSetLayout{};
     VkDescriptorPool         m_descriptorPool{};
 
     // Staging resources for ping-pong
     nvvk::Image   m_stagingImage{};
     VkImageView   m_stagingView{};
+    uint32_t      m_stagingResolution{0};  // Track current staging dimensions
+    uint32_t      m_stagingNumLayers{0};   // Track current staging layer count
+    bool          m_stagingNeedsTransition{true};  // Whether staging needs UNDEFINED→GENERAL transition
 
     // Output RMIP
     nvvk::Image m_rmipImage{};
