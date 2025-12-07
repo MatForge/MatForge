@@ -58,6 +58,7 @@
 #include "convergence_analyzer.hpp"
 #include "vndf_analyzer.hpp"
 #include "msx_analyzer.hpp"
+#include "rmip_analyzer.hpp"
 #include "rmip_builder.hpp"
 #include "aabb_computer.hpp"
 
@@ -121,6 +122,11 @@ private:
   void setupMSXAnalyzerCallbacks();
   void startMSXTest(bool useFastMSX);
   void updateMSXTest(VkCommandBuffer cmd);
+
+  /////
+  /// RMIP Analysis (PRI Marching Performance)
+  void startRMIPTest(bool usePsiMarching);
+  void updateRMIPTest(VkCommandBuffer cmd);
 
   /////
   /// UI
@@ -207,6 +213,18 @@ private:
   size_t                   m_msxTestCurrentIndex{0};
   matforge::MSXTestConfig  m_msxTestConfig;
   std::chrono::steady_clock::time_point m_msxTestStartTime;
+
+  // RMIP analysis (PRI Marching Performance)
+  matforge::RMIPAnalyzer   m_rmipAnalyzer;  // RMIP analyzer for PRI marching testing
+
+  // RMIP test state
+  bool                     m_rmipTestActive{false};
+  bool                     m_rmipTestUsePsiMarching{false};
+  bool                     m_rmipTestPendingFinalize{false};
+  bool                     m_rmipTestRunBoth{false};  // Run both BruteForce and PsiMarching tests sequentially
+  std::vector<uint32_t>    m_rmipTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+  size_t                   m_rmipTestCurrentIndex{0};
+  std::chrono::steady_clock::time_point m_rmipTestStartTime;
 
   std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 

@@ -739,6 +739,168 @@ void GltfRenderer::renderUI()
         }
         ImGui::Unindent();
       }
+
+      // RMIP Analysis (PRI Marching Performance)
+      if(headerManager.beginHeader("RMIP Analysis"))
+      {
+        ImGui::TextWrapped("Test PRI (Psi-guided Ray Intersection) marching performance for displacement mapping.");
+        ImGui::Spacing();
+
+        // Status
+        ImGui::Text(ICON_MS_INFO " Test Configuration");
+        ImGui::Indent();
+        ImGui::Text("Methods: Brute Force, Psi Marching");
+        ImGui::Text("Max Traversal Iters: %d", m_pathTracer.m_pushConst.rmipMaxTraversalIters);
+        ImGui::Text("Marching Scale: %.1f texels", m_pathTracer.m_pushConst.rmipMarchingScale);
+        ImGui::Text("Max Stack Size: %d", m_pathTracer.m_pushConst.rmipMaxStackSize);
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Current frame info
+        ImGui::Text(ICON_MS_CAMERA " Current Frame");
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Samples: %d", m_resources.frameCount + 1);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(Render to 512+ samples with Brute Force before testing)");
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Current method info
+        ImGui::Text(ICON_MS_SETTINGS " Current Method: %s",
+                    m_pathTracer.m_pushConst.usePsiMarching ? "Psi Marching" : "Brute Force");
+        ImGui::Spacing();
+
+        // Run test
+        ImGui::Text(ICON_MS_SCIENCE " Run Test");
+        ImGui::Indent();
+
+        bool rmipTestRunning = m_rmipTestActive;
+        ImGui::BeginDisabled(rmipTestRunning);
+
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start RMIP Test (Both)", ImVec2(250, 0)))
+        {
+          m_rmipAnalyzer.clearMetrics();  // Clear old data before starting new test
+          m_rmipTestRunBoth = true;
+          startRMIPTest(true);  // Start with Psi Marching first
+        }
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("Runs Brute Force vs Psi Marching comparison sequentially.\n"
+                           "Results exported to ../test/rmip_analysis/");
+        }
+
+        ImGui::EndDisabled();
+
+        if(rmipTestRunning)
+        {
+          float progress = static_cast<float>(m_rmipTestCurrentIndex) / static_cast<float>(m_rmipTestSampleCounts.size());
+          ImGui::ProgressBar(progress, ImVec2(250, 0));
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+                           ICON_MS_HOURGLASS_EMPTY " Testing %s...", m_rmipTestUsePsiMarching ? "Psi Marching" : "Brute Force");
+        }
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+
+        // Results summary
+        const auto& rmipMetrics = m_rmipAnalyzer.getMetrics();
+        if(!rmipMetrics.empty())
+        {
+          ImGui::Separator();
+          ImGui::Text(ICON_MS_CHECK_CIRCLE " Test Results");
+          ImGui::Indent();
+
+          // Summarize Brute Force results
+          double bfAvgPSNR = 0, bfAvgTime = 0, bfAvgHoles = 0;
+          int bfCount = 0;
+          for(const auto& m : rmipMetrics)
+          {
+            if(m.method == matforge::RMIPMethod::BruteForce)
+            {
+              bfAvgPSNR += m.psnr;
+              bfAvgTime += m.renderTimeMs;
+              bfAvgHoles += m.holePercentage;
+              bfCount++;
+            }
+          }
+          if(bfCount > 0)
+          {
+            bfAvgPSNR /= bfCount;
+            bfAvgTime /= bfCount;
+            bfAvgHoles /= bfCount;
+            ImGui::Text("Brute Force:");
+            ImGui::Text("  Avg PSNR: %.2f dB", bfAvgPSNR);
+            ImGui::Text("  Avg Time: %.2f ms", bfAvgTime);
+            ImGui::Text("  Avg Holes: %.2f%%", bfAvgHoles);
+            ImGui::Spacing();
+          }
+
+          // Summarize Psi Marching results
+          double psiAvgPSNR = 0, psiAvgTime = 0, psiAvgHoles = 0;
+          int psiCount = 0;
+          for(const auto& m : rmipMetrics)
+          {
+            if(m.method == matforge::RMIPMethod::PsiMarching)
+            {
+              psiAvgPSNR += m.psnr;
+              psiAvgTime += m.renderTimeMs;
+              psiAvgHoles += m.holePercentage;
+              psiCount++;
+            }
+          }
+          if(psiCount > 0)
+          {
+            psiAvgPSNR /= psiCount;
+            psiAvgTime /= psiCount;
+            psiAvgHoles /= psiCount;
+            ImGui::Text("Psi Marching:");
+            ImGui::Text("  Avg PSNR: %.2f dB", psiAvgPSNR);
+            ImGui::Text("  Avg Time: %.2f ms", psiAvgTime);
+            ImGui::Text("  Avg Holes: %.2f%%", psiAvgHoles);
+            if(psiAvgHoles > 1.0)
+            {
+              ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                               "  " ICON_MS_WARNING " Stripping artifacts detected!");
+            }
+          }
+
+          ImGui::Unindent();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Export
+        ImGui::Text(ICON_MS_SAVE " Export Results");
+        ImGui::Indent();
+        if(ImGui::Button("Export RMIP Metrics CSV"))
+        {
+          m_rmipAnalyzer.exportMetricsCSV("../test/rmip_analysis/rmip_metrics.csv");
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Export RMIP Images"))
+        {
+          m_rmipAnalyzer.exportComparisonImages("../test/rmip_analysis/images");
+        }
+        if(ImGui::Button("Export Performance CSV"))
+        {
+          m_rmipAnalyzer.exportPerformanceCSV("../test/rmip_analysis/rmip_performance.csv");
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Export Quality CSV"))
+        {
+          m_rmipAnalyzer.exportQualityCSV("../test/rmip_analysis/rmip_quality.csv");
+        }
+        if(ImGui::Button("Export Hole Analysis"))
+        {
+          m_rmipAnalyzer.exportHoleAnalysisCSV("../test/rmip_analysis/rmip_holes.csv");
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Generate Plot Script"))
+        {
+          m_rmipAnalyzer.generatePlotScript("../test/rmip_analysis/plot_rmip_results.py");
+        }
+        ImGui::Unindent();
+      }
     }
     ImGui::End();  // End Settings
 

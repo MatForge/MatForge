@@ -211,6 +211,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_msxAnalyzer.init(m_resources.allocator, m_device, m_msxTestConfig);
   setupMSXAnalyzerCallbacks();
 
+  // RMIP analyzer (PRI Marching Performance)
+  m_rmipAnalyzer.init(m_resources.allocator, m_device, {100, 100});  // Will be resized on first use
+
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.sceneRtx.init(&m_resources.allocator);
@@ -404,6 +407,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
     // Update MSX test if active
     updateMSXTest(cmd);
+
+    // Update RMIP test if active
+    updateRMIPTest(cmd);
   }
   else
   {
@@ -2137,6 +2143,155 @@ void GltfRenderer::updateMSXTest(VkCommandBuffer cmd)
     printf("MSX (%s): Recorded capture %zu/%zu at %u samples\n",
            m_msxTestUseFastMSX ? "FastMSX" : "GGX",
            m_msxTestCurrentIndex, m_msxTestSampleCounts.size(), targetSamples);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// RMIP Analysis - Compare Brute Force vs Psi-Guided Marching for Displacement Mapping
+//--------------------------------------------------------------------------------------------------
+
+void GltfRenderer::startRMIPTest(bool usePsiMarching)
+{
+  // Capture reference image first (must be at high sample count with brute force)
+  if(m_resources.frameCount < 100)
+  {
+    printf("Warning: Current frame count is %d. Please render to 512+ samples before starting test.\n", m_resources.frameCount);
+    printf("Capturing reference anyway, but results may be inaccurate.\n");
+  }
+
+  // Capture reference from current frame (should be rendered with brute force for ground truth)
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+  VkImage    refImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+  VkExtent2D size     = m_resources.gBuffers.getSize();
+
+  m_rmipAnalyzer.captureReference(cmd, refImage, size);
+
+  nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+
+  // Finalize reference capture after GPU sync
+  m_rmipAnalyzer.finalizeReferenceCapture();
+
+  // Start RMIP session
+  std::string sessionName = usePsiMarching ? "psi_marching_test" : "brute_force_test";
+  matforge::RMIPMethod method = usePsiMarching ? matforge::RMIPMethod::PsiMarching : matforge::RMIPMethod::BruteForce;
+
+  // Get current RMIP parameters from path tracer
+  int   maxIters      = m_pathTracer.m_pushConst.rmipMaxTraversalIters;
+  float marchingScale = m_pathTracer.m_pushConst.rmipMarchingScale;
+  int   stackSize     = m_pathTracer.m_pushConst.rmipMaxStackSize;
+
+  m_rmipAnalyzer.startSession(sessionName, method, maxIters, marchingScale, stackSize);
+
+  // Set test state
+  m_rmipTestActive          = true;
+  m_rmipTestUsePsiMarching  = usePsiMarching;
+  m_rmipTestPendingFinalize = false;
+  m_rmipTestCurrentIndex    = 0;
+  m_rmipTestStartTime       = std::chrono::steady_clock::now();
+
+  // Set psi marching mode in path tracer
+  m_pathTracer.m_pushConst.usePsiMarching = usePsiMarching ? 1 : 0;
+
+  // Disable auto SPP and set SPP to 1 for accurate testing
+  m_pathTracer.m_adaptiveSampling     = false;
+  m_pathTracer.m_pushConst.numSamples = 1;
+
+  // Reset rendering to start fresh
+  resetFrame();
+
+  printf("RMIP test started: %s (will capture at %zu sample counts)\n",
+         sessionName.c_str(), m_rmipTestSampleCounts.size());
+}
+
+void GltfRenderer::updateRMIPTest(VkCommandBuffer cmd)
+{
+  if(!m_rmipTestActive)
+    return;
+
+  // Finalize previous capture if pending
+  if(m_rmipTestPendingFinalize)
+  {
+    m_rmipAnalyzer.finalizeFrameCapture();
+    m_rmipTestPendingFinalize = false;
+  }
+
+  // Check if test is complete
+  if(m_rmipTestCurrentIndex >= m_rmipTestSampleCounts.size())
+  {
+    // Current test complete
+    m_rmipTestActive = false;
+    m_rmipAnalyzer.endSession();
+
+    // Export results with timestamp to test folder
+    std::string sessionName = m_rmipTestUsePsiMarching ? "psi_marching" : "brute_force";
+
+    // Generate timestamp string
+    auto        now       = std::chrono::system_clock::now();
+    std::time_t nowTime   = std::chrono::system_clock::to_time_t(now);
+    std::tm     localTime = {};
+#ifdef _WIN32
+    localtime_s(&localTime, &nowTime);
+#else
+    localtime_r(&nowTime, &localTime);
+#endif
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", &localTime);
+
+    // Create test directory if it doesn't exist
+    std::filesystem::path testDir = "../test/rmip_analysis";
+    if(!std::filesystem::exists(testDir))
+    {
+      std::filesystem::create_directories(testDir);
+    }
+
+    std::string csvFile = (testDir / (sessionName + "_" + timestamp + ".csv")).string();
+    matforge::RMIPMethod method = m_rmipTestUsePsiMarching ? matforge::RMIPMethod::PsiMarching : matforge::RMIPMethod::BruteForce;
+    m_rmipAnalyzer.exportMetricsCSV(csvFile, method);
+
+    auto duration = std::chrono::steady_clock::now() - m_rmipTestStartTime;
+    auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+
+    printf("RMIP test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+
+    // If running combined test and Psi Marching just finished, start Brute Force test
+    if(m_rmipTestRunBoth && m_rmipTestUsePsiMarching)
+    {
+      printf("Starting Brute Force test (part 2 of combined test)...\n");
+      startRMIPTest(false);  // Start Brute Force test
+    }
+    else
+    {
+      // All tests done
+      m_rmipTestRunBoth = false;
+    }
+    return;
+  }
+
+  uint32_t targetSamples = m_rmipTestSampleCounts[m_rmipTestCurrentIndex];
+
+  // Wait until we've accumulated enough samples
+  if(static_cast<uint32_t>(m_resources.frameCount + 1) >= targetSamples)
+  {
+    // Capture this milestone
+    VkImage testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+
+    auto   currentTime = std::chrono::steady_clock::now();
+    auto   duration    = currentTime - m_rmipTestStartTime;
+    double timeMs      = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    m_rmipAnalyzer.captureFrame(cmd, testImage, targetSamples, timeMs);
+
+    // Mark as pending
+    m_rmipTestPendingFinalize = true;
+
+    // Move to next milestone
+    m_rmipTestCurrentIndex++;
+
+    printf("RMIP (%s): Recorded capture %zu/%zu at %u samples\n",
+           m_rmipTestUsePsiMarching ? "PsiMarching" : "BruteForce",
+           m_rmipTestCurrentIndex, m_rmipTestSampleCounts.size(), targetSamples);
   }
 }
 
