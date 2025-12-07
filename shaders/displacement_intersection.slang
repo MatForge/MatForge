@@ -1074,7 +1074,7 @@ bool computeUVRegionAABB_Affine(Tri tri, float2 uvMin, float2 uvMax,
 }
 
 //=============================================================================
-// Micro-Triangle Intersection (Original - samples displacement internally)
+// Micro-Triangle Intersection
 //=============================================================================
 bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
                             uint matIdx, float3 rayO, float3 rayD,
@@ -1092,56 +1092,6 @@ bool intersectMicroTriangle(Tri tri, float2 b0, float2 b1, float2 b2,
     float h0 = sampleDisplacement(matIdx, tex0);
     float h1 = sampleDisplacement(matIdx, tex1);
     float h2 = sampleDisplacement(matIdx, tex2);
-
-    float3 P0 = getP(tri, b0);
-    float3 P1 = getP(tri, b1);
-    float3 P2 = getP(tri, b2);
-
-    float3 N0 = normalize(getN(tri, b0));
-    float3 N1 = normalize(getN(tri, b1));
-    float3 N2 = normalize(getN(tri, b2));
-
-    float3 p0 = P0 + N0 * h0;
-    float3 p1 = P1 + N1 * h1;
-    float3 p2 = P2 + N2 * h2;
-
-    float t;
-    float2 triB;
-    if (rayTriangleIntersect(p0, p1, p2, rayO, rayD, t, triB))
-    {
-        if (t >= tMin && t <= tMax)
-        {
-            hitT = t;
-            float w = 1.0 - triB.x - triB.y;
-            hitBary = w * b0 + triB.x * b1 + triB.y * b2;
-
-            float3 e1 = p1 - p0;
-            float3 e2 = p2 - p0;
-            hitGeoNormal = normalize(cross(e1, e2));
-
-            float3 baseNormal = normalize(N0 * w + N1 * triB.x + N2 * triB.y);
-            if (dot(hitGeoNormal, baseNormal) < 0)
-                hitGeoNormal = -hitGeoNormal;
-
-            return true;
-        }
-    }
-    return false;
-}
-
-//=============================================================================
-// Micro-Triangle Intersection (Optimized - takes pre-computed displacement)
-// Reduces texture samples by reusing cached corner displacement values
-//=============================================================================
-bool intersectMicroTriangleCached(Tri tri, float2 b0, float2 b1, float2 b2,
-                                   float h0, float h1, float h2,
-                                   float3 rayO, float3 rayD,
-                                   float tMin, float tMax,
-                                   out float hitT, out float2 hitBary, out float3 hitGeoNormal)
-{
-    hitT = tMax + 1.0;
-    hitBary = float2(0, 0);
-    hitGeoNormal = float3(0, 1, 0);
 
     float3 P0 = getP(tri, b0);
     float3 P1 = getP(tri, b1);
@@ -1233,8 +1183,7 @@ bool uvRegionOverlapsTriangle(Tri tri, float2 uvMin, float2 uvMax)
 }
 
 //=============================================================================
-// Brute Force Texel Testing (Optimized with cached displacement)
-// Reduces texture samples from 6 to 4 per texel by pre-sampling corners
+// Brute Force Texel Testing (Reliable Fallback)
 //=============================================================================
 bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                            float2 uvMin, float2 uvMax, float rayTMin, float rayTMax,
@@ -1256,27 +1205,23 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
     float bestT = rayTMax + 1.0;
     bool found = false;
 
-    // Pre-compute inverse texture size for UV calculation
-    float2 invTexSize = 1.0 / float2(texSize);
-
     for (int ty = texelMin.y; ty <= texelMax.y; ty++)
     {
         for (int tx = texelMin.x; tx <= texelMax.x; tx++)
         {
-            // Compute UV coordinates for 4 corners
-            float2 uv00 = float2(tx, ty) * invTexSize;
-            float2 uv10 = float2(tx + 1, ty) * invTexSize;
-            float2 uv01 = float2(tx, ty + 1) * invTexSize;
-            float2 uv11 = float2(tx + 1, ty + 1) * invTexSize;
+            int2 currentTexel = int2(tx, ty);
 
-            // Convert UV to barycentric coordinates
+            float2 uv00 = float2(currentTexel) / float2(texSize);
+            float2 uv10 = float2(currentTexel + int2(1, 0)) / float2(texSize);
+            float2 uv01 = float2(currentTexel + int2(0, 1)) / float2(texSize);
+            float2 uv11 = float2(currentTexel + int2(1, 1)) / float2(texSize);
+
             float2 b00, b10, b01, b11;
             texToBary(tri, uv00, b00);
             texToBary(tri, uv10, b10);
             texToBary(tri, uv01, b01);
             texToBary(tri, uv11, b11);
 
-            // Check validity of corners
             bool valid00 = b00.x >= -BARY_EPS && b00.y >= -BARY_EPS && b00.x + b00.y <= 1.0 + BARY_EPS;
             bool valid10 = b10.x >= -BARY_EPS && b10.y >= -BARY_EPS && b10.x + b10.y <= 1.0 + BARY_EPS;
             bool valid01 = b01.x >= -BARY_EPS && b01.y >= -BARY_EPS && b01.x + b01.y <= 1.0 + BARY_EPS;
@@ -1285,31 +1230,22 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             if (!(valid00 || valid10 || valid01 || valid11))
                 continue;
 
-            // Clamp barycentric coordinates
             b00 = clampBary(b00);
             b10 = clampBary(b10);
             b01 = clampBary(b01);
             b11 = clampBary(b11);
 
-            // OPTIMIZATION: Sample displacement at 4 corners ONCE
-            // Previously: 6 samples per texel (3 per micro-triangle × 2 triangles)
-            // Now: 4 samples per texel (corners shared between micro-triangles)
-            float h00 = sampleDisplacement(matIdx, uv00);
-            float h10 = sampleDisplacement(matIdx, uv10);
-            float h01 = sampleDisplacement(matIdx, uv01);
-            float h11 = sampleDisplacement(matIdx, uv11);
-
             float microT;
             float2 microBary;
             float3 microNormal;
 
-            // Triangle 1: b00, b10, b01 with cached displacement h00, h10, h01
+            // Triangle 1: b00, b10, b01
             float area1 = abs((b10.x - b00.x) * (b01.y - b00.y) - (b01.x - b00.x) * (b10.y - b00.y));
             if (area1 > 1e-6)
             {
-                if (intersectMicroTriangleCached(tri, b00, b10, b01, h00, h10, h01,
-                                                  rayO, rayD, rayTMin, min(rayTMax, bestT),
-                                                  microT, microBary, microNormal))
+                if (intersectMicroTriangle(tri, b00, b10, b01, matIdx, rayO, rayD,
+                                           rayTMin, min(rayTMax, bestT),
+                                           microT, microBary, microNormal))
                 {
                     if (microT < bestT)
                     {
@@ -1322,16 +1258,16 @@ bool testAllTexelsInRegion(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
             }
 
-            // Triangle 2: b10, b11, b01 with cached displacement h10, h11, h01
+            // Triangle 2: b10, b11, b01
             float w11 = 1.0 - b11.x - b11.y;
             if (w11 >= -BARY_EPS)
             {
                 float area2 = abs((b11.x - b10.x) * (b01.y - b10.y) - (b01.x - b10.x) * (b11.y - b10.y));
                 if (area2 > 1e-6)
                 {
-                    if (intersectMicroTriangleCached(tri, b10, b11, b01, h10, h11, h01,
-                                                      rayO, rayD, rayTMin, min(rayTMax, bestT),
-                                                      microT, microBary, microNormal))
+                    if (intersectMicroTriangle(tri, b10, b11, b01, matIdx, rayO, rayD,
+                                               rayTMin, min(rayTMax, bestT),
+                                               microT, microBary, microNormal))
                     {
                         if (microT < bestT)
                         {
@@ -1442,23 +1378,17 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
             float2 bc01 = clampBary(b01);
             float2 bc11 = clampBary(b11);
 
-            // OPTIMIZATION: Sample displacement at 4 corners ONCE
-            float h00 = sampleDisplacement(matIdx, uv00);
-            float h10 = sampleDisplacement(matIdx, uv10);
-            float h01 = sampleDisplacement(matIdx, uv01);
-            float h11 = sampleDisplacement(matIdx, uv11);
-
             float microT;
             float2 microBary;
             float3 microNormal;
 
-            // Triangle 1: corners 00, 10, 01 with cached displacement
+            // Triangle 1: corners 00, 10, 01
             float area1 = abs((bc10.x - bc00.x) * (bc01.y - bc00.y) - (bc01.x - bc00.x) * (bc10.y - bc00.y));
             if (area1 > 1e-6)
             {
-                if (intersectMicroTriangleCached(tri, bc00, bc10, bc01, h00, h10, h01,
-                                                  rayO, rayD, rayTMin, min(rayTMax, bestT),
-                                                  microT, microBary, microNormal))
+                if (intersectMicroTriangle(tri, bc00, bc10, bc01, matIdx, rayO, rayD,
+                                           rayTMin, min(rayTMax, bestT),
+                                           microT, microBary, microNormal))
                 {
                     if (microT < bestT)
                     {
@@ -1471,16 +1401,16 @@ bool texelMarchWithPsi(Tri tri, uint matIdx, float3 rayO, float3 rayD,
                 }
             }
 
-            // Triangle 2: corners 10, 11, 01 with cached displacement
+            // Triangle 2: corners 10, 11, 01
             float w11 = 1.0 - bc11.x - bc11.y;
             if (w11 >= -BARY_EPS)
             {
                 float area2 = abs((bc11.x - bc10.x) * (bc01.y - bc10.y) - (bc01.x - bc10.x) * (bc11.y - bc10.y));
                 if (area2 > 1e-6)
                 {
-                    if (intersectMicroTriangleCached(tri, bc10, bc11, bc01, h10, h11, h01,
-                                                      rayO, rayD, rayTMin, min(rayTMax, bestT),
-                                                      microT, microBary, microNormal))
+                    if (intersectMicroTriangle(tri, bc10, bc11, bc01, matIdx, rayO, rayD,
+                                               rayTMin, min(rayTMax, bestT),
+                                               microT, microBary, microNormal))
                     {
                         if (microT < bestT)
                         {

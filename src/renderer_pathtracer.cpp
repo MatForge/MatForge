@@ -288,7 +288,7 @@ bool PathTracer::onUIRender(Resources& resources)
       // RMIP tuning parameters
       changed |= PE::SliderInt("Max Traversal Iters", &m_rmipMaxTraversalIters, 64, 8192, "%d", 0,
                                "Maximum RMIP hierarchical traversal iterations");
-      changed |= PE::SliderFloat("Marching Scale", &m_rmipMarchingScale, 1.0f, 16.0f, "%.1f", 0,
+      changed |= PE::SliderFloat("Marching Scale", &m_rmipMarchingScale, 0.1f, 16.0f, "%.1f", 0,
                                  "Leaf region size threshold in texels (smaller = more iterations but potentially faster leaf testing)");
       changed |= PE::SliderInt("Max Stack Size", &m_rmipMaxStackSize, 8, 64, "%d", 0,
                                "Maximum stack size for hierarchical UV subdivision");
