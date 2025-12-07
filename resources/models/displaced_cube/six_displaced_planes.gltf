@@ -15,32 +15,38 @@
   "nodes": [
     {
       "mesh": 0,
-      "name": "VerticalStripesPlane"
+      "name": "TopFace",
+      "translation": [0.0, 0.75, 0.0]
     },
     {
       "mesh": 1,
-      "name": "ChippedPlanksPlane",
-      "translation": [2.5, 0.0, 0.0]
+      "name": "BottomFace",
+      "translation": [0.0, -1.0, 0.0],
+      "rotation": [1.0, 0.0, 0.0, 0.0]
     },
     {
       "mesh": 2,
-      "name": "QuiltedFabricPlane",
-      "translation": [-2.5, 0.0, 0.0]
+      "name": "FrontFace",
+      "translation": [0.0, 0.0, 1.0],
+      "rotation": [-0.7071068, 0.0, 0.0, 0.7071068]
     },
     {
       "mesh": 3,
-      "name": "HexGridPlane",
-      "translation": [0.0, 0.0, -2.5]
+      "name": "BackFace",
+      "translation": [0.0, 0.0, -1.0],
+      "rotation": [0.7071068, 0.0, 0.0, 0.7071068]
     },
     {
       "mesh": 4,
-      "name": "OrganicScalePlane",
-      "translation": [2.5, 0.0, -2.5]
+      "name": "RightFace",
+      "translation": [1.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.7071068, 0.7071068]
     },
     {
       "mesh": 5,
-      "name": "PatternedPavingPlane",
-      "translation": [-2.5, 0.0, -2.5]
+      "name": "LeftFace",
+      "translation": [-1.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, -0.7071068, 0.7071068]
     }
   ],
   "meshes": [

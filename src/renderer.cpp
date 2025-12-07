@@ -51,6 +51,7 @@
 
 #include <thread>
 #include <ctime>
+#include <cmath>
 #include <filesystem>
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
@@ -1326,6 +1327,8 @@ void GltfRenderer::createDescriptorSets()
                                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);  // Displacement factors from glTF
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eMaterialDispIndex,
                                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);  // Material ID -> displacement array index
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementUVTransforms,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);  // UV transforms for displacement textures
 
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
@@ -1487,6 +1490,7 @@ void GltfRenderer::destroyResources()
   m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
   m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
   m_resources.allocator.destroyBuffer(m_resources.bMaterialDispIndex);
+  m_resources.allocator.destroyBuffer(m_resources.bDisplacementUVTransforms);
 
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);
@@ -2432,10 +2436,53 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
         rmipData.displacementTextureIndex = static_cast<uint32_t>(textureIdx);
         rmipData.maxDisplacement = displacement.displacementGeometryFactor;
         rmipData.hasDisplacement = true;
+
+        // Extract UV transform from KHR_texture_transform extension if present
+        KHR_texture_transform uvTransform = tinygltf::utils::getTextureTransform(displacement.displacementGeometryTexture);
+
+        // Check if displacement texture has identity transform (no KHR_texture_transform)
+        // If so, try to inherit from baseColor texture which often shares the same UV layout
+        bool isIdentity = (std::abs(uvTransform.uvTransform[0][0] - 1.0f) < 0.0001f &&
+                          std::abs(uvTransform.uvTransform[1][1] - 1.0f) < 0.0001f &&
+                          std::abs(uvTransform.uvTransform[0][1]) < 0.0001f &&
+                          std::abs(uvTransform.uvTransform[1][0]) < 0.0001f &&
+                          std::abs(uvTransform.uvTransform[2][0]) < 0.0001f &&
+                          std::abs(uvTransform.uvTransform[2][1]) < 0.0001f);
+
+        if (isIdentity && material.pbrMetallicRoughness.baseColorTexture.index >= 0)
+        {
+            // Try to inherit UV transform from baseColor texture
+            KHR_texture_transform baseColorTransform = tinygltf::utils::getTextureTransform(material.pbrMetallicRoughness.baseColorTexture);
+            bool baseColorHasTransform = !(std::abs(baseColorTransform.uvTransform[0][0] - 1.0f) < 0.0001f &&
+                                          std::abs(baseColorTransform.uvTransform[1][1] - 1.0f) < 0.0001f &&
+                                          std::abs(baseColorTransform.uvTransform[0][1]) < 0.0001f &&
+                                          std::abs(baseColorTransform.uvTransform[1][0]) < 0.0001f &&
+                                          std::abs(baseColorTransform.uvTransform[2][0]) < 0.0001f &&
+                                          std::abs(baseColorTransform.uvTransform[2][1]) < 0.0001f);
+
+            if (baseColorHasTransform)
+            {
+                uvTransform = baseColorTransform;
+                LOGI("Displacement texture has no UV transform, inheriting from baseColor texture\n");
+            }
+        }
+
+        // Store as column-major 3x2 matrix: [m00, m10, m01, m11, m02, m12]
+        // uvTransform.uvTransform is a glm::mat3, we need the upper-left 2x2 + translation column
+        rmipData.uvTransform[0] = uvTransform.uvTransform[0][0];  // m00
+        rmipData.uvTransform[1] = uvTransform.uvTransform[0][1];  // m10
+        rmipData.uvTransform[2] = uvTransform.uvTransform[1][0];  // m01
+        rmipData.uvTransform[3] = uvTransform.uvTransform[1][1];  // m11
+        rmipData.uvTransform[4] = uvTransform.uvTransform[2][0];  // m02 (translation x)
+        rmipData.uvTransform[5] = uvTransform.uvTransform[2][1];  // m12 (translation y)
+
         m_displacementRMIPs[static_cast<int>(matIdx)] = rmipData;
 
         LOGI("Built RMIP for material %zu '%s', displacement map %d (%dx%d, %d layers, factor=%.3f)\n",
             matIdx, material.name.c_str(), imageIdx, resolution, resolution, numLayers, displacementFactor);
+        LOGI("  UV Transform: scale=[%.3f, %.3f], offset=[%.3f, %.3f]\n",
+            rmipData.uvTransform[0], rmipData.uvTransform[3],  // m00, m11 (scale)
+            rmipData.uvTransform[4], rmipData.uvTransform[5]); // m02, m12 (offset)
     }
 
     passRMIPToPathTracer();
@@ -2471,6 +2518,7 @@ void GltfRenderer::passRMIPToPathTracer()
     // -1 means no displacement for this material
     std::vector<int32_t> materialToDispIndex(m_displacementRMIPs.size(), -1);
     std::vector<float> displacementFactors;  // Only for materials WITH displacement
+    std::vector<float> uvTransforms;  // 6 floats per material with displacement
     int32_t dispIdx = 0;
 
     for (size_t i = 0; i < m_displacementRMIPs.size(); ++i)
@@ -2491,6 +2539,11 @@ void GltfRenderer::passRMIPToPathTracer()
         {
             materialToDispIndex[i] = dispIdx;
             displacementFactors.push_back(rmip.displacementFactor);
+            // Add UV transform (6 floats)
+            for (int j = 0; j < 6; ++j)
+            {
+                uvTransforms.push_back(rmip.uvTransform[j]);
+            }
             dispIdx++;
         }
     }
@@ -2529,8 +2582,25 @@ void GltfRenderer::passRMIPToPathTracer()
         LOGI("Created material-to-disp-index mapping buffer with %zu entries\n", materialToDispIndex.size());
     }
 
-    // Upload both buffers using staging
-    if (!displacementFactors.empty() || !materialToDispIndex.empty())
+    // Create/update UV transforms buffer
+    if (m_resources.bDisplacementUVTransforms.buffer != VK_NULL_HANDLE)
+    {
+        m_resources.allocator.destroyBuffer(m_resources.bDisplacementUVTransforms);
+    }
+
+    if (!uvTransforms.empty())
+    {
+        VkDeviceSize uvTransformBufferSize = uvTransforms.size() * sizeof(float);
+        NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bDisplacementUVTransforms, uvTransformBufferSize,
+                                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                                                      VMA_MEMORY_USAGE_GPU_ONLY));
+        NVVK_DBG_NAME(m_resources.bDisplacementUVTransforms.buffer);
+
+        LOGI("Created UV transforms buffer with %zu entries (%zu materials)\n", uvTransforms.size(), uvTransforms.size() / 6);
+    }
+
+    // Upload all buffers using staging
+    if (!displacementFactors.empty() || !materialToDispIndex.empty() || !uvTransforms.empty())
     {
         VkCommandBuffer cmd{};
         nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
@@ -2544,6 +2614,11 @@ void GltfRenderer::passRMIPToPathTracer()
         {
             VkDeviceSize mappingBufferSize = materialToDispIndex.size() * sizeof(int32_t);
             m_resources.staging.appendBuffer(m_resources.bMaterialDispIndex, 0, mappingBufferSize, materialToDispIndex.data());
+        }
+        if (!uvTransforms.empty())
+        {
+            VkDeviceSize uvTransformBufferSize = uvTransforms.size() * sizeof(float);
+            m_resources.staging.appendBuffer(m_resources.bDisplacementUVTransforms, 0, uvTransformBufferSize, uvTransforms.data());
         }
 
         m_resources.staging.cmdUploadAppended(cmd);

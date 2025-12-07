@@ -676,6 +676,13 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
       write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eMaterialDispIndex), &mappingInfo);
   }
 
+  // Add UV transforms buffer for displacement textures
+  if (resources.bDisplacementUVTransforms.buffer != VK_NULL_HANDLE)
+  {
+      VkDescriptorBufferInfo uvTransformsInfo{resources.bDisplacementUVTransforms.buffer, 0, VK_WHOLE_SIZE};
+      write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eDisplacementUVTransforms), &uvTransformsInfo);
+  }
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 

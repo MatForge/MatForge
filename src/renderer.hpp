@@ -247,9 +247,12 @@ private:
       VkImageView view{ VK_NULL_HANDLE };
       float       displacementFactor = 1.0f;
       int         texCoord = 0;
-      uint32_t    displacementTextureIndex = UINT32_MAX;  
-      float       maxDisplacement = 0.0f;                
-      bool        hasDisplacement = false;               
+      uint32_t    displacementTextureIndex = UINT32_MAX;
+      float       maxDisplacement = 0.0f;
+      bool        hasDisplacement = false;
+      // UV transform from KHR_texture_transform (column-major 3x2 stored as 6 floats)
+      // [m00, m10, m01, m11, m02, m12] for transformedUV = uv * mat2 + offset
+      std::array<float, 6> uvTransform = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};  // Identity
   };
 
   std::vector<RmipData> m_displacementRMIPs;

@@ -73,6 +73,7 @@ enum BindingPoints
   eDisplacementSampler = 11,	// Sampler for displacement textures
   eDisplacementFactors = 12,	// Per-material displacement factors from glTF
   eMaterialDispIndex = 13,	// Maps materialID -> displacement array index (-1 if no displacement)
+  eDisplacementUVTransforms = 14, // UV transforms for displacement textures (6 floats per material: 3x2 matrix)
 
 };
 
