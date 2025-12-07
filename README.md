@@ -319,8 +319,6 @@ This environment provides both broad area lighting and deep occlusion pockets, r
 | **Fast-MSX** | High-roughness pillars, stone bases, ornament metals |
 
 ### 🖼️ Demo Scene Images
-<div align="center">
-
 ![Close View](doc/presentations/img/CloseView1.png)
 
 ![Top View](doc/presentations/img/TopView.png)
@@ -356,7 +354,9 @@ MatForge/
 │   ├── papers/                   # Research papers
 │   └── presentations/            # Milestone presentations
 │
-└── CLAUDE.md                     # Developer guide
+├── test/                         # Performance Analysis & Tests 
+│
+└── README.md                     # Developer guide
 ```
 
 ---
@@ -369,8 +369,8 @@ MatForge/
 
 | Team Member       | Responsibility          | Implementation                                        |
 | ----------------- | ----------------------- | ----------------------------------------------------- |
-| **Yiding**  | Quad-Optimized LDS      | Sampling + Convergence Analysis (✅ Complete)         |
-| **Cecilia** | RMIP                    | Displacement ray tracing (✅ with few bugs) |
+| **Yiding**  | Quad-Optimized LDS & RMIP   | Sampling + Convergence Analysis + RMIP intersection shader (✅ Complete)         |
+| **Cecilia** | RMIP + Performace Analysis | RMIP data builder + Displacement ray tracing + Analysis (✅ Complete) |
 | **Xiaonan** | Fast-MSX + Bounded VNDF | Material system (✅ Both Complete)                    |
 
 ## Documentation
