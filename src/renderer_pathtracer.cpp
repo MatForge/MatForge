@@ -270,7 +270,7 @@ bool PathTracer::onUIRender(Resources& resources)
       PE::end();
   }
 
-  // RMIP texel marching method selection
+  // RMIP texel marching method selection and parameters
   if (PE::begin())
   {
       bool prevPsiMarching = m_usePsiMarching;
@@ -284,6 +284,14 @@ bool PathTracer::onUIRender(Resources& resources)
           else
               LOGI("RMIP: Switched to brute force texel marching\n");
       }
+
+      // RMIP tuning parameters
+      changed |= PE::SliderInt("Max Traversal Iters", &m_rmipMaxTraversalIters, 64, 8192, "%d", 0,
+                               "Maximum RMIP hierarchical traversal iterations");
+      changed |= PE::SliderFloat("Marching Scale", &m_rmipMarchingScale, 1.0f, 16.0f, "%.1f", 0,
+                                 "Leaf region size threshold in texels (smaller = more iterations but potentially faster leaf testing)");
+      changed |= PE::SliderInt("Max Stack Size", &m_rmipMaxStackSize, 8, 64, "%d", 0,
+                               "Maximum stack size for hierarchical UV subdivision");
 
       PE::end();
   }
@@ -452,6 +460,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.useFastMSX        = m_useFastMSX ? 1 : 0;
   m_pushConst.useBoundedVNDF    = m_useBoundedVNDF ? 1 : 0;
   m_pushConst.usePsiMarching    = m_usePsiMarching ? 1 : 0;  // RMIP texel marching method
+  m_pushConst.rmipMaxTraversalIters = m_rmipMaxTraversalIters;
+  m_pushConst.rmipMarchingScale     = m_rmipMarchingScale;
+  m_pushConst.rmipMaxStackSize      = m_rmipMaxStackSize;
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 
   // Track total samples accumulated
