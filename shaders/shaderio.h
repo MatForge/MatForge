@@ -137,6 +137,9 @@ struct PathtracePushConstant
   int   useFastMSX			  = 0;
   int   useBoundedVNDF		  = 0;     // Use bounded VNDF for GGX sampling (0: no, 1: yes)
   int   usePsiMarching        = 0;     // RMIP texel marching: 0=brute force, 1=ψ-guided (V26)
+  int   rmipMaxTraversalIters = 2560;  // RMIP: Maximum traversal iterations
+  float rmipMarchingScale     = 2.0f;  // RMIP: Leaf region size threshold (texels)
+  int   rmipMaxStackSize      = 32;    // RMIP: Maximum stack size for hierarchical traversal
   int   renderSelection       = 1;     // Padding to align the structure
   /// Infinite plane
   float2                 jitter;               // Jitter for the DLSS

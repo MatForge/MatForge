@@ -31,9 +31,12 @@
 //=============================================================================
 static const int MAX_NEWTON_ITERS = 8;
 static const float NEWTON_EPS = 1e-6;
-static const int MAX_TRAVERSAL_ITERS = 512;
-static const float MARCHING_SCALE = 8.0;
-static const int MAX_STACK_SIZE = 32;
+// Default constants (overridden by push constant at runtime)
+// Note: MAX_STACK_SIZE_DEFAULT is compile-time max for array allocation
+//       The actual limit used comes from pushConst.rmipMaxStackSize
+static const int MAX_TRAVERSAL_ITERS_DEFAULT = 2560;
+static const float MARCHING_SCALE_DEFAULT = 2.0;
+static const int MAX_STACK_SIZE_DEFAULT = 64;  // Compile-time max for array allocation
 static const float BARY_EPS = 0.05;
 
 //=============================================================================
@@ -1580,8 +1583,10 @@ void intersectionMain()
     PsiQuadric psiQ = computePsiQuadric(tri, rayOrigin, rayDir);
 
     // Stack-based hierarchical traversal
-    UVBound stack[MAX_STACK_SIZE];
+    // Array size is compile-time max, runtime limit from push constant
+    UVBound stack[MAX_STACK_SIZE_DEFAULT];
     int stackPtr = 0;
+    int maxStackSize = min(pushConst.rmipMaxStackSize, MAX_STACK_SIZE_DEFAULT);
 
     stack[stackPtr].uvMin = initialUVMin;
     stack[stackPtr].uvMax = initialUVMax;
@@ -1594,7 +1599,7 @@ void intersectionMain()
 
     int iterations = 0;
 
-    while (stackPtr > 0 && iterations < MAX_TRAVERSAL_ITERS)
+    while (stackPtr > 0 && iterations < pushConst.rmipMaxTraversalIters)
     {
         iterations++;
         stackPtr--;
@@ -1606,7 +1611,7 @@ void intersectionMain()
         float2 uvSizeTexels = (bound.uvMax - bound.uvMin) * float2(texSize);
         float maxTexelSize = max(uvSizeTexels.x, uvSizeTexels.y);
 
-        if (maxTexelSize <= MARCHING_SCALE)
+        if (maxTexelSize <= pushConst.rmipMarchingScale)
         {
             float hitT;
             float2 hitBary;
@@ -1690,7 +1695,7 @@ void intersectionMain()
         // Reverted to old subdivision
         float2 uvSize = bound.uvMax - bound.uvMin;
 
-        if (stackPtr + 2 <= MAX_STACK_SIZE)
+        if (stackPtr + 2 <= maxStackSize)
         {
             if (uvSize.x >= uvSize.y)
             {

@@ -113,6 +113,9 @@ public:
   bool m_useBoundedVNDF{true};  // Toggle for bounded VNDF GGX sampling
 
   bool m_usePsiMarching{false};  // RMIP: false=brute force (default), true=ψ-guided texel marching (V26)
+  int m_rmipMaxTraversalIters{2560};  // RMIP: Maximum traversal iterations
+  float m_rmipMarchingScale{2.0f};    // RMIP: Leaf region size threshold (texels)
+  int m_rmipMaxStackSize{32};         // RMIP: Maximum stack size for hierarchical traversal
 
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
