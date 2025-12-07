@@ -636,7 +636,6 @@ void GltfRenderer::renderUI()
         ImGui::Text(ICON_MS_INFO " Test Configuration");
         ImGui::Indent();
         ImGui::Text("Methods: GGX, FastMSX");
-        ImGui::Text("Roughness values: 0.1 - 1.0 (10 steps)");
         ImGui::Text("Materials: Achromatic, Copper, Gold");
         ImGui::Text("Samples: %u SPP", m_msxTestConfig.samplesPerPixel);
         ImGui::Unindent();
@@ -657,13 +656,15 @@ void GltfRenderer::renderUI()
         bool msxTestRunning = m_msxTestActive;
         ImGui::BeginDisabled(msxTestRunning);
 
-        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start MSX Test Suite", ImVec2(250, 0)))
+        if(ImGui::Button(ICON_MS_PLAY_ARROW " Start MSX Test (Both)", ImVec2(250, 0)))
         {
-          startMSXTest();
+          m_msxAnalyzer.clearMetrics();  // Clear old data before starting new test
+          m_msxTestRunBoth = true;
+          startMSXTest(true);  // Start with FastMSX first
         }
         if(ImGui::IsItemHovered())
         {
-          ImGui::SetTooltip("Runs GGX vs FastMSX comparison across all roughness values and materials.\n"
+          ImGui::SetTooltip("Runs GGX vs FastMSX comparison sequentially.\n"
                            "Results exported to ../test/msx_analysis/");
         }
 
@@ -671,10 +672,10 @@ void GltfRenderer::renderUI()
 
         if(msxTestRunning)
         {
-          float progress = m_msxAnalyzer.getTestProgress();
+          float progress = static_cast<float>(m_msxTestCurrentIndex) / static_cast<float>(m_msxTestSampleCounts.size());
           ImGui::ProgressBar(progress, ImVec2(250, 0));
           ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
-                           ICON_MS_HOURGLASS_EMPTY " Test in progress...");
+                           ICON_MS_HOURGLASS_EMPTY " Testing %s...", m_msxTestUseFastMSX ? "FastMSX" : "GGX");
         }
 
         ImGui::Unindent();
@@ -690,13 +691,28 @@ void GltfRenderer::renderUI()
           const auto& metrics = m_msxAnalyzer.getMetrics();
           if(!metrics.empty())
           {
-            // Show summary for FastMSX
-            auto summary = m_msxAnalyzer.getTestSummary(matforge::MSXMethod::FastMSX);
-            ImGui::Text("FastMSX Results:");
-            ImGui::Text("  Avg MSE: %.6e", summary.avgMSE);
-            ImGui::Text("  Avg PSNR: %.2f dB", summary.avgPSNR);
-            ImGui::Text("  Avg Render Time: %.2f ms", summary.avgRenderTime);
-            ImGui::Text("  Artifacts: %d/%d", summary.artifactCount, summary.totalTests);
+            // Show summary for GGX (useFastMSX = false)
+            auto ggxSummary = m_msxAnalyzer.getTestSummary(false);
+            if(ggxSummary.totalTests > 0)
+            {
+              ImGui::Text("GGX Results:");
+              ImGui::Text("  Avg MSE: %.6e", ggxSummary.avgMSE);
+              ImGui::Text("  Avg PSNR: %.2f dB", ggxSummary.avgPSNR);
+              ImGui::Text("  Avg Render Time: %.2f ms", ggxSummary.avgRenderTime);
+              ImGui::Text("  Artifacts: %d/%d", ggxSummary.artifactCount, ggxSummary.totalTests);
+              ImGui::Spacing();
+            }
+
+            // Show summary for FastMSX (useFastMSX = true)
+            auto fastMsxSummary = m_msxAnalyzer.getTestSummary(true);
+            if(fastMsxSummary.totalTests > 0)
+            {
+              ImGui::Text("FastMSX Results:");
+              ImGui::Text("  Avg MSE: %.6e", fastMsxSummary.avgMSE);
+              ImGui::Text("  Avg PSNR: %.2f dB", fastMsxSummary.avgPSNR);
+              ImGui::Text("  Avg Render Time: %.2f ms", fastMsxSummary.avgRenderTime);
+              ImGui::Text("  Artifacts: %d/%d", fastMsxSummary.artifactCount, fastMsxSummary.totalTests);
+            }
           }
 
           ImGui::Unindent();

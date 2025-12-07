@@ -119,7 +119,7 @@ private:
   /////
   /// MSX Analysis
   void setupMSXAnalyzerCallbacks();
-  void startMSXTest();
+  void startMSXTest(bool useFastMSX);
   void updateMSXTest(VkCommandBuffer cmd);
 
   /////
@@ -200,7 +200,11 @@ private:
 
   // MSX test state
   bool                     m_msxTestActive{false};
+  bool                     m_msxTestUseFastMSX{false};
   bool                     m_msxTestPendingFinalize{false};
+  bool                     m_msxTestRunBoth{false};  // Run both GGX and FastMSX tests sequentially
+  std::vector<uint32_t>    m_msxTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
+  size_t                   m_msxTestCurrentIndex{0};
   matforge::MSXTestConfig  m_msxTestConfig;
   std::chrono::steady_clock::time_point m_msxTestStartTime;
 

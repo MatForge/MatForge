@@ -1,0 +1,11 @@
+Method,Material,Roughness,SampleCount,MSE,PSNR,SSIM,EnergyLoss,FurnaceError,RenderTimeMs,HasArtifacts,HasSpecularPeak,IsTooDark,Notes
+GGX,Gold,0.6,1,0.01647150,17.833,0.3666,0.845528,0.000000,0.00,false,false,true,""
+GGX,Gold,0.60,2,0.01647150,17.833,0.3666,0.845528,0.000000,24.00,false,false,true,""
+GGX,Gold,0.60,4,0.00442474,23.541,0.6855,0.845589,0.000000,41.00,false,false,true,""
+GGX,Gold,0.60,8,0.00239438,26.208,0.8041,0.845573,0.000000,81.00,false,false,true,""
+GGX,Gold,0.60,16,0.00138848,28.575,0.8801,0.845549,0.000000,155.00,false,false,true,""
+GGX,Gold,0.60,32,0.00088832,30.514,0.9233,0.845564,0.000000,298.00,false,false,true,""
+GGX,Gold,0.60,64,0.00063688,31.959,0.9467,0.845548,0.000000,570.00,false,false,true,""
+GGX,Gold,0.60,128,0.00051105,32.915,0.9589,0.845537,0.000000,1107.00,false,false,true,""
+GGX,Gold,0.60,256,0.00045809,33.391,0.9646,0.846142,0.000000,2647.00,false,false,true,""
+GGX,Gold,0.60,512,0.00042661,33.700,0.9677,0.846140,0.000000,6621.00,false,false,true,""

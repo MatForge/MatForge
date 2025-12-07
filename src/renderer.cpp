@@ -208,7 +208,6 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // MSX analyzer
   m_msxTestConfig.resolution = {512, 512};
   m_msxTestConfig.samplesPerPixel = 512;
-  m_msxTestConfig.methods = {matforge::MSXMethod::GGX, matforge::MSXMethod::FastMSX};
   m_msxAnalyzer.init(m_resources.allocator, m_device, m_msxTestConfig);
   setupMSXAnalyzerCallbacks();
 
@@ -2005,7 +2004,7 @@ void GltfRenderer::setupMSXAnalyzerCallbacks()
   printf("MSX Analyzer: Using async capture pattern\n");
 }
 
-void GltfRenderer::startMSXTest()
+void GltfRenderer::startMSXTest(bool useFastMSX)
 {
   // Capture reference image first (must be at high sample count)
   if(m_resources.frameCount < 100)
@@ -2028,16 +2027,18 @@ void GltfRenderer::startMSXTest()
   // Finalize reference capture after GPU sync
   m_msxAnalyzer.finalizeReferenceCapture();
 
-  // Start MSX session - test FastMSX first
-  bool useFastMSX = m_pathTracer.m_useFastMSX;
-  matforge::MSXMethod method = useFastMSX ? matforge::MSXMethod::FastMSX : matforge::MSXMethod::GGX;
-  std::string sessionName = useFastMSX ? "fastmsx_test" : "ggx_test";
+  // Set the path tracer to use the requested method
+  m_pathTracer.m_useFastMSX = useFastMSX;
+  m_msxTestUseFastMSX = useFastMSX;
 
-  m_msxAnalyzer.startSession(sessionName, method, matforge::TestMaterial::Achromatic, 0.5f);
+  // Start MSX session
+  std::string sessionName = useFastMSX ? "fastmsx_test" : "ggx_test";
+  m_msxAnalyzer.startSession(sessionName, useFastMSX, matforge::TestMaterial::Achromatic, 0.5f);
 
   // Set test state
   m_msxTestActive          = true;
   m_msxTestPendingFinalize = false;
+  m_msxTestCurrentIndex    = 0;
   m_msxTestStartTime       = std::chrono::steady_clock::now();
 
   // Configure path tracer for testing
@@ -2047,7 +2048,8 @@ void GltfRenderer::startMSXTest()
   // Reset rendering to start fresh
   resetFrame();
 
-  printf("MSX test started: %s (will capture at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 samples)\n", sessionName.c_str());
+  printf("MSX test started: %s (will capture at %zu sample counts)\n",
+         sessionName.c_str(), m_msxTestSampleCounts.size());
 }
 
 void GltfRenderer::updateMSXTest(VkCommandBuffer cmd)
@@ -2062,19 +2064,14 @@ void GltfRenderer::updateMSXTest(VkCommandBuffer cmd)
     m_msxTestPendingFinalize = false;
   }
 
-  // Sample counts to capture at
-  static const std::vector<uint32_t> sampleCounts = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
-  static size_t currentSampleIndex = 0;
-
-  // Check if test is complete
-  if(currentSampleIndex >= sampleCounts.size())
+  // Check if current session test is complete
+  if(m_msxTestCurrentIndex >= m_msxTestSampleCounts.size())
   {
-    // Test complete
+    // Current session complete
     m_msxTestActive = false;
     m_msxAnalyzer.endSession();
-    currentSampleIndex = 0;  // Reset for next test
 
-    // Export results with timestamp
+    // Generate timestamp for export
     auto        now       = std::chrono::system_clock::now();
     std::time_t nowTime   = std::chrono::system_clock::to_time_t(now);
     std::tm     localTime = {};
@@ -2092,23 +2089,38 @@ void GltfRenderer::updateMSXTest(VkCommandBuffer cmd)
       std::filesystem::create_directories(testDir);
     }
 
-    std::string csvFile = (testDir / ("msx_results_" + std::string(timestamp) + ".csv")).string();
-    m_msxAnalyzer.exportMetricsCSV(csvFile);
+    // Export CSV with method name in filename - only export current method's data
+    std::string methodName = m_msxTestUseFastMSX ? "fastmsx" : "ggx";
+    std::string csvFile = (testDir / (methodName + "_" + std::string(timestamp) + ".csv")).string();
+    m_msxAnalyzer.exportMetricsCSV(csvFile, m_msxTestUseFastMSX);
 
     auto duration = std::chrono::steady_clock::now() - m_msxTestStartTime;
     auto seconds  = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
 
-    printf("MSX test completed in %lld seconds. Results saved to %s\n", (long long)seconds, csvFile.c_str());
+    printf("MSX test (%s) completed in %lld seconds. Results saved to %s\n",
+           m_msxTestUseFastMSX ? "FastMSX" : "GGX", (long long)seconds, csvFile.c_str());
+
+    // If running combined test and FastMSX just finished, start GGX test
+    if(m_msxTestRunBoth && m_msxTestUseFastMSX)
+    {
+      printf("Starting GGX test (part 2 of combined test)...\n");
+      startMSXTest(false);  // Start GGX test
+    }
+    else
+    {
+      // All tests done
+      m_msxTestRunBoth = false;
+    }
     return;
   }
 
-  uint32_t targetSamples = sampleCounts[currentSampleIndex];
+  uint32_t targetSamples = m_msxTestSampleCounts[m_msxTestCurrentIndex];
 
   // Wait until we've accumulated enough samples
   if(static_cast<uint32_t>(m_resources.frameCount + 1) >= targetSamples)
   {
     // Capture this milestone
-    VkImage    testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
+    VkImage testImage = m_resources.gBuffers.getColorImage(Resources::eImgRendered);
 
     auto   currentTime = std::chrono::steady_clock::now();
     auto   duration    = currentTime - m_msxTestStartTime;
@@ -2120,10 +2132,11 @@ void GltfRenderer::updateMSXTest(VkCommandBuffer cmd)
     m_msxTestPendingFinalize = true;
 
     // Move to next milestone
-    currentSampleIndex++;
+    m_msxTestCurrentIndex++;
 
-    printf("MSX: Recorded capture %zu/%zu at %u samples\n", currentSampleIndex,
-           sampleCounts.size(), targetSamples);
+    printf("MSX (%s): Recorded capture %zu/%zu at %u samples\n",
+           m_msxTestUseFastMSX ? "FastMSX" : "GGX",
+           m_msxTestCurrentIndex, m_msxTestSampleCounts.size(), targetSamples);
   }
 }
 

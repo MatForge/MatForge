@@ -29,11 +29,12 @@ namespace matforge {
         m_device = device;
         m_config = config;
 
-        // Calculate total number of tests
-        m_totalTests = config.roughnessValues.size() * config.materials.size() * config.methods.size();
+        // Calculate total number of tests (always test both GGX and FastMSX = 2 methods)
+        const size_t numMethods = 2;  // GGX and FastMSX
+        m_totalTests = config.roughnessValues.size() * config.materials.size() * numMethods;
         if (config.runFurnaceTest)
         {
-            m_totalTests += config.roughnessValues.size() * config.methods.size();  // Furnace tests
+            m_totalTests += config.roughnessValues.size() * numMethods;  // Furnace tests
         }
 
         // Create staging buffer for image downloads
@@ -146,7 +147,7 @@ namespace matforge {
     //--------------------------------------------------------------------------------------------------
     // Async Session Management
     //--------------------------------------------------------------------------------------------------
-    void MSXAnalyzer::startSession(const std::string& sessionName, MSXMethod method,
+    void MSXAnalyzer::startSession(const std::string& sessionName, bool useFastMSX,
         TestMaterial material, float roughness)
     {
         if (!m_hasReference)
@@ -157,13 +158,13 @@ namespace matforge {
 
         m_sessionActive = true;
         m_sessionName = sessionName;
-        m_currentMethod = method;
+        m_useFastMSX = useFastMSX;
         m_currentMaterial = material;
         m_currentRoughness = roughness;
         m_sessionStartTime = std::chrono::steady_clock::now();
 
         LOGI("MSX Analyzer: Session started: %s (%s, %s, α=%.2f)\n",
-            sessionName.c_str(), getMethodName(method).c_str(),
+            sessionName.c_str(), useFastMSX ? "FastMSX" : "GGX",
             getMaterialName(material).c_str(), roughness);
     }
 
@@ -230,7 +231,7 @@ namespace matforge {
 
         // Compute metrics
         MSXMetrics metrics;
-        metrics.method = m_currentMethod;
+        metrics.useFastMSX = m_useFastMSX;
         metrics.material = m_currentMaterial;
         metrics.roughness = m_currentRoughness;
         metrics.sampleCount = m_pendingSampleCount;
@@ -254,7 +255,7 @@ namespace matforge {
 
         // Store captured frame
         CapturedFrame frame;
-        frame.method = m_currentMethod;
+        frame.useFastMSX = m_useFastMSX;
         frame.material = m_currentMaterial;
         frame.roughness = m_currentRoughness;
         frame.data = std::move(frameData);
@@ -274,6 +275,14 @@ namespace matforge {
 
         LOGI("MSX Analyzer: Session ended '%s' (%lld seconds, %zu captures)\n",
             m_sessionName.c_str(), (long long)seconds, m_metrics.size());
+    }
+
+    void MSXAnalyzer::clearMetrics()
+    {
+        m_metrics.clear();
+        m_capturedFrames.clear();
+        m_testComplete = false;
+        LOGI("MSX Analyzer: Metrics cleared\n");
     }
 
     void MSXAnalyzer::loadReferenceSet(const std::string& directory)
@@ -483,7 +492,7 @@ namespace matforge {
         // Data
         for (const auto& m : m_metrics)
         {
-            file << getMethodName(m.method) << ","
+            file << (m.useFastMSX ? "FastMSX" : "GGX") << ","
                 << getMaterialName(m.material) << ","
                 << m.roughness << ","
                 << m.sampleCount << ","
@@ -503,6 +512,45 @@ namespace matforge {
         LOGI("Exported metrics to: %s\n", filepath.c_str());
     }
 
+    void MSXAnalyzer::exportMetricsCSV(const std::string& filepath, bool useFastMSX)
+    {
+        std::ofstream file(filepath);
+        if (!file.is_open())
+        {
+            LOGE("Failed to open CSV file: %s\n", filepath.c_str());
+            return;
+        }
+
+        // Header
+        file << "Method,Material,Roughness,SampleCount,MSE,PSNR,SSIM,EnergyLoss,FurnaceError,"
+            << "RenderTimeMs,HasArtifacts,HasSpecularPeak,IsTooDark,Notes\n";
+
+        // Data - only export metrics matching the specified method
+        for (const auto& m : m_metrics)
+        {
+            if (m.useFastMSX != useFastMSX)
+                continue;
+
+            file << (m.useFastMSX ? "FastMSX" : "GGX") << ","
+                << getMaterialName(m.material) << ","
+                << m.roughness << ","
+                << m.sampleCount << ","
+                << std::fixed << std::setprecision(8) << m.mse << ","
+                << std::fixed << std::setprecision(3) << m.psnr << ","
+                << std::fixed << std::setprecision(4) << m.ssim << ","
+                << std::fixed << std::setprecision(6) << m.energyLoss << ","
+                << std::fixed << std::setprecision(6) << m.furnaceTestError << ","
+                << std::fixed << std::setprecision(2) << m.renderTimeMs << ","
+                << (m.hasArtifacts ? "true" : "false") << ","
+                << (m.hasSpecularPeak ? "true" : "false") << ","
+                << (m.isTooDark ? "true" : "false") << ","
+                << "\"" << m.notes << "\"\n";
+        }
+
+        file.close();
+        LOGI("Exported %s metrics to: %s\n", useFastMSX ? "FastMSX" : "GGX", filepath.c_str());
+    }
+
     void MSXAnalyzer::exportMSEvsRoughnessCSV(const std::string& filepath)
     {
         std::ofstream file(filepath);
@@ -512,17 +560,20 @@ namespace matforge {
             return;
         }
 
-        // Header - one column per method
-        file << "Roughness";
-        std::vector<MSXMethod> methods;
+        // Determine which methods are present in the metrics
+        bool hasGGX = false, hasFastMSX = false;
         for (const auto& m : m_metrics)
         {
-            if (std::find(methods.begin(), methods.end(), m.method) == methods.end())
-            {
-                methods.push_back(m.method);
-                file << "," << getMethodName(m.method);
-            }
+            if (m.useFastMSX)
+                hasFastMSX = true;
+            else
+                hasGGX = true;
         }
+
+        // Header - one column per method
+        file << "Roughness";
+        if (hasGGX) file << ",GGX";
+        if (hasFastMSX) file << ",FastMSX";
         file << "\n";
 
         // Data - one row per roughness value
@@ -530,13 +581,28 @@ namespace matforge {
         {
             file << roughness;
 
-            for (const auto& method : methods)
+            // Find MSE for GGX
+            if (hasGGX)
             {
-                // Find MSE for this method/roughness (use first material, usually achromatic)
                 double mse = 0.0;
                 for (const auto& m : m_metrics)
                 {
-                    if (m.method == method && std::abs(m.roughness - roughness) < 0.01f)
+                    if (!m.useFastMSX && std::abs(m.roughness - roughness) < 0.01f)
+                    {
+                        mse = m.mse;
+                        break;
+                    }
+                }
+                file << "," << std::scientific << std::setprecision(6) << mse;
+            }
+
+            // Find MSE for FastMSX
+            if (hasFastMSX)
+            {
+                double mse = 0.0;
+                for (const auto& m : m_metrics)
+                {
+                    if (m.useFastMSX && std::abs(m.roughness - roughness) < 0.01f)
                     {
                         mse = m.mse;
                         break;
@@ -560,17 +626,20 @@ namespace matforge {
             return;
         }
 
-        // Header
-        file << "Roughness";
-        std::vector<MSXMethod> methods;
+        // Determine which methods are present in the metrics
+        bool hasGGX = false, hasFastMSX = false;
         for (const auto& m : m_metrics)
         {
-            if (std::find(methods.begin(), methods.end(), m.method) == methods.end())
-            {
-                methods.push_back(m.method);
-                file << "," << getMethodName(m.method);
-            }
+            if (m.useFastMSX)
+                hasFastMSX = true;
+            else
+                hasGGX = true;
         }
+
+        // Header
+        file << "Roughness";
+        if (hasGGX) file << ",GGX";
+        if (hasFastMSX) file << ",FastMSX";
         file << "\n";
 
         // Data
@@ -578,23 +647,37 @@ namespace matforge {
         {
             file << roughness;
 
-            for (const auto& method : methods)
+            // Calculate average time for GGX
+            if (hasGGX)
             {
                 double avgTime = 0.0;
                 int count = 0;
-
                 for (const auto& m : m_metrics)
                 {
-                    if (m.method == method && std::abs(m.roughness - roughness) < 0.01f)
+                    if (!m.useFastMSX && std::abs(m.roughness - roughness) < 0.01f)
                     {
                         avgTime += m.renderTimeMs;
                         count++;
                     }
                 }
+                if (count > 0) avgTime /= count;
+                file << "," << std::fixed << std::setprecision(2) << avgTime;
+            }
 
-                if (count > 0)
-                    avgTime /= count;
-
+            // Calculate average time for FastMSX
+            if (hasFastMSX)
+            {
+                double avgTime = 0.0;
+                int count = 0;
+                for (const auto& m : m_metrics)
+                {
+                    if (m.useFastMSX && std::abs(m.roughness - roughness) < 0.01f)
+                    {
+                        avgTime += m.renderTimeMs;
+                        count++;
+                    }
+                }
+                if (count > 0) avgTime /= count;
                 file << "," << std::fixed << std::setprecision(2) << avgTime;
             }
             file << "\n";
@@ -612,7 +695,7 @@ namespace matforge {
         {
             std::stringstream ss;
             ss << directory << "/"
-                << getMethodName(frame.method) << "_"
+                << (frame.useFastMSX ? "FastMSX" : "GGX") << "_"
                 << getMaterialName(frame.material) << "_"
                 << "alpha" << std::fixed << std::setprecision(2) << frame.roughness
                 << ".png";
@@ -646,7 +729,7 @@ namespace matforge {
             {
                 if (m.furnaceTestError > 0.0)
                 {
-                    file << getMethodName(m.method) << ","
+                    file << (m.useFastMSX ? "FastMSX" : "GGX") << ","
                         << m.roughness << ","
                         << std::fixed << std::setprecision(6) << m.furnaceTestError << "\n";
                 }
@@ -933,23 +1016,23 @@ print("\n=== Plots generated successfully ===")
         return nullptr;
     }
 
-    MSXMetrics* MSXAnalyzer::getMetrics(MSXMethod method, TestMaterial material, float roughness)
+    MSXMetrics* MSXAnalyzer::getMetrics(bool useFastMSX, TestMaterial material, float roughness)
     {
         for (auto& m : m_metrics)
         {
-            if (m.method == method && m.material == material && std::abs(m.roughness - roughness) < 0.01f)
+            if (m.useFastMSX == useFastMSX && m.material == material && std::abs(m.roughness - roughness) < 0.01f)
                 return &m;
         }
         return nullptr;
     }
 
-    MSXAnalyzer::TestSummary MSXAnalyzer::getTestSummary(MSXMethod method) const
+    MSXAnalyzer::TestSummary MSXAnalyzer::getTestSummary(bool useFastMSX) const
     {
         TestSummary summary;
 
         for (const auto& m : m_metrics)
         {
-            if (m.method == method)
+            if (m.useFastMSX == useFastMSX)
             {
                 summary.avgMSE += m.mse;
                 summary.avgPSNR += m.psnr;

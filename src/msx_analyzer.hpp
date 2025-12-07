@@ -47,7 +47,7 @@ namespace matforge {
     //--------------------------------------------------------------------------------------------------
     struct MSXMetrics
     {
-        MSXMethod   method{ MSXMethod::GGX };
+        bool        useFastMSX{ false };       // false = GGX (baseline), true = FastMSX
         TestMaterial material{ TestMaterial::Achromatic };
         float       roughness{ 0.5f };         // Alpha value (0.0 - 1.0)
         uint32_t    sampleCount{ 512 };        // SPP used for this render
@@ -81,15 +81,14 @@ namespace matforge {
         // Test parameters
         std::vector<float>        roughnessValues{ 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f };
         std::vector<TestMaterial> materials{ TestMaterial::Achromatic, TestMaterial::Copper, TestMaterial::Gold };
-        std::vector<MSXMethod>    methods{ MSXMethod::GGX, MSXMethod::FastMSX };
+        // Note: Tests both GGX (useFastMSX=false) and FastMSX (useFastMSX=true) automatically
 
         // Render settings
         uint32_t    samplesPerPixel{ 512 };
         VkExtent2D  resolution{ 512, 512 };
 
-        // Reference method for comparison (usually HeitzMS or high-SPP FastMSX)
-        MSXMethod   referenceMethod{ MSXMethod::HeitzMS };
-        uint32_t    referenceSPP{ 4096 };  // High sample count for reference
+        // Reference sample count (high quality ground truth)
+        uint32_t    referenceSPP{ 4096 };
 
         // Test scene
         std::string sceneName{ "shaderball" };
@@ -148,7 +147,7 @@ namespace matforge {
         void saveReferenceSet(const std::string& directory);
 
         // Start new analysis session
-        void startSession(const std::string& sessionName, MSXMethod method, TestMaterial material, float roughness);
+        void startSession(const std::string& sessionName, bool useFastMSX, TestMaterial material, float roughness);
 
         // Capture metrics for current frame (records GPU commands)
         void captureFrame(VkCommandBuffer cmd, VkImage sourceImage, uint32_t sampleCount, double renderTimeMs);
@@ -164,7 +163,7 @@ namespace matforge {
         std::string getSessionName() const { return m_sessionName; }
 
         // Get current test parameters
-        MSXMethod getCurrentMethod() const { return m_currentMethod; }
+        bool isUsingFastMSX() const { return m_useFastMSX; }
         TestMaterial getCurrentMaterial() const { return m_currentMaterial; }
         float getCurrentRoughness() const { return m_currentRoughness; }
 
@@ -200,6 +199,9 @@ namespace matforge {
         // Export all metrics to CSV (for plotting in Python/Excel)
         void exportMetricsCSV(const std::string& filepath);
 
+        // Export metrics for a specific method only
+        void exportMetricsCSV(const std::string& filepath, bool useFastMSX);
+
         // Export MSE vs Roughness plot data (Figure 9 style)
         void exportMSEvsRoughnessCSV(const std::string& filepath);
 
@@ -222,11 +224,14 @@ namespace matforge {
         // Results Access
         //----------------------------------------------------------------------------------------------
 
+        // Clear all captured metrics and frames (call before starting a new test run)
+        void clearMetrics();
+
         // Get all captured metrics
         const std::vector<MSXMetrics>& getMetrics() const { return m_metrics; }
 
         // Get metrics for specific test case
-        MSXMetrics* getMetrics(MSXMethod method, TestMaterial material, float roughness);
+        MSXMetrics* getMetrics(bool useFastMSX, TestMaterial material, float roughness);
 
         // Get test summary statistics
         struct TestSummary
@@ -237,7 +242,7 @@ namespace matforge {
             int    artifactCount{ 0 };
             int    totalTests{ 0 };
         };
-        TestSummary getTestSummary(MSXMethod method) const;
+        TestSummary getTestSummary(bool useFastMSX) const;
 
         // Check if test is complete
         bool isTestComplete() const { return m_testComplete; }
@@ -304,7 +309,7 @@ namespace matforge {
         // Current session state
         bool         m_sessionActive{ false };
         std::string  m_sessionName;
-        MSXMethod    m_currentMethod{ MSXMethod::GGX };
+        bool         m_useFastMSX{ false };
         TestMaterial m_currentMaterial{ TestMaterial::Achromatic };
         float        m_currentRoughness{ 0.5f };
 
@@ -325,7 +330,7 @@ namespace matforge {
         // Captured frames for comparison
         struct CapturedFrame
         {
-            MSXMethod          method;
+            bool               useFastMSX;
             TestMaterial       material;
             float              roughness;
             std::vector<float> data;

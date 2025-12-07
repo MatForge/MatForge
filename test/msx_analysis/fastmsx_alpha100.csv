@@ -1,0 +1,11 @@
+Method,Material,Roughness,SampleCount,MSE,PSNR,SSIM,EnergyLoss,FurnaceError,RenderTimeMs,HasArtifacts,HasSpecularPeak,IsTooDark,Notes
+FastMSX,Gold,1.0,1,0.01342499,18.721,0.3342,0.849230,0.000000,0.00,false,false,true,""
+FastMSX,Gold,1.00,2,0.00671285,21.731,0.5008,0.849266,0.000000,16.00,false,false,true,""
+FastMSX,Gold,1.00,4,0.00336225,24.734,0.6658,0.849246,0.000000,34.00,false,false,true,""
+FastMSX,Gold,1.00,8,0.00167731,27.754,0.7998,0.849216,0.000000,75.00,false,false,true,""
+FastMSX,Gold,1.00,16,0.00083577,30.779,0.8891,0.849195,0.000000,147.00,false,false,true,""
+FastMSX,Gold,1.00,32,0.00041416,33.828,0.9417,0.849205,0.000000,283.00,false,false,true,""
+FastMSX,Gold,1.00,64,0.00020419,36.900,0.9706,0.851527,0.000000,563.00,false,false,true,""
+FastMSX,Gold,1.00,128,0.00009649,40.155,0.9858,0.850340,0.000000,1091.00,false,false,true,""
+FastMSX,Gold,1.00,256,0.00004354,43.611,0.9935,0.849759,0.000000,2287.00,false,false,true,""
+FastMSX,Gold,1.00,512,0.00001714,47.660,0.9975,0.849761,0.000000,6302.00,false,false,true,""
