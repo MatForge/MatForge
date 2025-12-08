@@ -298,7 +298,7 @@ FastMSX vs GGX at 512 SPP:
 
 ## Final Demo Scene: The Garden Pavilion
 
-To showcase the full capabilities of **MatForge**, we created a custom **garden pavilion scene** designed specifically to highlight the four integrated SIGGRAPH techniques—QOLDS, RMIP, Bounded VNDF, and Fast-MSX. The scene contains complex geometry, high-frequency displacement detail, and a wide range of material roughness, making it an ideal testbed for modern path-tracing algorithms.
+To showcase the full capabilities of **MatForge**, we used the scene [Forgotten Hall by Sweeper3D](https://www.patreon.com/posts/forgotten-hall-106640074), **customizing** many materials and textures specifically to highlight the four integrated SIGGRAPH techniques—QOLDS, RMIP, Bounded VNDF, and Fast-MSX. The scene contains complex geometry, high-frequency displacement detail, and a wide range of material roughness, making it an ideal testbed for modern path-tracing algorithms.
 
 ### 🌿 Scene Overview
 The scene features:
