@@ -917,9 +917,21 @@ void GltfRenderer::createVulkanScene()
 {
     VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
         | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-    if (m_resources.scene.hasAnimation())
+
+    // Check if we have any displaced primitives
+    bool hasAnyDisplacement = false;
+    for (const auto& rmip : m_displacementRMIPs)
     {
-        flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;  // Allow update
+        if (rmip.hasDisplacement)
+        {
+            hasAnyDisplacement = true;
+            break;
+        }
+    }
+
+    if (m_resources.scene.hasAnimation() || hasAnyDisplacement)
+    {
+        flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;  // Allow update for animation or displacement
     }
 
     {
@@ -2604,6 +2616,98 @@ void GltfRenderer::updateDisplacementFactors(VkCommandBuffer cmd)
     {
         VkDeviceSize bufferSize = displacementFactors.size() * sizeof(float);
         m_resources.staging.appendBuffer(m_resources.bDisplacementFactors, 0, bufferSize, displacementFactors.data());
+
+        // Recompute AABBs for displaced primitives with new displacement factors
+        LOGI("[AABB] Displacement factor changed, recomputing AABBs...\n");
+
+        const auto& renderPrimitives = m_resources.scene.getRenderPrimitives();
+        const auto& vertexBuffers = m_resources.sceneVk.vertexBuffers();
+        const auto& indices = m_resources.sceneVk.indices();
+
+        // Build displacement info with updated factors
+        std::vector<nvvkgltf::DisplacementInfo> displacementInfo(m_displacementRMIPs.size());
+        for (size_t matIdx = 0; matIdx < m_displacementRMIPs.size(); matIdx++)
+        {
+            const auto& rmipData = m_displacementRMIPs[matIdx];
+            if (rmipData.hasDisplacement)
+            {
+                displacementInfo[matIdx].hasDisplacement = true;
+                displacementInfo[matIdx].minDisplacement = 0.0f;
+                displacementInfo[matIdx].maxDisplacement = rmipData.displacementFactor;
+            }
+        }
+
+        // Recompute AABBs for each displaced primitive and collect their IDs
+        VkDeviceSize aabbOffset = 0;
+        std::vector<uint32_t> displacedPrimitiveIDs;
+
+        for (uint32_t p_idx = 0; p_idx < renderPrimitives.size(); p_idx++)
+        {
+            const auto& prim = renderPrimitives[p_idx];
+
+            // Check if this primitive has displacement
+            bool hasDisplacement = false;
+            nvvkgltf::DisplacementInfo dispInfo;
+            if (prim.pPrimitive && prim.pPrimitive->material >= 0 &&
+                prim.pPrimitive->material < static_cast<int>(displacementInfo.size()))
+            {
+                dispInfo = displacementInfo[prim.pPrimitive->material];
+                hasDisplacement = dispInfo.hasDisplacement;
+            }
+
+            if (hasDisplacement)
+            {
+                // Prepare AABB compute parameters with UPDATED displacement factor
+                AabbComputeParams params;
+                params.numTriangles = prim.indexCount / 3;
+                params.minDisplacement = dispInfo.minDisplacement;
+                params.maxDisplacement = dispInfo.maxDisplacement;
+                params.padding = 0;
+
+                // Create sub-buffer view for this primitive's AABBs
+                const nvvk::Buffer& aabbBuffer = m_resources.sceneRtx.getAabbBuffer();
+                nvvk::Buffer aabbSubBuffer;
+                aabbSubBuffer.buffer = aabbBuffer.buffer;
+                aabbSubBuffer.address = aabbBuffer.address + aabbOffset;
+
+                LOGI("[AABB]   Prim %u: recomputing %u AABBs with maxDisp=%.3f\n",
+                    p_idx, params.numTriangles, params.maxDisplacement);
+
+                // Compute AABBs for this primitive
+                m_aabbComputer.computeAABBs(cmd,
+                    vertexBuffers[p_idx].position,
+                    vertexBuffers[p_idx].normal,
+                    indices[p_idx],
+                    aabbSubBuffer,
+                    params);
+
+                aabbOffset += params.numTriangles * sizeof(VkAabbPositionsKHR);
+
+                // Track this primitive for BLAS rebuild
+                displacedPrimitiveIDs.push_back(p_idx);
+            }
+        }
+
+        if (!displacedPrimitiveIDs.empty())
+        {
+            // Memory barrier to ensure AABB compute completes before BLAS rebuild
+            VkMemoryBarrier memBarrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+            // Rebuild BLAS for displaced primitives only
+            LOGI("[AABB] Triggering BLAS rebuild for %zu displaced primitives...\n", displacedPrimitiveIDs.size());
+            m_resources.sceneRtx.updateBlasForPrimitives(cmd, displacedPrimitiveIDs);
+
+            // Update TLAS to reflect BLAS changes
+            m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene);
+
+            LOGI("[AABB] AABB recomputation and BLAS rebuild complete\n");
+        }
     }
 }
 
