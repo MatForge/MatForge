@@ -395,7 +395,7 @@ MatForge/
 ---
 
 ### Final Presentation
-- [Milestone 1 Report](https://docs.google.com/presentation/d/1_OhVdmd82Z_4Dec64VpDBYU-KOa-KPbR/edit?slide=id.p2#slide=id.p2) (Dec 8, 2025)
+- [Slides](https://docs.google.com/presentation/d/1_OhVdmd82Z_4Dec64VpDBYU-KOa-KPbR/edit?slide=id.p2#slide=id.p2) (Dec 8, 2025)
   
 ---
 
