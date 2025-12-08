@@ -712,11 +712,25 @@ void GltfRenderer::addToScene(const std::filesystem::path& sceneFilename)
         existingModel.accessors.push_back(std::move(accessor));
     }
 
-    // Merge images
+    // Merge images - convert relative URIs to absolute paths
+    // This is critical for RMIP displacement textures which are resolved later
+    std::filesystem::path addedFileDir = filename.parent_path();
     for (auto& image : newModel.images)
     {
         if (image.bufferView >= 0)
             image.bufferView += bufferViewOffset;
+
+        // Convert relative URI to absolute path if it's not embedded (bufferView == -1 means external file)
+        if (image.bufferView < 0 && !image.uri.empty() && !image.uri.starts_with("data:"))
+        {
+            // Resolve relative path to absolute path
+            std::filesystem::path imagePath = addedFileDir / image.uri;
+            if (std::filesystem::exists(imagePath))
+            {
+                image.uri = imagePath.string();
+                LOGI("Resolved image URI to absolute path: %s\n", image.uri.c_str());
+            }
+        }
         existingModel.images.push_back(std::move(image));
     }
 
@@ -2373,8 +2387,13 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
         if (width <= 0 || height <= 0)
         {
             // Construct full path to image file
-            std::filesystem::path basePath = m_resources.scene.getFilename().parent_path();
-            std::filesystem::path imagePath = basePath / image.uri;
+            // Check if URI is already an absolute path (from addToScene merge)
+            std::filesystem::path imagePath(image.uri);
+            if (!imagePath.is_absolute())
+            {
+                std::filesystem::path basePath = m_resources.scene.getFilename().parent_path();
+                imagePath = basePath / image.uri;
+            }
 
             int channels;
             if (!stbi_info(imagePath.string().c_str(), &width, &height, &channels))
@@ -2382,7 +2401,7 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
                 LOGW("Failed to read image info for displacement map: %s\n", imagePath.string().c_str());
                 continue;
             }
-            LOGI("Loaded image dimensions from file: %s (%dx%d)\n", image.uri.c_str(), width, height);
+            LOGI("Loaded image dimensions from file: %s (%dx%d)\n", imagePath.string().c_str(), width, height);
         }
 
         // RMIP requires square, power-of-2 textures
