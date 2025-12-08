@@ -321,6 +321,9 @@ This environment provides both broad area lighting and deep occlusion pockets, r
 | **Fast-MSX** | High-roughness pillars, stone bases, ornament metals |
 
 ### 🖼️ Demo Scene Images
+
+![](./img/lowExposure.png)
+
 ![Close View](doc/presentations/img/CloseView1.png)
 
 ![Top View](doc/presentations/img/TopView.png)
