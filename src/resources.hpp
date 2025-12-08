@@ -17,13 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Core resource management header for the Vulkan GLTF renderer.
- * 
- * This header defines the main resource structures and settings for a Vulkan-based 3D renderer
- * that supports both path tracing and rasterization. It manages Vulkan resources, GLTF scene data,
- * environment maps, and rendering settings.
- */
+ /**
+  * Core resource management header for the Vulkan GLTF renderer.
+  *
+  * This header defines the main resource structures and settings for a Vulkan-based 3D renderer
+  * that supports both path tracing and rasterization. It manages Vulkan resources, GLTF scene data,
+  * environment maps, and rendering settings.
+  */
 
 #pragma once
 #include <bitset>
@@ -49,98 +49,97 @@
 
 enum class RenderingMode
 {
-  ePathtracer,
-  eRasterizer
+    ePathtracer,
+    eRasterizer
 };
 
 enum DirtyFlags
 {
-  eVulkanScene,       // When the Vulkan geometry buffers need to be updated
-  eVulkanMaterial,    // When the Vulkan material buffers need to be updated
-  eVulkanAttributes,  // When the Vulkan attributes need to be updated
-  eRtxScene,          // When the RTX acceleration structures need to be updated
-  eHdrEnv,            // When the HDR environment needs to be updated
-  eNodeVisibility,    // When the node visibility has changed
+    eVulkanScene,       // When the Vulkan geometry buffers need to be updated
+    eVulkanMaterial,    // When the Vulkan material buffers need to be updated
+    eVulkanAttributes,  // When the Vulkan attributes need to be updated
+    eRtxScene,          // When the RTX acceleration structures need to be updated
+    eHdrEnv,            // When the HDR environment needs to be updated
+    eNodeVisibility,    // When the node visibility has changed
 
-  eNumDirtyFlags  // Keep last - Number of dirty flags
+    eNumDirtyFlags  // Keep last - Number of dirty flags
 };
 
 struct Settings
 {
-  RenderingMode         renderSystem           = RenderingMode::ePathtracer;    // Renderer to use
-  shaderio::DebugMethod debugMethod            = shaderio::DebugMethod::eNone;  // Debug method for the rasterizer
-  shaderio::EnvSystem   envSystem              = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
-  bool                  showAxis               = true;                          // Show the axis (bottom left)
-  float                 hdrEnvIntensity        = 1.0f;                          // Intensity of the environment (HDR)
-  float                 hdrEnvRotation         = 0.0f;                          // Rotation of the environment (HDR)
-  float                 hdrBlur                = 0.0f;                          // Blur of the environment (HDR)
-  glm::vec3             silhouetteColor        = {0.6f, 0.4f, 0.0f};            // Color of the silhouette
-  bool                  useSolidBackground     = false;                         // Use solid background color
-  glm::vec3             solidBackgroundColor   = {0.0f, 0.0f, 0.0f};            // Solid background color
-  int                   maxFrames              = {512};                         // Maximum number of frames to render
-  bool                  useInfinitePlane       = false;                         // Use infinite plane
-  float                 infinitePlaneDistance  = 0;                             // Distance/height of the infinite plane
-  glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);      // Default gray color
-  float                 infinitePlaneMetallic  = 0.0;                           // Default non-metallic
-  float                 infinitePlaneRoughness = 0.5;                           // Default medium roughness
+    RenderingMode         renderSystem = RenderingMode::ePathtracer;    // Renderer to use
+    shaderio::DebugMethod debugMethod = shaderio::DebugMethod::eNone;  // Debug method for the rasterizer
+    shaderio::EnvSystem   envSystem = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
+    bool                  showAxis = true;                          // Show the axis (bottom left)
+    float                 hdrEnvIntensity = 1.0f;                          // Intensity of the environment (HDR)
+    float                 hdrEnvRotation = 0.0f;                          // Rotation of the environment (HDR)
+    float                 hdrBlur = 0.0f;                          // Blur of the environment (HDR)
+    glm::vec3             silhouetteColor = { 0.6f, 0.4f, 0.0f };            // Color of the silhouette
+    bool                  useSolidBackground = false;                         // Use solid background color
+    glm::vec3             solidBackgroundColor = { 0.0f, 0.0f, 0.0f };            // Solid background color
+    int                   maxFrames = { 512 };                         // Maximum number of frames to render
+    bool                  useInfinitePlane = false;                         // Use infinite plane
+    float                 infinitePlaneDistance = 0;                             // Distance/height of the infinite plane
+    glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);      // Default gray color
+    float                 infinitePlaneMetallic = 0.0;                           // Default non-metallic
+    float                 infinitePlaneRoughness = 0.5;                           // Default medium roughness
 };
 
 
 struct Resources
 {
-  enum ImageType
-  {
-    eImgTonemapped,
-    eImgRendered,
-    eImgSelection,
-  };
+    enum ImageType
+    {
+        eImgTonemapped,
+        eImgRendered,
+        eImgSelection,
+    };
 
-  VkInstance              instance{};
-  nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
-  nvvk::StagingUploader   staging;
+    VkInstance              instance{};
+    nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
+    nvvk::StagingUploader   staging;
 
-  nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
-  VkCommandPool          commandPool{};    // Command pool for secondary command buffer
-  nvslang::SlangCompiler slangCompiler{};  // Slang compiler
+    nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
+    VkCommandPool          commandPool{};    // Command pool for secondary command buffer
+    nvslang::SlangCompiler slangCompiler{};  // Slang compiler
 
-  // Scene
-  nvvkgltf::Scene    scene;     // GLTF Scene
-  nvvkgltf::SceneVk  sceneVk;   // GLTF Scene buffers
-  nvvkgltf::SceneRtx sceneRtx;  // GLTF Scene BLAS/TLAS
+    // Scene
+    nvvkgltf::Scene    scene;     // GLTF Scene
+    nvvkgltf::SceneVk  sceneVk;   // GLTF Scene buffers
+    nvvkgltf::SceneRtx sceneRtx;  // GLTF Scene BLAS/TLAS
 
-  // Resources
-  nvvk::HdrIbl                    hdrIbl;  // HDR environment map
-  nvshaders::HdrEnvDome           hdrDome;
-  nvvk::GBuffer                   gBuffers;      // G-Buffers: color + depth
-  nvvk::Buffer                    bFrameInfo;    // Scene/Frame information
-  nvvk::Buffer                    bSkyParams;    // Sky parameters
-  shaderio::SkyPhysicalParameters skyParams{};   // Sky parameters
+    // Resources
+    nvvk::HdrIbl                    hdrIbl;  // HDR environment map
+    nvshaders::HdrEnvDome           hdrDome;
+    nvvk::GBuffer                   gBuffers;      // G-Buffers: color + depth
+    nvvk::Buffer                    bFrameInfo;    // Scene/Frame information
+    nvvk::Buffer                    bSkyParams;    // Sky parameters
+    shaderio::SkyPhysicalParameters skyParams{};   // Sky parameters
 
-  // QOLDS sampling buffers
-  nvvk::Buffer bQoldsMatrices;  // QOLDS generator matrices
-  nvvk::Buffer bQoldsSeeds;     // QOLDS Owen scrambling seeds
+    // QOLDS sampling buffers
+    nvvk::Buffer bQoldsMatrices;  // QOLDS generator matrices
+    nvvk::Buffer bQoldsSeeds;     // QOLDS Owen scrambling seeds
 
-  // Displacement factors from glTF (per material)
-  nvvk::Buffer bDisplacementFactors;    // Array of floats, one per material
-  nvvk::Buffer bMaterialDispIndex;      // Maps materialID -> displacement array index (-1 = no displacement)
-  nvvk::Buffer bDisplacementUVTransforms;  // Array of 6 floats per material (3x2 UV transform matrix)
-  nvshaders::Tonemapper           tonemapper{};  // Tonemapper
-  shaderio::TonemapperData        tonemapperData{
-             .autoExposure = 1,
-  };  // Tonemapper data
-  std::shared_ptr<nvutils::CameraManipulator> cameraManip;  // Camera manipulator (owned by GltfRenderer)
+    // Displacement factors from glTF (per material)
+    nvvk::Buffer bDisplacementFactors;  // Array of floats, one per material
+    nvvk::Buffer bMaterialDispIndex;    // Maps materialID -> displacement array index (-1 = no displacement)
+    nvshaders::Tonemapper           tonemapper{};  // Tonemapper
+    shaderio::TonemapperData        tonemapperData{
+               .autoExposure = 1,
+    };  // Tonemapper data
+    std::shared_ptr<nvutils::CameraManipulator> cameraManip;  // Camera manipulator (owned by GltfRenderer)
 
-  // Pipeline
-  std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas
-  std::array<VkDescriptorSetLayout, 2>    descriptorSetLayout{};  // Descriptor set layout
-  VkDescriptorSet                         descriptorSet{};        // Descriptor set for the textures
-  VkDescriptorPool                        descriptorPool{};
+    // Pipeline
+    std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas
+    std::array<VkDescriptorSetLayout, 2>    descriptorSetLayout{};  // Descriptor set layout
+    VkDescriptorSet                         descriptorSet{};        // Descriptor set for the textures
+    VkDescriptorPool                        descriptorPool{};
 
 
-  int frameCount{0};
-  int selectedObject{-1};  // Selected object in the scene
+    int frameCount{ 0 };
+    int selectedObject{ -1 };  // Selected object in the scene
 
-  Settings settings;
+    Settings settings;
 
-  std::bitset<32> dirtyFlags;
+    std::bitset<32> dirtyFlags;
 };

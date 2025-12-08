@@ -48,7 +48,6 @@ static const float BARY_EPS = 0.05;
 [[vk::binding(10, 1)]] SamplerState rmipSampler;
 [[vk::binding(12, 1)]] StructuredBuffer<float> displacementFactors;
 [[vk::binding(13, 1)]] StructuredBuffer<int> materialDispIndex;  // Maps materialID -> displacement array index (-1 = no displacement)
-[[vk::binding(14, 1)]] StructuredBuffer<float> displacementUVTransforms;  // 6 floats per material: row-major 3x2 matrix
 
 [[vk::push_constant]] ConstantBuffer<PathtracePushConstant> pushConst;
 
@@ -58,26 +57,6 @@ static const float BARY_EPS = 0.05;
 float getDisplacementScale(uint dispIdx)
 {
     return displacementFactors[dispIdx];
-}
-
-// Apply UV transform from KHR_texture_transform
-// Transform is stored as 6 floats: [m00, m10, m01, m11, m02, m12] (column-major 2x3)
-// transformedUV = uv * mat2(m00,m01,m10,m11) + float2(m02,m12)
-float2 applyUVTransform(uint dispIdx, float2 uv)
-{
-    uint offset = dispIdx * 6;
-    float m00 = displacementUVTransforms[offset + 0];
-    float m10 = displacementUVTransforms[offset + 1];
-    float m01 = displacementUVTransforms[offset + 2];
-    float m11 = displacementUVTransforms[offset + 3];
-    float m02 = displacementUVTransforms[offset + 4];
-    float m12 = displacementUVTransforms[offset + 5];
-
-    // Apply 2x2 rotation/scale + translation
-    return float2(
-        uv.x * m00 + uv.y * m01 + m02,
-        uv.x * m10 + uv.y * m11 + m12
-    );
 }
 
 uint packUV(float2 uv)
@@ -131,47 +110,13 @@ Tri makeTri(float3 v0, float3 v1, float3 v2,
     Tri tri;
     tri.v0 = v0; tri.v1 = v1; tri.v2 = v2;
     tri.n0 = n0; tri.n1 = n1; tri.n2 = n2;
-
-    // Check if UVs are already in valid [0,1] range
-    float2 uvMin = min(min(t0, t1), t2);
-    float2 uvMax = max(max(t0, t1), t2);
-
-    bool needsNormalization = uvMin.x < 0.0 || uvMin.y < 0.0 ||
-                              uvMax.x > 1.0 || uvMax.y > 1.0;
-
-    if (needsNormalization)
-    {
-        // Normalize UVs to [0,1] range for RMIP compatibility
-        // Shift all UVs by the same amount to preserve triangle shape
-        float2 uvOffset = floor(uvMin);
-        tri.t0 = t0 - uvOffset;
-        tri.t1 = t1 - uvOffset;
-        tri.t2 = t2 - uvOffset;
-
-        // If still outside [0,1] (triangle spans tile boundary), use frac()
-        // This may distort boundary triangles but ensures they render
-        float2 newMax = max(max(tri.t0, tri.t1), tri.t2);
-        if (newMax.x > 1.0 || newMax.y > 1.0)
-        {
-            tri.t0 = frac(t0);
-            tri.t1 = frac(t1);
-            tri.t2 = frac(t2);
-        }
-    }
-    else
-    {
-        // UVs already in [0,1], use as-is
-        tri.t0 = t0;
-        tri.t1 = t1;
-        tri.t2 = t2;
-    }
-
+    tri.t0 = t0; tri.t1 = t1; tri.t2 = t2;
     tri.dPdu = v1 - v0;
     tri.dPdv = v2 - v0;
     tri.dNdu = n1 - n0;
     tri.dNdv = n2 - n0;
-    tri.dTdu = tri.t1 - tri.t0;
-    tri.dTdv = tri.t2 - tri.t0;
+    tri.dTdu = t1 - t0;
+    tri.dTdv = t2 - t0;
     return tri;
 }
 
@@ -866,9 +811,7 @@ int findExitEdge(float psi00, float psi10, float psi01, float psi11, int entryEd
 //=============================================================================
 float sampleDisplacement(uint matIdx, float2 texUV)
 {
-    // Apply UV transform from KHR_texture_transform before sampling
-    float2 transformedUV = applyUVTransform(matIdx, texUV);
-    return displacementMaps[matIdx].SampleLevel(displacementSampler, transformedUV, 0).r * getDisplacementScale(matIdx);
+    return displacementMaps[matIdx].SampleLevel(displacementSampler, texUV, 0).r * getDisplacementScale(matIdx);
 }
 
 void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSize,
@@ -876,15 +819,52 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
 {
     float scale = getDisplacementScale(matIdx);
 
-    // Apply UV transform to query bounds
-    // Note: For proper handling of rotation/shear, we should transform all 4 corners
-    // and take the bounding box. For scale+offset only, transforming min/max works.
-    float2 transformedMin = applyUVTransform(matIdx, texMin);
-    float2 transformedMax = applyUVTransform(matIdx, texMax);
+    // DEBUG V37c: RMIP returns near-zero - investigate why
+    // Compare RMIP layer 0 vs direct displacement to verify texture binding
+    if (false)
+    {
+        uint maxLevel = uint(log2(float(texSize.x)));
 
-    // Handle potential axis flip from negative scale
-    float2 queryMin = min(transformedMin, transformedMax);
-    float2 queryMax = max(transformedMin, transformedMax);
+        // Direct displacement sample at center (this WORKS - used by sampleDisplacement)
+        float directDisp = displacementMaps[matIdx].SampleLevel(displacementSampler, float2(0.5, 0.5), 0).r;
+
+        // RMIP layer 0 sample at center
+        // Layer 0 (p=0, q=0) should store (disp, disp) for each texel
+        uint layer0 = getRmipLayer(0, 0, maxLevel);
+        float2 rmipLayer0 = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, float(layer0)), 0).xy;
+
+        // Try layer 0 directly without getRmipLayer (in case layer calc is wrong)
+        float2 rmipDirect0 = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, 0.0), 0).xy;
+
+        // DEBUG OUTPUT via hMax value:
+        // If hMax shows reasonable value (~0.5 range), RMIP has data
+        // If hMax is near 0, RMIP texture is empty/wrong
+
+        // V37c CONFIRMED: Layer 0 works! Issue is in higher layers.
+
+        // V37d: Test layer 1 (p=1, q=0) - 2x1 texel rectangles
+        // layer index = 1 + 0 * (maxLevel+1) = 1
+        float2 rmipLayer1 = rmipMaps[matIdx].SampleLevel(rmipSampler, float3(0.5, 0.5, 1.0), 0).xy;
+
+        // Use layer 1 for bounds - does expand shader work?
+        hMin = 0.0;
+        hMax = rmipLayer1.y * scale;  // Test layer 1
+
+        // Fallback if layer 1 returns near-zero
+        if (false)
+        {
+            hMax = scale;  // Conservative fallback
+        }
+
+        return;
+    }
+
+    // Use RMIP for tight rectangular bounds per paper Section 5 / Algorithm 2
+    // RMIP provides O(1) minmax queries over arbitrary axis-aligned rectangles
+
+    // Handle degenerate case (single point query)
+    float2 queryMin = texMin;
+    float2 queryMax = texMax;
 
     // Ensure we have a valid rectangle (at least 1 texel)
     float2 minSize = 1.0 / float2(texSize);
@@ -893,25 +873,16 @@ void getDisplacementBounds(uint matIdx, float2 texMin, float2 texMax, int2 texSi
     if (queryMax.y - queryMin.y < minSize.y)
         queryMax.y = queryMin.y + minSize.y;
 
+    // Clamp to valid UV range
+    queryMin = clamp(queryMin, 0.0, 1.0);
+    queryMax = clamp(queryMax, 0.0, 1.0);
+
     // Compute maxLevel from texture size (RMIP has maxLevel+1 levels per dimension)
     uint maxLevel = uint(log2(float(texSize.x)));
 
-    // Check if query region spans outside [0,1] (tiled texture boundary crossing)
-    bool spansBoundary = queryMin.x < 0.0 || queryMin.y < 0.0 ||
-                         queryMax.x > 1.0 || queryMax.y > 1.0;
-
-    float2 bounds;
-    if (spansBoundary)
-    {
-        // Region spans tile boundary - use conservative full-texture bounds
-        // This is safe but may be less tight than optimal
-        bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, float2(0.0), float2(1.0), maxLevel);
-    }
-    else
-    {
-        // Region entirely within [0,1] - use precise bounds
-        bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, queryMin, queryMax, maxLevel);
-    }
+    // Query RMIP for displacement bounds over the rectangular region
+    // Returns float2(minDisp, maxDisp) in raw texture value range [0, 1]
+    float2 bounds = queryRMIPFull(rmipMaps[matIdx], rmipSampler, queryMin, queryMax, maxLevel);
 
     // Scale by displacement factor to get world-space displacement bounds
     hMin = bounds.x * scale;

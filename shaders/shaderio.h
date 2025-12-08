@@ -39,135 +39,134 @@ NAMESPACE_SHADERIO_BEGIN()
 // Environment types
 enum class EnvSystem
 {
-  eSky,
-  eHdr,
+	eSky,
+	eHdr,
 };
 
 // Output image types
 enum OutputImage
 {
-  eResultImage = 0,      // Output image (RGBA32)
-  eSelectImage,          // Selection image (R8)
-  eDlssAlbedo,           // Diffuse albedo (RGBA8)
-  eDlssSpecAlbedo,       // Specular albedo (RGBA32)
-  eDlssNormalRoughness,  // Normal and roughness (RGBA32)
-  eDlssMotion,           // Motion (RGBA32)
-  eDlssDepth,            // Depth (R32)
+	eResultImage = 0,      // Output image (RGBA32)
+	eSelectImage,          // Selection image (R8)
+	eDlssAlbedo,           // Diffuse albedo (RGBA8)
+	eDlssSpecAlbedo,       // Specular albedo (RGBA32)
+	eDlssNormalRoughness,  // Normal and roughness (RGBA32)
+	eDlssMotion,           // Motion (RGBA32)
+	eDlssDepth,            // Depth (R32)
 };
 
 // Binding points for descriptors
 enum BindingPoints
 {
-  eTlas = 0,      // Top level acceleration structure
-  eOutImages,     // Output image (RGBA32)
-  eTextures,      // Textures (array of textures)
-  eTexturesCube,  // Textures (array of textures)
-  eTexturesHdr,   // HDR textures (array of textures)
-  eTexturesStorage,
-  eQoldsMatrices, // QOLDS generator matrices
-  eQoldsSeeds,    // QOLDS Owen scrambling seeds
-  // ADD: RMIP texture array for displacement
-  eRmipTextures = 8,			// Texture2DArray for RMIP minmax bounds
-  eDisplacementTextures = 9,	// Regular displacement textures
-  eRmipSampler = 10,			// Sampler for RMIP textures
-  eDisplacementSampler = 11,	// Sampler for displacement textures
-  eDisplacementFactors = 12,	// Per-material displacement factors from glTF
-  eMaterialDispIndex = 13,	// Maps materialID -> displacement array index (-1 if no displacement)
-  eDisplacementUVTransforms = 14, // UV transforms for displacement textures (6 floats per material: 3x2 matrix)
+	eTlas = 0,      // Top level acceleration structure
+	eOutImages,     // Output image (RGBA32)
+	eTextures,      // Textures (array of textures)
+	eTexturesCube,  // Textures (array of textures)
+	eTexturesHdr,   // HDR textures (array of textures)
+	eTexturesStorage,
+	eQoldsMatrices, // QOLDS generator matrices
+	eQoldsSeeds,    // QOLDS Owen scrambling seeds
+	// ADD: RMIP texture array for displacement
+	eRmipTextures = 8,			// Texture2DArray for RMIP minmax bounds
+	eDisplacementTextures = 9,	// Regular displacement textures
+	eRmipSampler = 10,			// Sampler for RMIP textures
+	eDisplacementSampler = 11,	// Sampler for displacement textures
+	eDisplacementFactors = 12,	// Per-material displacement factors from glTF
+	eMaterialDispIndex = 13,	// Maps materialID -> displacement array index (-1 if no displacement)
 
 };
 
 // Binding points for descriptors
 enum SilhouetteBindings
 {
-  eObjectID,    // In: the object ID image
-  eRGBAIImage,  // Out: the output image
+	eObjectID,    // In: the object ID image
+	eRGBAIImage,  // Out: the output image
 };
 
 enum DebugMethod
 {
-  eNone,
-  eBaseColor,
-  eMetallic,
-  eRoughness,
-  eNormal,
-  eTangent,
-  eBitangent,
-  eEmissive,
-  eOpacity,
-  eTexCoord0,
-  eTexCoord1,
+	eNone,
+	eBaseColor,
+	eMetallic,
+	eRoughness,
+	eNormal,
+	eTangent,
+	eBitangent,
+	eEmissive,
+	eOpacity,
+	eTexCoord0,
+	eTexCoord1,
 };
 
 
 // Camera info
 struct SceneFrameInfo
 {
-  float4x4    viewMatrix;                   // View matrix
-  float4x4    projInv;                      // Inverse projection matrix
-  float4x4    viewInv;                      // Inverse view matrix
-  float4x4    viewProjMatrix;               // View-projection matrix (P*V)
-  float4x4    prevMVP;                      // Previous view-projection matrix
-  float       envRotation;                  // Environment rotation (used for the HDR)
-  float       envBlur;                      // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
-  float       envIntensity = 1.f;           // Environment intensity
-  int         useSolidBackground;           // Use solid background color (0==false, 1==true)
-  float3      backgroundColor;              // Background color when using solid background
-  int         environmentType        = 0;   // Environment type; 0: sky, 1: environment map
-  int         selectedRenderNode     = -1;  // Selected render node
-  DebugMethod debugMethod            = DebugMethod::eNone;  // Debug method
-  int         useInfinitePlane       = 0;
-  float       infinitePlaneDistance  = 0;
-  float3      infinitePlaneBaseColor = float3(0.5, 0.5, 0.5);  // Default gray color
-  float       infinitePlaneMetallic  = 0.0;                    // Default non-metallic
-  float       infinitePlaneRoughness = 0.5;                    // Default medium roughness
+	float4x4    viewMatrix;                   // View matrix
+	float4x4    projInv;                      // Inverse projection matrix
+	float4x4    viewInv;                      // Inverse view matrix
+	float4x4    viewProjMatrix;               // View-projection matrix (P*V)
+	float4x4    prevMVP;                      // Previous view-projection matrix
+	float       envRotation;                  // Environment rotation (used for the HDR)
+	float       envBlur;                      // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
+	float       envIntensity = 1.f;           // Environment intensity
+	int         useSolidBackground;           // Use solid background color (0==false, 1==true)
+	float3      backgroundColor;              // Background color when using solid background
+	int         environmentType = 0;   // Environment type; 0: sky, 1: environment map
+	int         selectedRenderNode = -1;  // Selected render node
+	DebugMethod debugMethod = DebugMethod::eNone;  // Debug method
+	int         useInfinitePlane = 0;
+	float       infinitePlaneDistance = 0;
+	float3      infinitePlaneBaseColor = float3(0.5, 0.5, 0.5);  // Default gray color
+	float       infinitePlaneMetallic = 0.0;                    // Default non-metallic
+	float       infinitePlaneRoughness = 0.5;                    // Default medium roughness
 };
 
 // Push constant
 struct PathtracePushConstant
 {
-  int   maxDepth              = 5;     // Maximum depth of the ray
-  int   frameCount            = 0;     // Frame number
-  float fireflyClampThreshold = 10.f;  // Firefly clamp threshold
-  int   numSamples            = 1;     // Number of samples per pixel per frame
-  int   totalSamples          = 0;     // Total samples accumulated so far
-  float focalDistance         = 0.0f;  // Focal distance for depth of field
-  float aperture              = 0.0f;  // Aperture for depth of field
-  int   useDlss               = 0;     // Use DLSS (0: no, 1: yes)
-  int   useQOLDS              = 0;     // Use QOLDS sampling (0: default, 1: QOLDS)
-  int   useFastMSX			  = 0;
-  int   useBoundedVNDF		  = 0;     // Use bounded VNDF for GGX sampling (0: no, 1: yes)
-  int   usePsiMarching        = 0;     // RMIP texel marching: 0=brute force, 1=ψ-guided (V26)
-  int   rmipMaxTraversalIters = 2560;  // RMIP: Maximum traversal iterations
-  float rmipMarchingScale     = 2.0f;  // RMIP: Leaf region size threshold (texels)
-  int   rmipMaxStackSize      = 32;    // RMIP: Maximum stack size for hierarchical traversal
-  int   renderSelection       = 1;     // Padding to align the structure
-  /// Infinite plane
-  float2                 jitter;               // Jitter for the DLSS
-  float2                 mouseCoord = {0, 0};  // Mouse coordinates (use for debug)
-  SceneFrameInfo*        frameInfo;            // Camera info
-  SkyPhysicalParameters* skyParams;            // Sky physical parameters
-  GltfScene*             gltfScene;            // GLTF sceneF
+	int   maxDepth = 5;     // Maximum depth of the ray
+	int   frameCount = 0;     // Frame number
+	float fireflyClampThreshold = 10.f;  // Firefly clamp threshold
+	int   numSamples = 1;     // Number of samples per pixel per frame
+	int   totalSamples = 0;     // Total samples accumulated so far
+	float focalDistance = 0.0f;  // Focal distance for depth of field
+	float aperture = 0.0f;  // Aperture for depth of field
+	int   useDlss = 0;     // Use DLSS (0: no, 1: yes)
+	int   useQOLDS = 0;     // Use QOLDS sampling (0: default, 1: QOLDS)
+	int   useFastMSX = 0;
+	int   useBoundedVNDF = 0;     // Use bounded VNDF for GGX sampling (0: no, 1: yes)
+	int   usePsiMarching = 0;     // RMIP texel marching: 0=brute force, 1=ψ-guided (V26)
+	int   rmipMaxTraversalIters = 2560;  // RMIP: Maximum traversal iterations
+	float rmipMarchingScale = 2.0f;  // RMIP: Leaf region size threshold (texels)
+	int   rmipMaxStackSize = 32;    // RMIP: Maximum stack size for hierarchical traversal
+	int   renderSelection = 1;     // Padding to align the structure
+	/// Infinite plane
+	float2                 jitter;               // Jitter for the DLSS
+	float2                 mouseCoord = { 0, 0 };  // Mouse coordinates (use for debug)
+	SceneFrameInfo* frameInfo;            // Camera info
+	SkyPhysicalParameters* skyParams;            // Sky physical parameters
+	GltfScene* gltfScene;            // GLTF sceneF
 
-  uint hasDisplacement;
+	uint hasDisplacement;
 };
 
 // Push constant
 struct RasterPushConstant
 {
-  int                    materialID   = 0;       // Material used by the rendering instance
-  int                    renderNodeID = 0;       // Node used by the rendering instance
-  int                    renderPrimID = 0;       // Primitive used by the rendering instance
-  float2                 mouseCoord   = {0, 0};  // Mouse coordinates (use for debug)
-  SceneFrameInfo*        frameInfo;              // Camera info
-  SkyPhysicalParameters* skyParams;              // Sky physical parameters
-  GltfScene*             gltfScene;              // GLTF sceneF
+	int                    materialID = 0;       // Material used by the rendering instance
+	int                    renderNodeID = 0;       // Node used by the rendering instance
+	int                    renderPrimID = 0;       // Primitive used by the rendering instance
+	float2                 mouseCoord = { 0, 0 };  // Mouse coordinates (use for debug)
+	SceneFrameInfo* frameInfo;              // Camera info
+	SkyPhysicalParameters* skyParams;              // Sky physical parameters
+	GltfScene* gltfScene;              // GLTF sceneF
 };
 
 
 struct SilhouettePushConstant
 {
-  float3 color;
+	float3 color;
 };
 
 NAMESPACE_SHADERIO_END()

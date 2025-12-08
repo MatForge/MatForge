@@ -44,7 +44,7 @@
 #include <nvvk/profiler_vk.hpp>
 #include "nvutils/parameter_registry.hpp"
 
-// Shader Input/Output
+ // Shader Input/Output
 #include "shaders/shaderio.h"  // Shared between host and device
 
 #include "renderer_pathtracer.hpp"
@@ -66,199 +66,196 @@ class GltfRenderer : public nvapp::IAppElement
 {
 
 public:
-  GltfRenderer(nvutils::ParameterRegistry* parameterReg);
-  ~GltfRenderer() override = default;
+    GltfRenderer(nvutils::ParameterRegistry* parameterReg);
+    ~GltfRenderer() override = default;
 
-  void                                        createScene(const std::filesystem::path& sceneFilename);
-  void                                        addToScene(const std::filesystem::path& sceneFilename);
-  void                                        createHDR(const std::filesystem::path& hdrFilename);
-  std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
-  void                                        registerRecentFilesHandler();
+    void                                        createScene(const std::filesystem::path& sceneFilename);
+    void                                        addToScene(const std::filesystem::path& sceneFilename);
+    void                                        createHDR(const std::filesystem::path& hdrFilename);
+    std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
+    void                                        registerRecentFilesHandler();
 
 private:
-  void onAttach(nvapp::Application* app) override;
-  void onDetach() override;
-  void onFileDrop(const std::filesystem::path& filename) override;
-  void onLastHeadlessFrame() override;
-  void onRender(VkCommandBuffer cmd) override;
-  void onResize(VkCommandBuffer cmd, const VkExtent2D& size) override;
-  void onUIMenu() override;
-  void onUIRender() override;
+    void onAttach(nvapp::Application* app) override;
+    void onDetach() override;
+    void onFileDrop(const std::filesystem::path& filename) override;
+    void onLastHeadlessFrame() override;
+    void onRender(VkCommandBuffer cmd) override;
+    void onResize(VkCommandBuffer cmd, const VkExtent2D& size) override;
+    void onUIMenu() override;
+    void onUIRender() override;
 
-  bool save(const std::filesystem::path& filename);
-  bool updateAnimation(VkCommandBuffer cmd);
-  bool updateFrameCounter();
-  bool processQueuedCommandBuffers();
+    bool save(const std::filesystem::path& filename);
+    bool updateAnimation(VkCommandBuffer cmd);
+    bool updateFrameCounter();
+    bool processQueuedCommandBuffers();
 
-  void clearGbuffer(VkCommandBuffer cmd);
-  void compileShaders();
-  void createDescriptorSets();
-  void createResourceBuffers();
-  void createVulkanScene();
-  void createQoldsBuffers();
-  void destroyResources();
-  void resetFrame();
-  void silhouette(VkCommandBuffer cmd);
-  void tonemap(VkCommandBuffer cmd);
-  void updateNodeToRenderNodeMap();
-  void updateTextures();
-  void updateHdrImages();
+    void clearGbuffer(VkCommandBuffer cmd);
+    void compileShaders();
+    void createDescriptorSets();
+    void createResourceBuffers();
+    void createVulkanScene();
+    void createQoldsBuffers();
+    void destroyResources();
+    void resetFrame();
+    void silhouette(VkCommandBuffer cmd);
+    void tonemap(VkCommandBuffer cmd);
+    void updateNodeToRenderNodeMap();
+    void updateTextures();
+    void updateHdrImages();
 
-  bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
+    bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
 
-  /////
-  /// Convergence Testing
-  void startConvergenceTest(bool useQOLDS);
-  void startCombinedConvergenceTest();  // Run both QOLDS and PCG tests sequentially
-  void updateConvergenceTest(VkCommandBuffer cmd);
+    /////
+    /// Convergence Testing
+    void startConvergenceTest(bool useQOLDS);
+    void startCombinedConvergenceTest();  // Run both QOLDS and PCG tests sequentially
+    void updateConvergenceTest(VkCommandBuffer cmd);
 
-  /////
-  /// VNDF Analysis
-  void startVNDFTest(bool useBoundedVNDF);
-  void updateVNDFTest(VkCommandBuffer cmd);
+    /////
+    /// VNDF Analysis
+    void startVNDFTest(bool useBoundedVNDF);
+    void updateVNDFTest(VkCommandBuffer cmd);
 
-  /////
-  /// MSX Analysis
-  void setupMSXAnalyzerCallbacks();
-  void startMSXTest(bool useFastMSX);
-  void updateMSXTest(VkCommandBuffer cmd);
+    /////
+    /// MSX Analysis
+    void setupMSXAnalyzerCallbacks();
+    void startMSXTest(bool useFastMSX);
+    void updateMSXTest(VkCommandBuffer cmd);
 
-  /////
-  /// RMIP Analysis (PRI Marching Performance)
-  void startRMIPTest(bool usePsiMarching);
-  void updateRMIPTest(VkCommandBuffer cmd);
+    /////
+    /// RMIP Analysis (PRI Marching Performance)
+    void startRMIPTest(bool usePsiMarching);
+    void updateRMIPTest(VkCommandBuffer cmd);
 
-  /////
-  /// UI
-  void          renderUI();
-  void          renderMenu();
-  void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
-  void          removeFromRecentFiles(const std::filesystem::path& filePath);
-  void          mouseClickedInViewport();
-  nvutils::Bbox getRenderNodeBbox(int nodeID);
-  void          windowTitle();
-  void          applyGltfCamera(int cameraIndex);
-  void          setGltfCameraFromView(int cameraIndex);
-  void          loadHdrFileDialog();
+    /////
+    /// UI
+    void          renderUI();
+    void          renderMenu();
+    void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
+    void          removeFromRecentFiles(const std::filesystem::path& filePath);
+    void          mouseClickedInViewport();
+    nvutils::Bbox getRenderNodeBbox(int nodeID);
+    void          windowTitle();
+    void          applyGltfCamera(int cameraIndex);
+    void          setGltfCameraFromView(int cameraIndex);
+    void          loadHdrFileDialog();
 
-  // Recent files management
-  std::vector<std::filesystem::path> m_recentFiles;
+    // Recent files management
+    std::vector<std::filesystem::path> m_recentFiles;
 
-  // File dialog directories
-  std::filesystem::path m_lastSceneDirectory;
-  std::filesystem::path m_lastHdrDirectory;
+    // File dialog directories
+    std::filesystem::path m_lastSceneDirectory;
+    std::filesystem::path m_lastHdrDirectory;
 
-  //--------------------------------------------------------------------------------------------------
-  //
-  //
-  nvapp::Application*                         m_app{};               // Application pointer
-  VkDevice                                    m_device{};            // Convenient
-  nvvk::RayPicker                             m_rayPicker{};         // Ray picker
-  nvutils::ProfilerTimeline*                  m_profilerTimeline{};  // Timeline profiler
-  nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
-  std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
+    //--------------------------------------------------------------------------------------------------
+    //
+    //
+    nvapp::Application* m_app{};               // Application pointer
+    VkDevice                                    m_device{};            // Convenient
+    nvvk::RayPicker                             m_rayPicker{};         // Ray picker
+    nvutils::ProfilerTimeline* m_profilerTimeline{};  // Timeline profiler
+    nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
+    std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
 
-  nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer
-  bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
+    nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer
+    bool                      m_cpuTimePrinted{ false };  // Track if CPU time has been printed
 
-  Resources  m_resources;
-  RmipBuilder m_rmipBuilder;
-  AabbComputer m_aabbComputer;  // AABB computer for displacement mapping
-  PathTracer m_pathTracer;  // Path tracer renderer
-  Rasterizer m_rasterizer;  // Rasterizer renderer
+    Resources  m_resources;
+    RmipBuilder m_rmipBuilder;
+    AabbComputer m_aabbComputer;  // AABB computer for displacement mapping
+    PathTracer m_pathTracer;  // Path tracer renderer
+    Rasterizer m_rasterizer;  // Rasterizer renderer
 
-  UiSceneGraph     m_uiSceneGraph;  // Model UI
-  BusyWindow       m_busy;
-  AnimationControl m_animControl;  // Animation control (UI)
-  Silhouette       m_silhouette;   // Silhouette renderer
+    UiSceneGraph     m_uiSceneGraph;  // Model UI
+    BusyWindow       m_busy;
+    AnimationControl m_animControl;  // Animation control (UI)
+    Silhouette       m_silhouette;   // Silhouette renderer
 
-  // QOLDS sampling
-  std::unique_ptr<QOLDSBuilder> m_qoldsBuilder;  // QOLDS matrix generator
+    // QOLDS sampling
+    std::unique_ptr<QOLDSBuilder> m_qoldsBuilder;  // QOLDS matrix generator
 
-  // Convergence analysis
-  matforge::ConvergenceAnalyzer m_convergenceAnalyzer;  // Convergence analyzer for QOLDS testing
+    // Convergence analysis
+    matforge::ConvergenceAnalyzer m_convergenceAnalyzer;  // Convergence analyzer for QOLDS testing
 
-  // Convergence test state
-  bool                     m_convergenceTestActive{false};
-  bool                     m_convergenceTestUseQOLDS{false};
-  bool                     m_convergenceTestPendingFinalize{false};
-  bool                     m_convergenceTestRunBoth{false};  // Run both QOLDS and PCG tests sequentially
-  std::vector<uint32_t>    m_convergenceTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
-  size_t                   m_convergenceTestCurrentIndex{0};
-  std::chrono::steady_clock::time_point m_convergenceTestStartTime;
-  std::chrono::steady_clock::time_point m_convergenceTestLastCaptureTime;  // For time delta calculation
+    // Convergence test state
+    bool                     m_convergenceTestActive{ false };
+    bool                     m_convergenceTestUseQOLDS{ false };
+    bool                     m_convergenceTestPendingFinalize{ false };
+    bool                     m_convergenceTestRunBoth{ false };  // Run both QOLDS and PCG tests sequentially
+    std::vector<uint32_t>    m_convergenceTestSampleCounts{ 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 };
+    size_t                   m_convergenceTestCurrentIndex{ 0 };
+    std::chrono::steady_clock::time_point m_convergenceTestStartTime;
+    std::chrono::steady_clock::time_point m_convergenceTestLastCaptureTime;  // For time delta calculation
 
-  // VNDF analysis
-  matforge::VNDFAnalyzer m_vndfAnalyzer;  // VNDF analyzer for Bounded vs Standard comparison
+    // VNDF analysis
+    matforge::VNDFAnalyzer m_vndfAnalyzer;  // VNDF analyzer for Bounded vs Standard comparison
 
-  // VNDF test state
-  bool                     m_vndfTestActive{false};
-  bool                     m_vndfTestUseBoundedVNDF{false};
-  bool                     m_vndfTestPendingFinalize{false};
-  bool                     m_vndfTestRunBoth{false};  // Run both Bounded and Standard tests sequentially
-  std::vector<uint32_t>    m_vndfTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
-  size_t                   m_vndfTestCurrentIndex{0};
-  std::chrono::steady_clock::time_point m_vndfTestStartTime;
-  std::chrono::steady_clock::time_point m_vndfTestLastCaptureTime;
+    // VNDF test state
+    bool                     m_vndfTestActive{ false };
+    bool                     m_vndfTestUseBoundedVNDF{ false };
+    bool                     m_vndfTestPendingFinalize{ false };
+    bool                     m_vndfTestRunBoth{ false };  // Run both Bounded and Standard tests sequentially
+    std::vector<uint32_t>    m_vndfTestSampleCounts{ 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 };
+    size_t                   m_vndfTestCurrentIndex{ 0 };
+    std::chrono::steady_clock::time_point m_vndfTestStartTime;
+    std::chrono::steady_clock::time_point m_vndfTestLastCaptureTime;
 
-  // MSX analysis
-  matforge::MSXAnalyzer m_msxAnalyzer;  // MSX analyzer for Fast-MSX testing
+    // MSX analysis
+    matforge::MSXAnalyzer m_msxAnalyzer;  // MSX analyzer for Fast-MSX testing
 
-  // MSX test state
-  bool                     m_msxTestActive{false};
-  bool                     m_msxTestUseFastMSX{false};
-  bool                     m_msxTestPendingFinalize{false};
-  bool                     m_msxTestRunBoth{false};  // Run both GGX and FastMSX tests sequentially
-  std::vector<uint32_t>    m_msxTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
-  size_t                   m_msxTestCurrentIndex{0};
-  matforge::MSXTestConfig  m_msxTestConfig;
-  std::chrono::steady_clock::time_point m_msxTestStartTime;
+    // MSX test state
+    bool                     m_msxTestActive{ false };
+    bool                     m_msxTestUseFastMSX{ false };
+    bool                     m_msxTestPendingFinalize{ false };
+    bool                     m_msxTestRunBoth{ false };  // Run both GGX and FastMSX tests sequentially
+    std::vector<uint32_t>    m_msxTestSampleCounts{ 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 };
+    size_t                   m_msxTestCurrentIndex{ 0 };
+    matforge::MSXTestConfig  m_msxTestConfig;
+    std::chrono::steady_clock::time_point m_msxTestStartTime;
 
-  // RMIP analysis (PRI Marching Performance)
-  matforge::RMIPAnalyzer   m_rmipAnalyzer;  // RMIP analyzer for PRI marching testing
+    // RMIP analysis (PRI Marching Performance)
+    matforge::RMIPAnalyzer   m_rmipAnalyzer;  // RMIP analyzer for PRI marching testing
 
-  // RMIP test state
-  bool                     m_rmipTestActive{false};
-  bool                     m_rmipTestUsePsiMarching{false};
-  bool                     m_rmipTestPendingFinalize{false};
-  bool                     m_rmipTestRunBoth{false};  // Run both BruteForce and PsiMarching tests sequentially
-  std::vector<uint32_t>    m_rmipTestSampleCounts{1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
-  size_t                   m_rmipTestCurrentIndex{0};
-  std::chrono::steady_clock::time_point m_rmipTestStartTime;
+    // RMIP test state
+    bool                     m_rmipTestActive{ false };
+    bool                     m_rmipTestUsePsiMarching{ false };
+    bool                     m_rmipTestPendingFinalize{ false };
+    bool                     m_rmipTestRunBoth{ false };  // Run both BruteForce and PsiMarching tests sequentially
+    std::vector<uint32_t>    m_rmipTestSampleCounts{ 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 };
+    size_t                   m_rmipTestCurrentIndex{ 0 };
+    std::chrono::steady_clock::time_point m_rmipTestStartTime;
 
-  std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
+    std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
 
-  // Command buffer queue for deferred submission
-  struct CommandBufferInfo
-  {
-    VkCommandBuffer cmdBuffer{};
-    bool            isBlasBuild{false};  // Indicates if this is a BLAS build command
-  };
-  std::queue<CommandBufferInfo> m_cmdBufferQueue;
-  std::mutex                    m_cmdBufferQueueMutex;
+    // Command buffer queue for deferred submission
+    struct CommandBufferInfo
+    {
+        VkCommandBuffer cmdBuffer{};
+        bool            isBlasBuild{ false };  // Indicates if this is a BLAS build command
+    };
+    std::queue<CommandBufferInfo> m_cmdBufferQueue;
+    std::mutex                    m_cmdBufferQueueMutex;
 
-  glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
+    glm::mat4 m_prevMVP{ 1.f };  // Previous MVP matrix for motion vectors
 
-  VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
+    VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
 
-  struct RmipData
-  {
-      nvvk::Image image;
-      VkImageView view{ VK_NULL_HANDLE };
-      float       displacementFactor = 1.0f;
-      int         texCoord = 0;
-      uint32_t    displacementTextureIndex = UINT32_MAX;
-      float       maxDisplacement = 0.0f;
-      bool        hasDisplacement = false;
-      // UV transform from KHR_texture_transform (column-major 3x2 stored as 6 floats)
-      // [m00, m10, m01, m11, m02, m12] for transformedUV = uv * mat2 + offset
-      std::array<float, 6> uvTransform = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};  // Identity
-  };
+    struct RmipData
+    {
+        nvvk::Image image;
+        VkImageView view{ VK_NULL_HANDLE };
+        float       displacementFactor = 1.0f;
+        int         texCoord = 0;
+        uint32_t    displacementTextureIndex = UINT32_MAX;
+        float       maxDisplacement = 0.0f;
+        bool        hasDisplacement = false;
+    };
 
-  std::vector<RmipData> m_displacementRMIPs;
-  void buildDisplacementRMIPs(VkCommandBuffer cmd);
-  void cleanupDisplacementRMIPs();
-  void passRMIPToPathTracer();
-  void updateDisplacementFactors(VkCommandBuffer cmd);  // Update displacement factors from glTF when material changes
-  bool checkMaterialHasDisplacement(int materialIndex);
+    std::vector<RmipData> m_displacementRMIPs;
+    void buildDisplacementRMIPs(VkCommandBuffer cmd);
+    void cleanupDisplacementRMIPs();
+    void passRMIPToPathTracer();
+    void updateDisplacementFactors(VkCommandBuffer cmd);  // Update displacement factors from glTF when material changes
+    bool checkMaterialHasDisplacement(int materialIndex);
 };
