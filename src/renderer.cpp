@@ -1311,13 +1311,13 @@ void GltfRenderer::createDescriptorSets()
     m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eQoldsSeeds, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
         VK_SHADER_STAGE_ALL);
 
-    // RMIP displacement bindings (8-11)
+    // RMIP displacement bindings (8-13)
     // Note: Keep total push descriptors <= 32 (maxPushDescriptors limit)
-    // Current: 1 (TLAS) + 10 (output images) + 8 (RMIP) + 8 (displacement) + 1 + 1 = 29
+    // Current: 1 (TLAS) + 10 (images) + 2 (QOLDS) + 8 (RMIP) + 7 (disp) + 2 (samplers) + 2 (buffers) = 32
     m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eRmipTextures,
         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8, VK_SHADER_STAGE_ALL);  // Array of RMIP textures
     m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementTextures,
-        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8, VK_SHADER_STAGE_ALL);  // Displacement textures
+        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 7, VK_SHADER_STAGE_ALL);  // Displacement textures
     m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eRmipSampler,
         VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL);  // RMIP sampler
     m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eDisplacementSampler,
@@ -1481,12 +1481,19 @@ void GltfRenderer::destroyResources()
         }
     }
 
-    m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);
-    m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
-    m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
-    m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
-    m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
-    m_resources.allocator.destroyBuffer(m_resources.bMaterialDispIndex);
+    // Destroy buffers with null checks (some may not have been created)
+    if (m_resources.bFrameInfo.buffer != VK_NULL_HANDLE)
+        m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);
+    if (m_resources.bSkyParams.buffer != VK_NULL_HANDLE)
+        m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
+    if (m_resources.bQoldsMatrices.buffer != VK_NULL_HANDLE)
+        m_resources.allocator.destroyBuffer(m_resources.bQoldsMatrices);
+    if (m_resources.bQoldsSeeds.buffer != VK_NULL_HANDLE)
+        m_resources.allocator.destroyBuffer(m_resources.bQoldsSeeds);
+    if (m_resources.bDisplacementFactors.buffer != VK_NULL_HANDLE)
+        m_resources.allocator.destroyBuffer(m_resources.bDisplacementFactors);
+    if (m_resources.bMaterialDispIndex.buffer != VK_NULL_HANDLE)
+        m_resources.allocator.destroyBuffer(m_resources.bMaterialDispIndex);
 
     vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
     vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);
@@ -1515,6 +1522,9 @@ void GltfRenderer::destroyResources()
 
     // Destroy MSX analyzer before allocator to prevent memory leak
     m_msxAnalyzer.destroy();
+
+    // Destroy RMIP analyzer before allocator to prevent memory leak
+    m_rmipAnalyzer.destroy();
 
     // Clean up RMIP resources BEFORE destroying allocator
     for (auto& rmipData : m_displacementRMIPs)
@@ -2397,7 +2407,7 @@ void GltfRenderer::buildDisplacementRMIPs(VkCommandBuffer cmd)
             .arrayLayers = numLayers,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };

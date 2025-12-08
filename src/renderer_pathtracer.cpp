@@ -1100,9 +1100,10 @@ void PathTracer::writeDisplacementDescriptors(VkCommandBuffer cmd, Resources& re
     if (!m_hasDisplacement)
         return;
 
-    // Array size must match descriptor binding declaration (8 elements each)
+    // Array size must match descriptor binding declaration
+    // Note: Total push descriptors limited to 32, so DISP is 7 not 8
     constexpr uint32_t RMIP_ARRAY_SIZE = 8;
-    constexpr uint32_t DISP_ARRAY_SIZE = 8;
+    constexpr uint32_t DISP_ARRAY_SIZE = 7;
 
     // Collect RMIP texture views and displacement texture views
     std::vector<VkDescriptorImageInfo> rmipImageInfos;
