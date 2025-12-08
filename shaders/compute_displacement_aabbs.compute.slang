@@ -77,46 +77,30 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 n1 = vertexNormals[i1];
     float3 n2 = vertexNormals[i2];
 
-    // Compute triangle bounds without displacement
-    float3 minBounds = min(min(v0, v1), v2);
-    float3 maxBounds = max(max(v0, v1), v2);
+    // Normalize vertex normals (in case they aren't normalized)
+    float3 nn0 = normalize(n0);
+    float3 nn1 = normalize(n1);
+    float3 nn2 = normalize(n2);
 
-    // Expand bounds by displacement range along normals
-    // For each vertex, displacement can push the surface along its normal
+    // Method 2: Normal-aware expansion (accurate, tight bounds)
+    // Compute displaced vertex positions at min and max displacement
+    // This creates much tighter AABBs than uniform expansion
+    float3 d0_min = v0 + nn0 * params.minDisplacement;
+    float3 d0_max = v0 + nn0 * params.maxDisplacement;
+    float3 d1_min = v1 + nn1 * params.minDisplacement;
+    float3 d1_max = v1 + nn1 * params.maxDisplacement;
+    float3 d2_min = v2 + nn2 * params.minDisplacement;
+    float3 d2_max = v2 + nn2 * params.maxDisplacement;
 
-    // Method 1: Conservative - expand by max displacement in all directions
-    // This is simple but may be overly conservative
-    float maxExpansion = abs(params.maxDisplacement);
-    float minExpansion = abs(params.minDisplacement);
-    float expansion = max(maxExpansion, minExpansion);
+    // Compute AABB of all displaced vertex positions (6 points total)
+    float3 minBounds = min(min(min(min(min(d0_min, d0_max), d1_min), d1_max), d2_min), d2_max);
+    float3 maxBounds = max(max(max(max(max(d0_min, d0_max), d1_min), d1_max), d2_min), d2_max);
 
-    // Add a small epsilon for numerical stability
-    expansion += 0.001;
-
-    minBounds -= float3(expansion, expansion, expansion);
-    maxBounds += float3(expansion, expansion, expansion);
-
-    // Method 2: Normal-aware expansion (more accurate)
-    // Compute the maximum extent along each normal direction
-    // This would be:
-    // for each vertex i in {0, 1, 2}:
-    //   displaced_min_i = vi + ni * minDisplacement
-    //   displaced_max_i = vi + ni * maxDisplacement
-    // Then compute AABB of all displaced positions
-
-    // Uncomment for normal-aware expansion (more accurate but more complex):
-    /*
-    float3 d0_min = v0 + n0 * params.minDisplacement;
-    float3 d0_max = v0 + n0 * params.maxDisplacement;
-    float3 d1_min = v1 + n1 * params.minDisplacement;
-    float3 d1_max = v1 + n1 * params.maxDisplacement;
-    float3 d2_min = v2 + n2 * params.minDisplacement;
-    float3 d2_max = v2 + n2 * params.maxDisplacement;
-
-    // Compute AABB of all displaced vertex positions
-    minBounds = min(min(min(min(min(d0_min, d0_max), d1_min), d1_max), d2_min), d2_max);
-    maxBounds = max(max(max(max(max(d0_min, d0_max), d1_min), d1_max), d2_min), d2_max);
-    */
+    // Add a small epsilon for numerical stability and to account for
+    // displacement variations within the triangle (not just at vertices)
+    float epsilon = 0.001;
+    minBounds -= float3(epsilon, epsilon, epsilon);
+    maxBounds += float3(epsilon, epsilon, epsilon);
 
     // Write AABB
     VkAabbPositionsKHR aabb;
